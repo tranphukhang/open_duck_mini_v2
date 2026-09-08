@@ -27,6 +27,18 @@
         <geom group="3"/>
       </default>
     </default>
+    <!-- Additional joints_properties.xml -->
+    <default class="sts3215">
+      <geom contype="0" conaffinity="0"/>
+      <joint damping="0.56" frictionloss="0.068" armature="0.027"/>
+      <!-- <position kp="17.12" kv="0.0" forcerange="-3.23 3.23"/> -->
+      <position kp="13.37" kv="0.0" forcerange="-3.23 3.23"/>
+    </default>
+    <default class="backlash">
+      <!-- +/- 0.5° of backlash -->
+      <joint damping="0.01" frictionloss="0" armature="0.01" limited="true"
+        range="-0.008726646259971648 0.008726646259971648"/>
+    </default>
   </default>
   <!-- Additional sensors.xml -->
   <sensor>
@@ -46,20 +58,7 @@
     <framepos objtype="site" objname="left_foot" name="left_foot_pos"/>
     <framepos objtype="site" objname="right_foot" name="right_foot_pos"/>
   </sensor>
-  <!-- Additional joints_properties.xml -->
-  <default>
-    <default class="sts3215">
-      <geom contype="0" conaffinity="0"/>
-      <joint damping="0.56" frictionloss="0.068" armature="0.027"/>
-      <!-- <position kp="17.12" kv="0.0" forcerange="-3.23 3.23"/> -->
-      <position kp="13.37" kv="0.0" forcerange="-3.23 3.23"/>
-    </default>
-    <default class="backlash">
-      <!-- +/- 0.5° of backlash -->
-      <joint damping="0.01" frictionloss="0" armature="0.01" limited="true"
-        range="-0.008726646259971648 0.008726646259971648"/>
-    </default>
-  </default>
+  
   <worldbody>
     <body name="base" pos="0 0 0.22">
       <freejoint name="floating_base"/>
