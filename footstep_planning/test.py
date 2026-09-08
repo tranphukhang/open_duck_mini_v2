@@ -1,43 +1,36 @@
 import numpy as np
 
-try:
+from com_reference import (
+    compute_com_reference,
+)
 
-    from .walking_fsm import (
-        WalkingFSM,
-        WalkingPhase,
-        StepType,
-    )
-
-except ImportError:
-
-    from walking_fsm import (
-        WalkingFSM,
-        WalkingPhase,
-        StepType,
-    )
+from swing_trajectory import (
+    compute_swing_trajectory,
+)
 
 
 np.set_printoptions(
-    precision=6,
+    precision=8,
     suppress=True,
 )
 
 
 # ============================================================
-# GAIT PARAMETERS
+# PARAMETERS
 # ============================================================
-
-STEP_LENGTH = 0.04
-
-FEET_SPACING = 0.16
 
 SS_DURATION = 0.18
 
-DS_DURATION = 0.09
+SWING_HEIGHT = 0.04
+
+COM_HEIGHT = 0.205
+
+# Settled CoM obtained previously from MuJoCo.
+COM_Y0 = -0.000399
 
 
 # ============================================================
-# SETTLED FOOT POSITIONS FROM PREVIOUS TEST
+# SETTLED FOOT POSITIONS
 # ============================================================
 
 P_LEFT_INITIAL = np.array(
@@ -49,11 +42,23 @@ P_LEFT_INITIAL = np.array(
     dtype=float,
 )
 
+
 P_RIGHT_INITIAL = np.array(
     [
         -0.029984,
         -0.084298,
         +0.002553,
+    ],
+    dtype=float,
+)
+
+
+# First half-step target from WalkingFSM
+P_RIGHT_TARGET = np.array(
+    [
+        -0.009596,
+        -0.080176,
+        +0.002461,
     ],
     dtype=float,
 )
@@ -89,727 +94,566 @@ def assert_close(
         )
 
 
-def make_fsm():
-
-    return WalkingFSM(
-        p_left_initial=(
-            P_LEFT_INITIAL
-        ),
-
-        p_right_initial=(
-            P_RIGHT_INITIAL
-        ),
-
-        step_length=(
-            STEP_LENGTH
-        ),
-
-        feet_spacing=(
-            FEET_SPACING
-        ),
-
-        single_support_duration=(
-            SS_DURATION
-        ),
-
-        double_support_duration=(
-            DS_DURATION
-        ),
-
-        first_swing_side="right",
-    )
-
-
 # ============================================================
 # TEST 1
-# INITIAL STATE
+# INITIAL DOUBLE SUPPORT
 # ============================================================
 
 separator()
 print("TEST 1 - INITIAL DOUBLE SUPPORT")
 separator()
 
-fsm = make_fsm()
 
-state = fsm.get_state()
-
-print(
-    f"phase = "
-    f"{state.phase.value}"
+p_com, v_com = compute_com_reference(
+    left_foot_position=P_LEFT_INITIAL,
+    right_foot_position=P_RIGHT_INITIAL,
+    com_y=COM_Y0,
+    com_height=COM_HEIGHT,
 )
 
-if (
-    state.phase
-    !=
-    WalkingPhase.INITIAL_DOUBLE_SUPPORT
-):
 
-    raise AssertionError(
-        "FSM must start in INITIAL_DOUBLE_SUPPORT."
-    )
+expected_x = 0.5 * (
+    P_LEFT_INITIAL[0]
+    +
+    P_RIGHT_INITIAL[0]
+)
+
+
+expected_p = np.array(
+    [
+        expected_x,
+        COM_Y0,
+        COM_HEIGHT,
+    ]
+)
+
+
+print(
+    "p_com_ref =",
+    p_com,
+)
+
+print(
+    "v_com_ref =",
+    v_com,
+)
+
+
+assert_close(
+    p_com,
+    expected_p,
+    message=(
+        "Initial CoM reference is wrong."
+    ),
+)
+
+
+assert_close(
+    v_com,
+    np.zeros(3),
+    message=(
+        "CoM velocity during static DS "
+        "must be zero."
+    ),
+)
+
 
 print("[OK]")
 
 
 # ============================================================
 # TEST 2
-# START HALF STEP
+# MID-SWING
 # ============================================================
 
 separator()
-print("TEST 2 - START HALF STEP")
+print("TEST 2 - MID-SWING")
 separator()
 
-fsm.update(
-    DS_DURATION
-)
 
-state = fsm.get_state()
-
-print(
-    f"phase   = "
-    f"{state.phase.value}"
-)
-
-print(
-    f"type    = "
-    f"{state.step_type.value}"
-)
-
-print(
-    f"support = "
-    f"{state.support_side}"
-)
-
-print(
-    f"swing   = "
-    f"{state.swing_side}"
-)
-
-print(
-    f"start   = "
-    f"{state.swing_start}"
-)
-
-print(
-    f"target  = "
-    f"{state.swing_target}"
-)
-
-
-if (
-    state.phase
-    !=
-    WalkingPhase.SINGLE_SUPPORT
-):
-
-    raise AssertionError(
-        "Expected SINGLE_SUPPORT."
+p_right_ref, v_right_ref = (
+    compute_swing_trajectory(
+        start_position=P_RIGHT_INITIAL,
+        target_position=P_RIGHT_TARGET,
+        phase_time=(
+            0.5 * SS_DURATION
+        ),
+        duration=SS_DURATION,
+        swing_height=SWING_HEIGHT,
     )
+)
 
 
-if (
-    state.step_type
-    !=
-    StepType.START_HALF_STEP
-):
+# Left foot is support -> fixed
+p_left_ref = (
+    P_LEFT_INITIAL.copy()
+)
 
-    raise AssertionError(
-        "First step must be START_HALF_STEP."
-    )
-
-
-if state.swing_side != "right":
-
-    raise AssertionError(
-        "First swing foot must be RIGHT."
-    )
+v_left_ref = np.zeros(
+    3
+)
 
 
-expected_half_x = (
-    P_LEFT_INITIAL[0]
+p_com, v_com = compute_com_reference(
+    left_foot_position=p_left_ref,
+    right_foot_position=p_right_ref,
+
+    left_foot_velocity=v_left_ref,
+    right_foot_velocity=v_right_ref,
+
+    com_y=COM_Y0,
+    com_height=COM_HEIGHT,
+)
+
+
+expected_x = 0.5 * (
+    p_left_ref[0]
     +
-    0.5 * STEP_LENGTH
+    p_right_ref[0]
+)
+
+
+expected_vx = 0.5 * (
+    v_left_ref[0]
+    +
+    v_right_ref[0]
+)
+
+
+print(
+    "left foot ref  =",
+    p_left_ref,
+)
+
+print(
+    "right foot ref =",
+    p_right_ref,
+)
+
+print(
+    "right foot vel =",
+    v_right_ref,
+)
+
+print(
+    "\np_com_ref =",
+    p_com,
+)
+
+print(
+    "v_com_ref =",
+    v_com,
 )
 
 
 assert_close(
-    state.swing_target[0],
-    expected_half_x,
+    p_com[0],
+    expected_x,
     message=(
-        "Start half-step X target is wrong."
+        "CoM X midpoint is wrong."
     ),
 )
 
 
-print(
-    f"\nExpected half step = "
-    f"{0.5 * STEP_LENGTH:.6f} m"
+assert_close(
+    v_com[0],
+    expected_vx,
+    message=(
+        "CoM X velocity is wrong."
+    ),
 )
+
 
 print("[OK]")
 
 
 # ============================================================
 # TEST 3
-# LAND FIRST HALF STEP
+# Y MUST REMAIN CONSTANT
 # ============================================================
 
 separator()
-print("TEST 3 - FIRST HALF STEP LANDING")
+print("TEST 3 - CONSTANT COM Y")
 separator()
 
-first_target = (
-    state.swing_target.copy()
-)
 
-fsm.update(
-    SS_DURATION
-)
-
-state = fsm.get_state()
-
-if (
-    state.phase
-    !=
-    WalkingPhase.DOUBLE_SUPPORT
-):
-
-    raise AssertionError(
-        "After first swing robot must enter DS."
-    )
-
-
-assert_close(
-    state.right_contact_position,
-    first_target,
-    message=(
-        "Right foot was not committed "
-        "at first half-step target."
-    ),
+foot_midpoint_y = 0.5 * (
+    p_left_ref[1]
+    +
+    p_right_ref[1]
 )
 
 
 print(
-    "right landed =",
-    state.right_contact_position,
+    f"foot midpoint y = "
+    f"{foot_midpoint_y:+.8f}"
 )
 
-print("[OK]")
+print(
+    f"CoM y reference = "
+    f"{p_com[1]:+.8f}"
+)
+
+
+assert_close(
+    p_com[1],
+    COM_Y0,
+    message=(
+        "CoM Y must remain equal "
+        "to the initial reference."
+    ),
+)
+
+
+# This test deliberately verifies that
+# CoM Y is NOT generated from the feet midpoint.
+if abs(
+    foot_midpoint_y
+    -
+    COM_Y0
+) > 1e-8:
+
+    if np.isclose(
+        p_com[1],
+        foot_midpoint_y,
+        atol=1e-9,
+    ):
+
+        raise AssertionError(
+            "CoM Y incorrectly follows "
+            "the feet midpoint."
+        )
+
+
+print(
+    "[OK] CoM Y remains constant."
+)
 
 
 # ============================================================
 # TEST 4
-# FIRST NORMAL STEP
+# CONSTANT COM HEIGHT
 # ============================================================
 
 separator()
-print("TEST 4 - FIRST NORMAL STEP")
+print("TEST 4 - CONSTANT COM HEIGHT")
 separator()
 
-fsm.update(
-    DS_DURATION
-)
 
-state = fsm.get_state()
-
-print(
-    f"type    = "
-    f"{state.step_type.value}"
-)
-
-print(
-    f"support = "
-    f"{state.support_side}"
-)
-
-print(
-    f"swing   = "
-    f"{state.swing_side}"
-)
-
-print(
-    f"target  = "
-    f"{state.swing_target}"
-)
-
-
-if (
-    state.step_type
-    !=
-    StepType.NORMAL_STEP
-):
-
-    raise AssertionError(
-        "Expected NORMAL_STEP."
-    )
-
-
-if state.swing_side != "left":
-
-    raise AssertionError(
-        "Second swing foot must be LEFT."
-    )
-
-
-expected_x = (
-    first_target[0]
-    +
-    STEP_LENGTH
+assert_close(
+    p_com[2],
+    COM_HEIGHT,
+    message=(
+        "CoM height is wrong."
+    ),
 )
 
 
 assert_close(
-    state.swing_target[0],
-    expected_x,
+    v_com[2],
+    0.0,
     message=(
-        "First normal step target is wrong."
+        "Vertical CoM velocity "
+        "must be zero."
     ),
 )
 
+
+print(
+    f"CoM height = "
+    f"{p_com[2]:.6f} m"
+)
 
 print("[OK]")
 
 
 # ============================================================
 # TEST 5
-# NORMAL ALTERNATING STEP
+# END OF FIRST SWING
 # ============================================================
 
 separator()
-print("TEST 5 - ALTERNATING NORMAL STEPS")
+print("TEST 5 - END OF FIRST SWING")
 separator()
 
-# Finish LEFT normal step.
-fsm.update(
-    SS_DURATION
+
+p_right_end, v_right_end = (
+    compute_swing_trajectory(
+        start_position=P_RIGHT_INITIAL,
+        target_position=P_RIGHT_TARGET,
+        phase_time=SS_DURATION,
+        duration=SS_DURATION,
+        swing_height=SWING_HEIGHT,
+    )
 )
 
-fsm.update(
-    DS_DURATION
+
+p_com_end, v_com_end = (
+    compute_com_reference(
+        left_foot_position=(
+            P_LEFT_INITIAL
+        ),
+
+        right_foot_position=(
+            p_right_end
+        ),
+
+        left_foot_velocity=(
+            np.zeros(3)
+        ),
+
+        right_foot_velocity=(
+            v_right_end
+        ),
+
+        com_y=COM_Y0,
+
+        com_height=COM_HEIGHT,
+    )
 )
 
-state = fsm.get_state()
 
-
-if (
-    state.step_type
-    !=
-    StepType.NORMAL_STEP
-):
-
-    raise AssertionError(
-        "Expected another NORMAL_STEP."
-    )
-
-
-if state.swing_side != "right":
-
-    raise AssertionError(
-        "Swing feet are not alternating."
-    )
+expected_end_x = 0.5 * (
+    P_LEFT_INITIAL[0]
+    +
+    P_RIGHT_TARGET[0]
+)
 
 
 print(
-    f"next swing = "
-    f"{state.swing_side}"
+    "p_com_end =",
+    p_com_end,
 )
 
 print(
-    f"target     = "
-    f"{state.swing_target}"
+    "v_com_end =",
+    v_com_end,
 )
+
+
+assert_close(
+    p_com_end[0],
+    expected_end_x,
+)
+
+
+assert_close(
+    v_com_end,
+    np.zeros(3),
+    message=(
+        "CoM velocity must return "
+        "to zero at swing landing."
+    ),
+)
+
 
 print("[OK]")
 
 
 # ============================================================
 # TEST 6
-# PRESS F DURING SINGLE SUPPORT
+# WHOLE SWING TRAJECTORY
 # ============================================================
 
 separator()
-print("TEST 6 - STOP REQUEST DURING WALKING")
+print("TEST 6 - WHOLE SWING COM TRAJECTORY")
 separator()
 
-# Move halfway through current RIGHT swing.
-fsm.update(
-    0.5 * SS_DURATION
-)
 
-before_stop = fsm.get_state()
-
-fsm.request_stop()
-
-after_stop = fsm.get_state()
-
-
-print(
-    f"phase before/after stop = "
-    f"{before_stop.phase.value}"
-)
-
-print(
-    f"stop_requested = "
-    f"{after_stop.stop_requested}"
+times = np.linspace(
+    0.0,
+    SS_DURATION,
+    1001,
 )
 
 
-# Request must NOT interrupt current step.
-if (
-    after_stop.phase
-    !=
-    WalkingPhase.SINGLE_SUPPORT
-):
+com_positions = []
 
-    raise AssertionError(
-        "request_stop() interrupted "
-        "the current swing."
+com_velocities = []
+
+
+for t in times:
+
+    p_right, v_right = (
+        compute_swing_trajectory(
+            start_position=(
+                P_RIGHT_INITIAL
+            ),
+
+            target_position=(
+                P_RIGHT_TARGET
+            ),
+
+            phase_time=t,
+
+            duration=(
+                SS_DURATION
+            ),
+
+            swing_height=(
+                SWING_HEIGHT
+            ),
+        )
+    )
+
+    p_com, v_com = (
+        compute_com_reference(
+            left_foot_position=(
+                P_LEFT_INITIAL
+            ),
+
+            right_foot_position=(
+                p_right
+            ),
+
+            left_foot_velocity=(
+                np.zeros(3)
+            ),
+
+            right_foot_velocity=(
+                v_right
+            ),
+
+            com_y=(
+                COM_Y0
+            ),
+
+            com_height=(
+                COM_HEIGHT
+            ),
+        )
+    )
+
+    com_positions.append(
+        p_com
+    )
+
+    com_velocities.append(
+        v_com
     )
 
 
-if (
-    after_stop.step_index
-    !=
-    before_stop.step_index
+com_positions = np.asarray(
+    com_positions
+)
+
+com_velocities = np.asarray(
+    com_velocities
+)
+
+
+# ------------------------------------------------------------
+# X monotonicity
+# ------------------------------------------------------------
+
+dx = np.diff(
+    com_positions[:, 0]
+)
+
+
+if np.any(
+    dx < -1e-10
 ):
 
     raise AssertionError(
-        "Current step changed immediately "
-        "after stop request."
+        "CoM X reference is not monotonic."
     )
 
 
-print(
-    "[OK] Current swing continues after F."
+# ------------------------------------------------------------
+# Constant Y
+# ------------------------------------------------------------
+
+assert_close(
+    com_positions[:, 1],
+    COM_Y0,
+    message=(
+        "CoM Y changed during swing."
+    ),
 )
+
+
+# ------------------------------------------------------------
+# Constant Z
+# ------------------------------------------------------------
+
+assert_close(
+    com_positions[:, 2],
+    COM_HEIGHT,
+    message=(
+        "CoM height changed during swing."
+    ),
+)
+
+
+print(
+    f"CoM x start = "
+    f"{com_positions[0,0]:+.8f} m"
+)
+
+print(
+    f"CoM x end   = "
+    f"{com_positions[-1,0]:+.8f} m"
+)
+
+print(
+    f"Max vx      = "
+    f"{np.max(com_velocities[:,0]):.8f} m/s"
+)
+
+
+print("[OK]")
 
 
 # ============================================================
 # TEST 7
-# FINISH CURRENT STEP
+# DOUBLE SUPPORT AFTER LANDING
 # ============================================================
 
 separator()
-print("TEST 7 - FINISH CURRENT STEP")
+print("TEST 7 - DOUBLE SUPPORT AFTER LANDING")
 separator()
 
-fsm.update(
-    0.5 * SS_DURATION
-)
 
-state = fsm.get_state()
+p_com_ds, v_com_ds = (
+    compute_com_reference(
+        left_foot_position=(
+            P_LEFT_INITIAL
+        ),
 
+        right_foot_position=(
+            P_RIGHT_TARGET
+        ),
 
-if (
-    state.phase
-    !=
-    WalkingPhase.DOUBLE_SUPPORT
-):
+        com_y=(
+            COM_Y0
+        ),
 
-    raise AssertionError(
-        "Robot must enter DS after "
-        "finishing current step."
+        com_height=(
+            COM_HEIGHT
+        ),
     )
-
-
-print(
-    "left  contact =",
-    state.left_contact_position,
 )
-
-print(
-    "right contact =",
-    state.right_contact_position,
-)
-
-print("[OK]")
-
-
-# ============================================================
-# TEST 8
-# CLOSING STEP
-# ============================================================
-
-separator()
-print("TEST 8 - CLOSING STEP")
-separator()
-
-# Finish DS after stop request.
-fsm.update(
-    DS_DURATION
-)
-
-state = fsm.get_state()
-
-
-if (
-    state.phase
-    !=
-    WalkingPhase.SINGLE_SUPPORT
-):
-
-    raise AssertionError(
-        "Expected closing SINGLE_SUPPORT."
-    )
-
-
-if (
-    state.step_type
-    !=
-    StepType.CLOSING_STEP
-):
-
-    raise AssertionError(
-        "Expected CLOSING_STEP."
-    )
-
-
-print(
-    f"support = "
-    f"{state.support_side}"
-)
-
-print(
-    f"swing   = "
-    f"{state.swing_side}"
-)
-
-print(
-    f"start   = "
-    f"{state.swing_start}"
-)
-
-print(
-    f"target  = "
-    f"{state.swing_target}"
-)
-
-
-# Target X must equal stance-foot X.
-if state.support_side == "left":
-
-    support_x = (
-        state.left_contact_position[0]
-    )
-
-else:
-
-    support_x = (
-        state.right_contact_position[0]
-    )
 
 
 assert_close(
-    state.swing_target[0],
-    support_x,
+    v_com_ds,
+    np.zeros(3),
     message=(
-        "Closing step must align "
-        "the two feet in X."
+        "CoM velocity during DS "
+        "must be zero."
     ),
 )
 
 
 print(
-    "\n[OK] Closing step target "
-    "aligns both feet longitudinally."
-)
-
-
-# ============================================================
-# TEST 9
-# FINAL DOUBLE SUPPORT
-# ============================================================
-
-separator()
-print("TEST 9 - FINAL DOUBLE SUPPORT")
-separator()
-
-fsm.update(
-    SS_DURATION
-)
-
-state = fsm.get_state()
-
-
-if (
-    state.phase
-    !=
-    WalkingPhase.FINAL_DOUBLE_SUPPORT
-):
-
-    raise AssertionError(
-        "Expected FINAL_DOUBLE_SUPPORT."
-    )
-
-
-print(
-    "left final  =",
-    state.left_contact_position,
+    "p_com_ds =",
+    p_com_ds,
 )
 
 print(
-    "right final =",
-    state.right_contact_position,
-)
-
-
-assert_close(
-    state.left_contact_position[0],
-    state.right_contact_position[0],
-    message=(
-        "Final feet are not aligned in X."
-    ),
-)
-
-
-final_spacing = (
-    state.left_contact_position[1]
-    -
-    state.right_contact_position[1]
-)
-
-
-assert_close(
-    final_spacing,
-    FEET_SPACING,
-    message=(
-        "Final feet spacing is wrong."
-    ),
-)
-
-
-print(
-    f"\nFinal X alignment = "
-    f"{state.left_contact_position[0]:+.6f} m"
-)
-
-print(
-    f"Final feet spacing = "
-    f"{final_spacing:.6f} m"
-)
-
-print("[OK]")
-
-
-# ============================================================
-# TEST 10
-# FINISHED
-# ============================================================
-
-separator()
-print("TEST 10 - FINISHED")
-separator()
-
-fsm.update(
-    DS_DURATION
-)
-
-state = fsm.get_state()
-
-
-print(
-    f"phase    = "
-    f"{state.phase.value}"
-)
-
-print(
-    f"finished = "
-    f"{state.finished}"
-)
-
-
-if (
-    state.phase
-    !=
-    WalkingPhase.FINISHED
-):
-
-    raise AssertionError(
-        "FSM did not reach FINISHED."
-    )
-
-
-if not state.finished:
-
-    raise AssertionError(
-        "finished flag is False."
-    )
-
-
-print("[OK]")
-
-
-# ============================================================
-# TEST 11
-# STOP DURING START HALF STEP
-# ============================================================
-
-separator()
-print(
-    "TEST 11 - STOP DURING START HALF STEP"
-)
-separator()
-
-fsm2 = make_fsm()
-
-# Initial DS -> start half step
-fsm2.update(
-    DS_DURATION
-)
-
-fsm2.update(
-    0.5 * SS_DURATION
-)
-
-fsm2.request_stop()
-
-# Finish start half step
-fsm2.update(
-    0.5 * SS_DURATION
-)
-
-# Finish DS
-fsm2.update(
-    DS_DURATION
-)
-
-state = fsm2.get_state()
-
-
-if (
-    state.step_type
-    !=
-    StepType.CLOSING_STEP
-):
-
-    raise AssertionError(
-        "Stopping after start half-step "
-        "must produce a closing step."
-    )
-
-
-# Finish closing step
-fsm2.update(
-    SS_DURATION
-)
-
-state = fsm2.get_state()
-
-
-assert_close(
-    state.left_contact_position[0],
-    state.right_contact_position[0],
-    message=(
-        "Start-stop sequence did not "
-        "return feet to aligned X."
-    ),
-)
-
-
-print(
-    "Final aligned X =",
-    state.left_contact_position[0],
+    "v_com_ds =",
+    v_com_ds,
 )
 
 print("[OK]")
@@ -821,28 +665,28 @@ print("[OK]")
 
 separator()
 print(
-    "ALL WALKING FSM TESTS PASSED"
+    "ALL COM REFERENCE TESTS PASSED"
 )
 separator()
+
 
 print("""
 Verified:
 
-  1. Initial double support
-  2. First step is a HALF STEP
-  3. Normal steps use full STEP_LENGTH
-  4. Swing feet alternate LEFT / RIGHT
-  5. request_stop() does not interrupt current swing
-  6. Current step finishes normally after F
-  7. Robot enters double support
-  8. A closing step is generated
-  9. Closing step aligns x_left = x_right
- 10. Final feet spacing remains FEET_SPACING
- 11. Robot enters FINAL_DOUBLE_SUPPORT
- 12. FSM ends in FINISHED
- 13. Stop during the initial half-step also works
+  1. CoM X is the midpoint of the two foot X references
+  2. CoM X velocity is the midpoint of foot X velocities
+  3. CoM Y remains fixed at the initial settled value
+  4. CoM Y does NOT follow the foot Y midpoint
+  5. CoM Z remains fixed at 0.205 m
+  6. CoM vertical velocity is zero
+  7. CoM X moves smoothly during swing
+  8. CoM velocity returns to zero at landing
+  9. CoM remains stationary during double support
 
-No swing trajectory is implemented yet.
-No CoM reference is implemented yet.
-No differential IK is implemented yet.
+This is a KINEMATIC CoM reference only.
+
+No LIPM dynamics are used.
+No ZMP constraints are used.
+No MPC is used.
+No differential IK is used yet.
 """)
