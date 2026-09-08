@@ -1,15 +1,19 @@
 import numpy as np
+import pinocchio as pin
 
-try:
+if __package__:
     from .pinocchio_model import (
         LEFT_FOOT_FRAME,
         RIGHT_FOOT_FRAME,
     )
-except ImportError:
+else:
     from pinocchio_model import (
         LEFT_FOOT_FRAME,
         RIGHT_FOOT_FRAME,
     )
+
+
+TRUNK_FRAME = "trunk"
 
 
 # ============================================================
@@ -20,11 +24,6 @@ def _matrix_rank(
     A,
     rcond=1e-10,
 ):
-    """
-    Numerical matrix rank using the same tolerance convention
-    throughout the hierarchical solver.
-    """
-
     A = np.asarray(
         A,
         dtype=float,
@@ -33,23 +32,23 @@ def _matrix_rank(
     if A.size == 0:
         return 0
 
-    singular_values = np.linalg.svd(
+    s = np.linalg.svd(
         A,
         compute_uv=False,
     )
 
-    if singular_values.size == 0:
+    if s.size == 0:
         return 0
 
-    tolerance = (
+    tol = (
         rcond
         * max(A.shape)
-        * singular_values[0]
+        * s[0]
     )
 
     return int(
         np.sum(
-            singular_values > tolerance
+            s > tol
         )
     )
 
@@ -59,24 +58,6 @@ def damped_pseudoinverse(
     damping=1e-8,
     rcond=1e-10,
 ):
-    """
-    Damped SVD pseudoinverse.
-
-    If:
-
-        A = U Sigma V^T
-
-    then:
-
-        A# = V diag(
-                  sigma_i /
-                  (sigma_i^2 + lambda^2)
-               ) U^T
-
-    Singular values below the numerical-rank threshold
-    are ignored.
-    """
-
     A = np.asarray(
         A,
         dtype=float,
@@ -92,12 +73,12 @@ def damped_pseudoinverse(
             "damping cannot be negative."
         )
 
-    U, singular_values, Vt = np.linalg.svd(
+    U, s, Vt = np.linalg.svd(
         A,
         full_matrices=False,
     )
 
-    if singular_values.size == 0:
+    if s.size == 0:
         return np.zeros(
             (
                 A.shape[1],
@@ -106,32 +87,31 @@ def damped_pseudoinverse(
             dtype=float,
         )
 
-    tolerance = (
+    tol = (
         rcond
         * max(A.shape)
-        * singular_values[0]
-    )
-
-    gains = np.zeros_like(
-        singular_values
+        * s[0]
     )
 
     valid = (
-        singular_values
-        > tolerance
+        s > tol
     )
 
-    sigma = singular_values[
-        valid
-    ]
+    gains = np.zeros_like(
+        s
+    )
 
     if damping == 0.0:
 
         gains[valid] = (
-            1.0 / sigma
+            1.0
+            /
+            s[valid]
         )
 
     else:
+
+        sigma = s[valid]
 
         gains[valid] = (
             sigma
@@ -154,20 +134,6 @@ def nullspace_basis(
     A,
     rcond=1e-10,
 ):
-    """
-    Return an orthonormal basis Z of null(A).
-
-    A @ Z ~= 0
-
-    If:
-
-        A in R^(m x n)
-
-    then:
-
-        Z in R^(n x (n-rank(A)))
-    """
-
     A = np.asarray(
         A,
         dtype=float,
@@ -181,32 +147,32 @@ def nullspace_basis(
     n = A.shape[1]
 
     if A.shape[0] == 0:
+
         return np.eye(
             n,
             dtype=float,
         )
 
-    _, singular_values, Vt = np.linalg.svd(
+    _, s, Vt = np.linalg.svd(
         A,
         full_matrices=True,
     )
 
-    if singular_values.size == 0:
+    if s.size == 0:
 
         rank = 0
 
     else:
 
-        tolerance = (
+        tol = (
             rcond
             * max(A.shape)
-            * singular_values[0]
+            * s[0]
         )
 
         rank = int(
             np.sum(
-                singular_values
-                > tolerance
+                s > tol
             )
         )
 
@@ -221,7 +187,7 @@ def nullspace_basis(
 
 
 # ============================================================
-# GENERIC STRICT-HIERARCHY SOLVER
+# STRICT HIERARCHICAL SOLVER
 # ============================================================
 
 def solve_task_hierarchy(
@@ -230,70 +196,11 @@ def solve_task_hierarchy(
     damping=1e-8,
     rcond=1e-10,
 ):
-    """
-    Solve a strict velocity-level task hierarchy.
-
-    Parameters
-    ----------
-    tasks : list of tuples
-
-        [
-            (task_name, J1, v1),
-            (task_name, J2, v2),
-            ...
-        ]
-
-    n_dof : int
-        Number of optimization variables.
-
-    Returns
-    -------
-    qdot : ndarray, shape (n_dof,)
-
-    diagnostics : list[dict]
-
-    final_nullspace_basis : ndarray
-
-    ----------------------------------------------------------------
-
-    At each priority level:
-
-        qdot_new
-        =
-        qdot
-        +
-        Z y
-
-    where Z spans the null space of all higher-priority tasks.
-
-    The reduced problem is:
-
-        J Z y
-        =
-        v - J qdot
-
-    therefore:
-
-        y
-        =
-        (J Z)# (v - J qdot)
-
-    After solving the current task:
-
-        Z_new
-        =
-        Z null(J Z)
-
-    so all subsequent motions remain inside the null space
-    of every higher-priority task.
-    """
-
     qdot = np.zeros(
         n_dof,
         dtype=float,
     )
 
-    # Initially every direction is available.
     Z = np.eye(
         n_dof,
         dtype=float,
@@ -319,7 +226,8 @@ def solve_task_hierarchy(
 
         if J.ndim != 2:
             raise ValueError(
-                f"{task_name}: J must be 2D."
+                f"{task_name}: "
+                "J must be 2D."
             )
 
         if J.shape[1] != n_dof:
@@ -332,22 +240,14 @@ def solve_task_hierarchy(
         if J.shape[0] != v.shape[0]:
             raise ValueError(
                 f"{task_name}: "
-                f"J rows and velocity size differ."
+                "J rows and velocity size differ."
             )
-
-        # ----------------------------------------------------
-        # Current task residual before solving it
-        # ----------------------------------------------------
 
         residual_before = (
             v
             -
             J @ qdot
         )
-
-        # ----------------------------------------------------
-        # Project current task into remaining null space
-        # ----------------------------------------------------
 
         J_reduced = (
             J @ Z
@@ -357,10 +257,6 @@ def solve_task_hierarchy(
             J_reduced,
             rcond=rcond,
         )
-
-        # ----------------------------------------------------
-        # Solve only in the remaining null space
-        # ----------------------------------------------------
 
         if Z.shape[1] > 0:
 
@@ -383,19 +279,11 @@ def solve_task_hierarchy(
                 Z @ y
             )
 
-        # ----------------------------------------------------
-        # Residual after current priority
-        # ----------------------------------------------------
-
         residual_after = (
             v
             -
             J @ qdot
         )
-
-        # ----------------------------------------------------
-        # Restrict all lower priorities
-        # ----------------------------------------------------
 
         Z_local = nullspace_basis(
             J_reduced,
@@ -409,21 +297,29 @@ def solve_task_hierarchy(
 
         diagnostics.append(
             {
-                "name": task_name,
-                "rows": J.shape[0],
-                "reduced_rank": reduced_rank,
+                "name":
+                    task_name,
+
+                "rows":
+                    J.shape[0],
+
+                "reduced_rank":
+                    reduced_rank,
+
                 "residual_before_norm":
                     float(
                         np.linalg.norm(
                             residual_before
                         )
                     ),
+
                 "residual_after_norm":
                     float(
                         np.linalg.norm(
                             residual_after
                         )
                     ),
+
                 "remaining_nullity":
                     int(
                         Z.shape[1]
@@ -439,6 +335,123 @@ def solve_task_hierarchy(
 
 
 # ============================================================
+# INPUT CHECKS
+# ============================================================
+
+def _vector3(
+    value,
+    name,
+):
+    value = np.asarray(
+        value,
+        dtype=float,
+    )
+
+    if value.shape != (3,):
+        raise ValueError(
+            f"{name} must have shape (3,)."
+        )
+
+    return value
+
+
+def _rotation_matrix(
+    value,
+    name,
+):
+    value = np.asarray(
+        value,
+        dtype=float,
+    )
+
+    if value.shape != (3, 3):
+        raise ValueError(
+            f"{name} must have shape (3, 3)."
+        )
+
+    return value
+
+
+# ============================================================
+# TRUNK PITCH TASK
+# ============================================================
+
+def build_trunk_pitch_task(
+    robot,
+    trunk_rotation_ref,
+    trunk_orientation_gain,
+):
+    """
+    Lowest-priority trunk task.
+
+    Orientation error:
+
+        e_R = log(R_actual^T R_ref)
+
+    Only LOCAL angular-Y is controlled.
+    """
+
+    if trunk_orientation_gain < 0.0:
+        raise ValueError(
+            "trunk_orientation_gain "
+            "cannot be negative."
+        )
+
+    R_ref = _rotation_matrix(
+        trunk_rotation_ref,
+        "trunk_rotation_ref",
+    )
+
+    _, R_actual = (
+        robot.get_frame_pose(
+            TRUNK_FRAME
+        )
+    )
+
+    rotation_error_local = pin.log3(
+        R_actual.T
+        @
+        R_ref
+    )
+
+    omega_y_cmd = (
+        trunk_orientation_gain
+        *
+        float(
+            rotation_error_local[1]
+        )
+    )
+
+    J_local = (
+        robot.get_frame_jacobian_local(
+            TRUNK_FRAME
+        )
+    )
+
+    # rows 3:6 = angular velocity
+    # row 4 = local angular Y
+    J_pitch = (
+        J_local[
+            4:5,
+            robot.walking_velocity_indices,
+        ]
+    )
+
+    v_pitch = np.array(
+        [
+            omega_y_cmd
+        ],
+        dtype=float,
+    )
+
+    return (
+        J_pitch,
+        v_pitch,
+        rotation_error_local,
+    )
+
+
+# ============================================================
 # SINGLE SUPPORT IK
 # ============================================================
 
@@ -446,54 +459,83 @@ def solve_single_support_ik(
     robot,
     q_pin,
     support_side,
+
+    support_position_ref,
+    swing_position_ref,
     swing_linear_velocity_ref,
+
+    com_position_ref,
     com_velocity_ref,
+
+    trunk_rotation_ref,
+
+    support_position_gain=25.0,
+    swing_position_gain=20.0,
+    com_position_gain=10.0,
+    trunk_orientation_gain=10.0,
+
     damping=1e-8,
     rcond=1e-10,
 ):
     """
-    Solve:
+    Hierarchy:
 
-        Priority 1:
-            support foot 5D
+        P1: support foot 5D
+        P2: swing foot 5D
+        P3: CoM 3D
+        P4: trunk local-Y 1D
 
-        Priority 2:
-            swing foot 5D
+    Expected final nullity:
 
-        Priority 3:
-            CoM 3D
-
-    Foot task:
-
-        [vx, vy, vz, omega_local_y, omega_local_z]
-
-    Current baseline:
-
-        support velocity = 0
-
-        swing angular velocity = 0
-
-    No position/orientation feedback is used.
+        16 - 14 = 2
     """
 
-    swing_linear_velocity_ref = np.asarray(
+    support_position_ref = _vector3(
+        support_position_ref,
+        "support_position_ref",
+    )
+
+    swing_position_ref = _vector3(
+        swing_position_ref,
+        "swing_position_ref",
+    )
+
+    swing_linear_velocity_ref = _vector3(
         swing_linear_velocity_ref,
-        dtype=float,
+        "swing_linear_velocity_ref",
     )
 
-    com_velocity_ref = np.asarray(
+    com_position_ref = _vector3(
+        com_position_ref,
+        "com_position_ref",
+    )
+
+    com_velocity_ref = _vector3(
         com_velocity_ref,
-        dtype=float,
+        "com_velocity_ref",
     )
 
-    if swing_linear_velocity_ref.shape != (3,):
+    trunk_rotation_ref = _rotation_matrix(
+        trunk_rotation_ref,
+        "trunk_rotation_ref",
+    )
+
+    if support_position_gain < 0.0:
         raise ValueError(
-            "swing_linear_velocity_ref must have shape (3,)."
+            "support_position_gain "
+            "cannot be negative."
         )
 
-    if com_velocity_ref.shape != (3,):
+    if swing_position_gain < 0.0:
         raise ValueError(
-            "com_velocity_ref must have shape (3,)."
+            "swing_position_gain "
+            "cannot be negative."
+        )
+
+    if com_position_gain < 0.0:
+        raise ValueError(
+            "com_position_gain "
+            "cannot be negative."
         )
 
     support_side = (
@@ -507,20 +549,25 @@ def solve_single_support_ik(
         "right",
     ):
         raise ValueError(
-            "support_side must be 'left' or 'right'."
+            "support_side must be "
+            "'left' or 'right'."
         )
-
-    # --------------------------------------------------------
-    # Update Pinocchio kinematics
-    # --------------------------------------------------------
 
     robot.update(
         q_pin
     )
 
-    # --------------------------------------------------------
-    # Jacobians in the 16-DoF walking space
-    # --------------------------------------------------------
+    p_left_actual, _ = (
+        robot.get_left_foot_pose()
+    )
+
+    p_right_actual, _ = (
+        robot.get_right_foot_pose()
+    )
+
+    p_com_actual = (
+        robot.get_com()
+    )
 
     J_left = (
         robot.get_foot_task_jacobian(
@@ -542,14 +589,18 @@ def solve_single_support_ik(
         )
     )
 
-    # --------------------------------------------------------
-    # Assign support / swing
-    # --------------------------------------------------------
-
     if support_side == "left":
 
         J_support = J_left
         J_swing = J_right
+
+        p_support_actual = (
+            p_left_actual
+        )
+
+        p_swing_actual = (
+            p_right_actual
+        )
 
         support_name = (
             "left_support"
@@ -564,6 +615,14 @@ def solve_single_support_ik(
         J_support = J_right
         J_swing = J_left
 
+        p_support_actual = (
+            p_right_actual
+        )
+
+        p_swing_actual = (
+            p_left_actual
+        )
+
         support_name = (
             "right_support"
         )
@@ -572,18 +631,49 @@ def solve_single_support_ik(
             "left_swing"
         )
 
-    # --------------------------------------------------------
-    # Task velocities
-    # --------------------------------------------------------
-
-    v_support = np.zeros(
-        5,
-        dtype=float,
+    support_error = (
+        support_position_ref
+        -
+        p_support_actual
     )
 
-    v_swing = np.concatenate(
+    swing_error = (
+        swing_position_ref
+        -
+        p_swing_actual
+    )
+
+    com_error = (
+        com_position_ref
+        -
+        p_com_actual
+    )
+
+    support_linear_cmd = (
+        support_position_gain
+        *
+        support_error
+    )
+
+    swing_linear_cmd = (
+        swing_linear_velocity_ref
+        +
+        swing_position_gain
+        *
+        swing_error
+    )
+
+    com_velocity_cmd = (
+        com_velocity_ref
+        +
+        com_position_gain
+        *
+        com_error
+    )
+
+    v_support = np.concatenate(
         [
-            swing_linear_velocity_ref,
+            support_linear_cmd,
             np.zeros(
                 2,
                 dtype=float,
@@ -591,9 +681,29 @@ def solve_single_support_ik(
         ]
     )
 
-    # --------------------------------------------------------
-    # Hierarchy
-    # --------------------------------------------------------
+    v_swing = np.concatenate(
+        [
+            swing_linear_cmd,
+            np.zeros(
+                2,
+                dtype=float,
+            ),
+        ]
+    )
+
+    (
+        J_trunk_pitch,
+        v_trunk_pitch,
+        trunk_error_local,
+    ) = build_trunk_pitch_task(
+        robot=robot,
+        trunk_rotation_ref=(
+            trunk_rotation_ref
+        ),
+        trunk_orientation_gain=(
+            trunk_orientation_gain
+        ),
+    )
 
     tasks = [
         (
@@ -609,7 +719,12 @@ def solve_single_support_ik(
         (
             "com",
             J_com,
-            com_velocity_ref,
+            com_velocity_cmd,
+        ),
+        (
+            "trunk_pitch",
+            J_trunk_pitch,
+            v_trunk_pitch,
         ),
     ]
 
@@ -628,9 +743,38 @@ def solve_single_support_ik(
         rcond=rcond,
     )
 
-    # --------------------------------------------------------
-    # Map 16-DoF solution back to Pinocchio nv=20
-    # --------------------------------------------------------
+    diagnostics.append(
+        {
+            "name":
+                "tracking_errors",
+
+            "support_position_error_norm":
+                float(
+                    np.linalg.norm(
+                        support_error
+                    )
+                ),
+
+            "swing_position_error_norm":
+                float(
+                    np.linalg.norm(
+                        swing_error
+                    )
+                ),
+
+            "com_position_error_norm":
+                float(
+                    np.linalg.norm(
+                        com_error
+                    )
+                ),
+
+            "trunk_local_y_error_rad":
+                float(
+                    trunk_error_local[1]
+                ),
+        }
+    )
 
     qdot_full = np.zeros(
         robot.model.nv,
@@ -639,7 +783,9 @@ def solve_single_support_ik(
 
     qdot_full[
         robot.walking_velocity_indices
-    ] = qdot_active
+    ] = (
+        qdot_active
+    )
 
     return (
         qdot_full,
@@ -655,34 +801,103 @@ def solve_single_support_ik(
 def solve_double_support_ik(
     robot,
     q_pin,
+
+    left_position_ref,
+    right_position_ref,
+
+    com_position_ref,
     com_velocity_ref,
+
+    trunk_rotation_ref,
+
+    foot_position_gain=25.0,
+    com_position_gain=10.0,
+    trunk_orientation_gain=10.0,
+
     damping=1e-8,
     rcond=1e-10,
 ):
     """
-    Solve:
+    Hierarchy:
 
-        Priority 1:
-            both feet fixed, 10D
+        P1: both feet 10D
+        P2: CoM 3D
+        P3: trunk local-Y 1D
 
-        Priority 2:
-            CoM, 3D
+    Expected final nullity:
 
-    No feedback is used.
+        16 - 14 = 2
     """
 
-    com_velocity_ref = np.asarray(
-        com_velocity_ref,
-        dtype=float,
+    left_position_ref = _vector3(
+        left_position_ref,
+        "left_position_ref",
     )
 
-    if com_velocity_ref.shape != (3,):
+    right_position_ref = _vector3(
+        right_position_ref,
+        "right_position_ref",
+    )
+
+    com_position_ref = _vector3(
+        com_position_ref,
+        "com_position_ref",
+    )
+
+    com_velocity_ref = _vector3(
+        com_velocity_ref,
+        "com_velocity_ref",
+    )
+
+    trunk_rotation_ref = _rotation_matrix(
+        trunk_rotation_ref,
+        "trunk_rotation_ref",
+    )
+
+    if foot_position_gain < 0.0:
         raise ValueError(
-            "com_velocity_ref must have shape (3,)."
+            "foot_position_gain "
+            "cannot be negative."
+        )
+
+    if com_position_gain < 0.0:
+        raise ValueError(
+            "com_position_gain "
+            "cannot be negative."
         )
 
     robot.update(
         q_pin
+    )
+
+    p_left_actual, _ = (
+        robot.get_left_foot_pose()
+    )
+
+    p_right_actual, _ = (
+        robot.get_right_foot_pose()
+    )
+
+    p_com_actual = (
+        robot.get_com()
+    )
+
+    left_error = (
+        left_position_ref
+        -
+        p_left_actual
+    )
+
+    right_error = (
+        right_position_ref
+        -
+        p_right_actual
+    )
+
+    com_error = (
+        com_position_ref
+        -
+        p_com_actual
     )
 
     J_left = (
@@ -705,6 +920,46 @@ def solve_double_support_ik(
         )
     )
 
+    left_linear_cmd = (
+        foot_position_gain
+        *
+        left_error
+    )
+
+    right_linear_cmd = (
+        foot_position_gain
+        *
+        right_error
+    )
+
+    com_velocity_cmd = (
+        com_velocity_ref
+        +
+        com_position_gain
+        *
+        com_error
+    )
+
+    v_left = np.concatenate(
+        [
+            left_linear_cmd,
+            np.zeros(
+                2,
+                dtype=float,
+            ),
+        ]
+    )
+
+    v_right = np.concatenate(
+        [
+            right_linear_cmd,
+            np.zeros(
+                2,
+                dtype=float,
+            ),
+        ]
+    )
+
     J_both_feet = np.vstack(
         [
             J_left,
@@ -712,9 +967,25 @@ def solve_double_support_ik(
         ]
     )
 
-    v_both_feet = np.zeros(
-        10,
-        dtype=float,
+    v_both_feet = np.concatenate(
+        [
+            v_left,
+            v_right,
+        ]
+    )
+
+    (
+        J_trunk_pitch,
+        v_trunk_pitch,
+        trunk_error_local,
+    ) = build_trunk_pitch_task(
+        robot=robot,
+        trunk_rotation_ref=(
+            trunk_rotation_ref
+        ),
+        trunk_orientation_gain=(
+            trunk_orientation_gain
+        ),
     )
 
     tasks = [
@@ -726,7 +997,12 @@ def solve_double_support_ik(
         (
             "com",
             J_com,
-            com_velocity_ref,
+            com_velocity_cmd,
+        ),
+        (
+            "trunk_pitch",
+            J_trunk_pitch,
+            v_trunk_pitch,
         ),
     ]
 
@@ -745,6 +1021,39 @@ def solve_double_support_ik(
         rcond=rcond,
     )
 
+    diagnostics.append(
+        {
+            "name":
+                "tracking_errors",
+
+            "left_position_error_norm":
+                float(
+                    np.linalg.norm(
+                        left_error
+                    )
+                ),
+
+            "right_position_error_norm":
+                float(
+                    np.linalg.norm(
+                        right_error
+                    )
+                ),
+
+            "com_position_error_norm":
+                float(
+                    np.linalg.norm(
+                        com_error
+                    )
+                ),
+
+            "trunk_local_y_error_rad":
+                float(
+                    trunk_error_local[1]
+                ),
+        }
+    )
+
     qdot_full = np.zeros(
         robot.model.nv,
         dtype=float,
@@ -752,7 +1061,9 @@ def solve_double_support_ik(
 
     qdot_full[
         robot.walking_velocity_indices
-    ] = qdot_active
+    ] = (
+        qdot_active
+    )
 
     return (
         qdot_full,
