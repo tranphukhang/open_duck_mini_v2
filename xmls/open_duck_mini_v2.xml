@@ -3,8 +3,14 @@
 <!-- Onshape document_id: 64074dfcfa379b37d8a47762 -->
 <mujoco model="open_duck_mini_v2">
 
-  <option iterations="1" ls_iterations="5">
-    <flag eulerdamp="disable"/>
+  <option
+    timestep="0.0005"
+    integrator="implicitfast"
+    solver="Newton"
+    cone="elliptic"
+    tolerance="1e-10">
+
+    <flag nativeccd="disable"/>
   </option>
   <compiler angle="radian" meshdir="assets"/>
 
