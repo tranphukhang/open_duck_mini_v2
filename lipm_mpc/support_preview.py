@@ -11,15 +11,19 @@ import numpy as np
 
 
 # ============================================================
-# IMPORT GEOMETRY FROM FOOTSTEP_PLANNING
+# PATH
 # ============================================================
 
-if not __package__:
-    CURRENT_DIR = Path(__file__).resolve().parent
-    ROOT_DIR = CURRENT_DIR.parent
+CURRENT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = CURRENT_DIR.parent
 
-    if str(ROOT_DIR) not in sys.path:
-        sys.path.insert(0, str(ROOT_DIR))
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+
+# ============================================================
+# IMPORT GEOMETRY FROM FOOTSTEP_PLANNING
+# ============================================================
 
 from footstep_planning.walking_visualization import (
     convex_hull_2d,
@@ -32,20 +36,25 @@ from footstep_planning.walking_visualization import (
 # ============================================================
 
 @dataclass
-class SupportPreviewX:
+class SupportPreview:
     """
-    Support preview for the sagittal x-axis.
+    2D support-region preview over the MPC horizon.
 
-    Each entry k corresponds to the support region over:
+    For every MPC interval k:
 
-        [t0 + k*T, t0 + (k+1)*T)
+        x_min[k] <= x_Z <= x_max[k]
+        y_min[k] <= y_Z <= y_max[k]
 
-    where T is the MPC timestep.
+    The full support polygon is also stored for future use.
     """
 
     time: np.ndarray
+
     x_min: np.ndarray
     x_max: np.ndarray
+
+    y_min: np.ndarray
+    y_max: np.ndarray
 
     phase: tuple[str, ...]
     support_side: tuple[str, ...]
@@ -54,12 +63,20 @@ class SupportPreviewX:
 
     @property
     def horizon_steps(self) -> int:
-        return len(self.x_min)
+        return len(self.time)
 
 
 # ============================================================
-# VALIDATION
+# UTILITIES
 # ============================================================
+
+def _phase_name(phase) -> str:
+
+    if hasattr(phase, "value"):
+        return str(phase.value)
+
+    return str(phase)
+
 
 def _validate_foot_geometry(
     foot_toe: float,
@@ -100,37 +117,33 @@ def _validate_pose(
 
     if position.shape != (3,):
         raise ValueError(
-            "Foot position must have shape (3,)."
+            "position must have shape (3,)."
         )
 
     if rotation.shape != (3, 3):
         raise ValueError(
-            "Foot rotation must have shape (3, 3)."
+            "rotation must have shape (3, 3)."
         )
 
-    if not np.all(np.isfinite(position)):
+    if not np.all(
+        np.isfinite(position)
+    ):
         raise ValueError(
-            "Foot position must be finite."
+            "position must contain finite values."
         )
 
-    if not np.all(np.isfinite(rotation)):
+    if not np.all(
+        np.isfinite(rotation)
+    ):
         raise ValueError(
-            "Foot rotation must be finite."
+            "rotation must contain finite values."
         )
 
     return position, rotation
 
 
-def _phase_name(phase) -> str:
-
-    if hasattr(phase, "value"):
-        return str(phase.value)
-
-    return str(phase)
-
-
 # ============================================================
-# SOLE GEOMETRY
+# SOLE CORNERS
 # ============================================================
 
 def compute_sole_corners(
@@ -141,24 +154,15 @@ def compute_sole_corners(
     foot_half_width: float,
 ) -> np.ndarray:
     """
-    Compute four sole corners in the world frame.
+    Compute the four sole corners in world coordinates.
 
-    The geometry follows the same convention as
-    footstep_planning.walking_visualization:
+    Same sole convention as walking_visualization:
 
-          +x
-           ^
-           |
-       toe +---------+
-           |         |
-           |         |
-      heel +---------+
+        x_local in [-foot_heel, +foot_toe]
+        y_local in [-foot_half_width, +foot_half_width]
 
-    Foot-site position is used as the local origin.
-
-    Returns
-    -------
-    corners : ndarray, shape (4, 3)
+    Only foot yaw is used when projecting the sole onto
+    the ground plane.
     """
 
     _validate_foot_geometry(
@@ -172,9 +176,9 @@ def compute_sole_corners(
         rotation,
     )
 
-    # Keep only the yaw component, exactly as done
-    # for the support polygon visualization.
-    R = yaw_rotation(rotation)
+    R_yaw = yaw_rotation(
+        rotation
+    )
 
     local_corners = np.array(
         [
@@ -204,8 +208,12 @@ def compute_sole_corners(
 
     corners = np.array(
         [
-            position + R @ corner
-            for corner in local_corners
+            position
+            +
+            R_yaw @ corner
+
+            for corner
+            in local_corners
         ],
         dtype=float,
     )
@@ -229,18 +237,19 @@ def compute_support_polygon(
     foot_half_width: float,
 ) -> np.ndarray:
     """
-    Compute the 2D support polygon.
+    Compute the support polygon.
 
     SINGLE_SUPPORT:
-        convex hull of the support foot.
+        convex hull of one support foot.
 
-    Other support phases:
+    DOUBLE_SUPPORT:
         convex hull of both feet.
 
     Returns
     -------
-    polygon : ndarray, shape (M, 2)
-        Counter-clockwise convex-hull vertices in the x-y plane.
+    polygon:
+        ndarray with shape (M, 2)
+        containing [x, y] hull vertices.
     """
 
     left_corners = compute_sole_corners(
@@ -259,27 +268,42 @@ def compute_support_polygon(
         foot_half_width=foot_half_width,
     )
 
-    phase_name = _phase_name(phase)
+    phase_name = _phase_name(
+        phase
+    )
+
+    # --------------------------------------------------------
+    # SINGLE SUPPORT
+    # --------------------------------------------------------
 
     if phase_name == "SINGLE_SUPPORT":
 
         if support_side == "left":
-            points = left_corners
 
-        elif support_side == "right":
-            points = right_corners
-
-        else:
-            raise ValueError(
-                "support_side must be 'left' or 'right' "
-                "during SINGLE_SUPPORT."
+            points = (
+                left_corners
             )
 
+        elif support_side == "right":
+
+            points = (
+                right_corners
+            )
+
+        else:
+
+            raise ValueError(
+                "During SINGLE_SUPPORT, "
+                "support_side must be "
+                "'left' or 'right'."
+            )
+
+    # --------------------------------------------------------
+    # DOUBLE SUPPORT / STANDING
+    # --------------------------------------------------------
+
     else:
-        # INITIAL_DOUBLE_SUPPORT
-        # DOUBLE_SUPPORT
-        # FINAL_DOUBLE_SUPPORT
-        # FINISHED
+
         points = np.vstack(
             [
                 left_corners,
@@ -287,47 +311,53 @@ def compute_support_polygon(
             ]
         )
 
-    hull = convex_hull_2d(points)
+    hull = convex_hull_2d(
+        points
+    )
 
     hull = np.asarray(
         hull,
         dtype=float,
     )
 
-    if hull.ndim != 2:
+    if (
+        hull.ndim != 2
+        or
+        len(hull) == 0
+    ):
         raise RuntimeError(
-            "Invalid convex hull."
+            "Invalid support polygon."
         )
 
-    if hull.shape[0] == 0:
-        raise RuntimeError(
-            "Support polygon is empty."
-        )
-
-    # convex_hull_2d from walking_visualization returns
-    # [x, y, z]. MPC only needs the ground-plane coordinates.
     return hull[:, :2].copy()
 
 
 # ============================================================
-# X-AXIS SUPPORT BOUNDS
+# SUPPORT BOUNDS
 # ============================================================
 
-def compute_support_bounds_x(
+def compute_support_bounds(
     polygon,
     zmp_scale: float,
-) -> tuple[float, float]:
+) -> tuple[
+    float,
+    float,
+    float,
+    float,
+]:
     """
-    Compute safe x-axis ZMP bounds from a support polygon.
+    Convert a 2D support polygon into independent x/y bounds.
 
-    Raw:
-        x_min <= x_Z <= x_max
+    Returns:
 
-    Scaled:
-        x_c + scale * (x - x_c)
+        x_min, x_max,
+        y_min, y_max
 
-    where:
-        x_c = (x_min + x_max) / 2
+    The bounds are contracted by zmp_scale about the
+    center of their corresponding interval.
+
+    This is suitable for the current decoupled x/y MPC
+    formulation with axis-aligned walking.
     """
 
     polygon = np.asarray(
@@ -335,22 +365,21 @@ def compute_support_bounds_x(
         dtype=float,
     )
 
-    if polygon.ndim != 2:
+    if (
+        polygon.ndim != 2
+        or
+        polygon.shape[0] == 0
+        or
+        polygon.shape[1] < 2
+    ):
         raise ValueError(
-            "polygon must be a 2D array."
+            "polygon must have shape (N, 2) "
+            "with N > 0."
         )
 
-    if polygon.shape[0] == 0:
-        raise ValueError(
-            "polygon cannot be empty."
-        )
-
-    if polygon.shape[1] < 2:
-        raise ValueError(
-            "polygon must contain x and y coordinates."
-        )
-
-    if not np.all(np.isfinite(polygon)):
+    if not np.all(
+        np.isfinite(polygon)
+    ):
         raise ValueError(
             "polygon must contain finite values."
         )
@@ -359,22 +388,57 @@ def compute_support_bounds_x(
         0.0 < zmp_scale <= 1.0
     ):
         raise ValueError(
-            "zmp_scale must satisfy 0 < zmp_scale <= 1."
+            "zmp_scale must satisfy "
+            "0 < zmp_scale <= 1."
         )
 
+    # --------------------------------------------------------
+    # Raw bounds
+    # --------------------------------------------------------
+
     raw_x_min = float(
-        np.min(polygon[:, 0])
+        np.min(
+            polygon[:, 0]
+        )
     )
 
     raw_x_max = float(
-        np.max(polygon[:, 0])
+        np.max(
+            polygon[:, 0]
+        )
     )
+
+    raw_y_min = float(
+        np.min(
+            polygon[:, 1]
+        )
+    )
+
+    raw_y_max = float(
+        np.max(
+            polygon[:, 1]
+        )
+    )
+
+    # --------------------------------------------------------
+    # Centers
+    # --------------------------------------------------------
 
     center_x = 0.5 * (
         raw_x_min
         +
         raw_x_max
     )
+
+    center_y = 0.5 * (
+        raw_y_min
+        +
+        raw_y_max
+    )
+
+    # --------------------------------------------------------
+    # Safe scaled bounds
+    # --------------------------------------------------------
 
     x_min = (
         center_x
@@ -400,14 +464,43 @@ def compute_support_bounds_x(
         )
     )
 
-    return float(x_min), float(x_max)
+    y_min = (
+        center_y
+        +
+        zmp_scale
+        *
+        (
+            raw_y_min
+            -
+            center_y
+        )
+    )
+
+    y_max = (
+        center_y
+        +
+        zmp_scale
+        *
+        (
+            raw_y_max
+            -
+            center_y
+        )
+    )
+
+    return (
+        float(x_min),
+        float(x_max),
+        float(y_min),
+        float(y_max),
+    )
 
 
 # ============================================================
 # SUPPORT PREVIEW
 # ============================================================
 
-def build_support_preview_x(
+def build_support_preview(
     fsm,
     left_rotation,
     right_rotation,
@@ -417,39 +510,29 @@ def build_support_preview_x(
     foot_heel: float,
     foot_half_width: float,
     zmp_scale: float,
-) -> SupportPreviewX:
+) -> SupportPreview:
     """
-    Build the support-region preview for x-MPC.
+    Build a 2D support preview for the MPC horizon.
 
-    The real walking FSM is NOT modified.
+    The real WalkingFSM is never modified.
 
-    A deep copy of the FSM is propagated into the future,
-    therefore the preview automatically follows the same:
+    Instead, a deep copy is propagated into the future
+    using the MPC timestep.
 
-        - initial double support
-        - start half-step
-        - single support
-        - double support
-        - normal steps
-        - closing step
-        - final double support
-
-    logic as footstep_planning.walking_fsm.
-
-    Preview convention
-    ------------------
-    Entry k describes the support region during:
+    Entry k corresponds to one MPC interval:
 
         [t0 + k*T, t0 + (k+1)*T)
 
-    Therefore, with:
+    Example:
 
-        T_DS = 0.09 s
-        T_SS = 0.18 s
         T_MPC = 0.03 s
+        T_DS  = 0.09 s
+        T_SS  = 0.18 s
 
-    a complete DS produces 3 preview entries and
-    a complete SS produces 6 preview entries.
+    gives:
+
+        3 DS intervals
+        6 SS intervals
     """
 
     if timestep <= 0.0:
@@ -472,7 +555,8 @@ def build_support_preview_x(
         0.0 < zmp_scale <= 1.0
     ):
         raise ValueError(
-            "zmp_scale must satisfy 0 < zmp_scale <= 1."
+            "zmp_scale must satisfy "
+            "0 < zmp_scale <= 1."
         )
 
     left_rotation = np.asarray(
@@ -496,16 +580,25 @@ def build_support_preview_x(
         )
 
     # --------------------------------------------------------
-    # IMPORTANT:
-    # Never advance the real walking FSM while previewing.
+    # Copy FSM for preview
     # --------------------------------------------------------
 
-    preview_fsm = copy.deepcopy(fsm)
+    preview_fsm = copy.deepcopy(
+        fsm
+    )
 
-    times = np.arange(
-        horizon_steps,
-        dtype=float,
-    ) * timestep
+    # --------------------------------------------------------
+    # Storage
+    # --------------------------------------------------------
+
+    times = (
+        np.arange(
+            horizon_steps,
+            dtype=float,
+        )
+        *
+        timestep
+    )
 
     x_min_values = np.zeros(
         horizon_steps,
@@ -517,35 +610,63 @@ def build_support_preview_x(
         dtype=float,
     )
 
+    y_min_values = np.zeros(
+        horizon_steps,
+        dtype=float,
+    )
+
+    y_max_values = np.zeros(
+        horizon_steps,
+        dtype=float,
+    )
+
     phase_names = []
+
     support_sides = []
+
     polygons = []
 
     # --------------------------------------------------------
-    # Build preview
+    # Preview loop
     # --------------------------------------------------------
 
-    for k in range(horizon_steps):
+    for k in range(
+        horizon_steps
+    ):
 
-        state = preview_fsm.get_state()
-
-        polygon = compute_support_polygon(
-            left_position=(
-                state.left_contact_position
-            ),
-            left_rotation=left_rotation,
-            right_position=(
-                state.right_contact_position
-            ),
-            right_rotation=right_rotation,
-            phase=state.phase,
-            support_side=state.support_side,
-            foot_toe=foot_toe,
-            foot_heel=foot_heel,
-            foot_half_width=foot_half_width,
+        state = (
+            preview_fsm.get_state()
         )
 
-        x_min, x_max = compute_support_bounds_x(
+        polygon = (
+            compute_support_polygon(
+                left_position=(
+                    state.left_contact_position
+                ),
+                left_rotation=left_rotation,
+
+                right_position=(
+                    state.right_contact_position
+                ),
+                right_rotation=right_rotation,
+
+                phase=state.phase,
+                support_side=state.support_side,
+
+                foot_toe=foot_toe,
+                foot_heel=foot_heel,
+                foot_half_width=(
+                    foot_half_width
+                ),
+            )
+        )
+
+        (
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+        ) = compute_support_bounds(
             polygon=polygon,
             zmp_scale=zmp_scale,
         )
@@ -553,28 +674,48 @@ def build_support_preview_x(
         x_min_values[k] = x_min
         x_max_values[k] = x_max
 
+        y_min_values[k] = y_min
+        y_max_values[k] = y_max
+
         phase_names.append(
-            _phase_name(state.phase)
+            _phase_name(
+                state.phase
+            )
         )
 
         support_sides.append(
-            str(state.support_side)
+            str(
+                state.support_side
+            )
         )
 
         polygons.append(
             polygon.copy()
         )
 
-        # Move the copied FSM one MPC interval forward.
+        # Advance copied FSM by one MPC interval.
         preview_fsm.update(
             timestep
         )
 
-    return SupportPreviewX(
+    return SupportPreview(
         time=times,
+
         x_min=x_min_values,
         x_max=x_max_values,
-        phase=tuple(phase_names),
-        support_side=tuple(support_sides),
-        polygons=tuple(polygons),
+
+        y_min=y_min_values,
+        y_max=y_max_values,
+
+        phase=tuple(
+            phase_names
+        ),
+
+        support_side=tuple(
+            support_sides
+        ),
+
+        polygons=tuple(
+            polygons
+        ),
     )
