@@ -108,6 +108,7 @@ class WalkingFSM:
         single_support_duration: float,
         double_support_duration: float,
         first_swing_side: str = "right",
+        initial_double_support_duration=None,
     ):
 
         # ====================================================
@@ -147,6 +148,28 @@ class WalkingFSM:
 
             raise ValueError(
                 "double_support_duration "
+                "must be positive."
+            )
+
+        # ----------------------------------------------------
+        # Initial double support
+        #
+        # If not explicitly specified, preserve the old
+        # behavior:
+        #
+        # initial DS = normal DS
+        # ----------------------------------------------------
+
+        if initial_double_support_duration is None:
+
+            initial_double_support_duration = (
+                double_support_duration
+            )
+
+        if initial_double_support_duration <= 0.0:
+
+            raise ValueError(
+                "initial_double_support_duration "
                 "must be positive."
             )
 
@@ -194,6 +217,10 @@ class WalkingFSM:
 
         self.ds_duration = float(
             double_support_duration
+        )
+
+        self.initial_ds_duration = float(
+            initial_double_support_duration
         )
 
         self.first_swing_side = (
@@ -751,6 +778,10 @@ class WalkingFSM:
         self,
     ):
 
+        # ----------------------------------------------------
+        # SINGLE SUPPORT
+        # ----------------------------------------------------
+
         if (
             self.phase
             ==
@@ -761,8 +792,29 @@ class WalkingFSM:
                 self.ss_duration
             )
 
+        # ----------------------------------------------------
+        # INITIAL DOUBLE SUPPORT
+        #
+        # This duration can be longer than normal DS to allow
+        # the LIPM-MPC to perform the initial lateral weight
+        # transfer more smoothly.
+        # ----------------------------------------------------
+
+        if (
+            self.phase
+            ==
+            WalkingPhase.INITIAL_DOUBLE_SUPPORT
+        ):
+
+            return (
+                self.initial_ds_duration
+            )
+
+        # ----------------------------------------------------
+        # NORMAL / FINAL DOUBLE SUPPORT
+        # ----------------------------------------------------
+
         if self.phase in (
-            WalkingPhase.INITIAL_DOUBLE_SUPPORT,
             WalkingPhase.DOUBLE_SUPPORT,
             WalkingPhase.FINAL_DOUBLE_SUPPORT,
         ):
@@ -770,6 +822,10 @@ class WalkingFSM:
             return (
                 self.ds_duration
             )
+
+        # ----------------------------------------------------
+        # FINISHED
+        # ----------------------------------------------------
 
         if (
             self.phase
@@ -1087,6 +1143,12 @@ class WalkingFSM:
             step = (
                 self.current_step
             )
+
+            if step is None:
+
+                raise RuntimeError(
+                    "SINGLE_SUPPORT requires current_step."
+                )
 
             return WalkingState(
                 phase=self.phase,

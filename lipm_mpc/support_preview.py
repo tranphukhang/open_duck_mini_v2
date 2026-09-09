@@ -512,35 +512,46 @@ def build_support_preview(
     zmp_scale: float,
 ) -> SupportPreview:
     """
-    Build a 2D support preview for the MPC horizon.
+    Build the future 2D support-region preview used by MPC.
 
-    The real WalkingFSM is never modified.
+    The real WalkingFSM is never modified. A deep copy is
+    propagated into the future.
 
-    Instead, a deep copy is propagated into the future
-    using the MPC timestep.
+    IMPORTANT INDEXING
+    ------------------
 
-    Entry k corresponds to one MPC interval:
+    Preview entry k corresponds to predicted state:
 
-        [t0 + k*T, t0 + (k+1)*T)
+        x_(k+1)
 
-    Example:
+    and therefore to time:
 
-        T_MPC = 0.03 s
-        T_DS  = 0.09 s
-        T_SS  = 0.18 s
+        t0 + (k+1) * T
 
-    gives:
+    Thus:
 
-        3 DS intervals
-        6 SS intervals
+        preview[0]     -> t0 + T
+        preview[1]     -> t0 + 2T
+        ...
+        preview[N - 1] -> t0 + NT
+
+    This matches the MPC constraints:
+
+        lower[k]
+        <=
+        C_zmp x_(k+1)
+        <=
+        upper[k]
     """
 
     if timestep <= 0.0:
+
         raise ValueError(
             "timestep must be greater than zero."
         )
 
     if horizon_steps <= 0:
+
         raise ValueError(
             "horizon_steps must be greater than zero."
         )
@@ -552,8 +563,13 @@ def build_support_preview(
     )
 
     if not (
-        0.0 < zmp_scale <= 1.0
+        0.0
+        <
+        zmp_scale
+        <=
+        1.0
     ):
+
         raise ValueError(
             "zmp_scale must satisfy "
             "0 < zmp_scale <= 1."
@@ -569,36 +585,60 @@ def build_support_preview(
         dtype=float,
     )
 
-    if left_rotation.shape != (3, 3):
+    if left_rotation.shape != (
+        3,
+        3,
+    ):
+
         raise ValueError(
             "left_rotation must have shape (3, 3)."
         )
 
-    if right_rotation.shape != (3, 3):
+    if right_rotation.shape != (
+        3,
+        3,
+    ):
+
         raise ValueError(
             "right_rotation must have shape (3, 3)."
         )
 
-    # --------------------------------------------------------
-    # Copy FSM for preview
-    # --------------------------------------------------------
+    # ========================================================
+    # COPY FSM
+    # ========================================================
 
     preview_fsm = copy.deepcopy(
         fsm
     )
 
-    # --------------------------------------------------------
-    # Storage
-    # --------------------------------------------------------
+    # ========================================================
+    # TIME VECTOR
+    # ========================================================
+    #
+    # T, 2T, ..., NT
+    #
+    # rather than:
+    #
+    # 0, T, ..., (N-1)T
+    #
+    # ========================================================
 
     times = (
-        np.arange(
-            horizon_steps,
-            dtype=float,
+        (
+            np.arange(
+                horizon_steps,
+                dtype=float,
+            )
+            +
+            1.0
         )
         *
         timestep
     )
+
+    # ========================================================
+    # STORAGE
+    # ========================================================
 
     x_min_values = np.zeros(
         horizon_steps,
@@ -626,13 +666,27 @@ def build_support_preview(
 
     polygons = []
 
-    # --------------------------------------------------------
-    # Preview loop
-    # --------------------------------------------------------
+    # ========================================================
+    # PREVIEW LOOP
+    # ========================================================
 
     for k in range(
         horizon_steps
     ):
+
+        # ----------------------------------------------------
+        # First advance to future sample:
+        #
+        # x_(k+1)
+        # ----------------------------------------------------
+
+        preview_fsm.update(
+            timestep
+        )
+
+        # ----------------------------------------------------
+        # Then evaluate support at that future sample
+        # ----------------------------------------------------
 
         state = (
             preview_fsm.get_state()
@@ -643,18 +697,35 @@ def build_support_preview(
                 left_position=(
                     state.left_contact_position
                 ),
-                left_rotation=left_rotation,
+
+                left_rotation=(
+                    left_rotation
+                ),
 
                 right_position=(
                     state.right_contact_position
                 ),
-                right_rotation=right_rotation,
 
-                phase=state.phase,
-                support_side=state.support_side,
+                right_rotation=(
+                    right_rotation
+                ),
 
-                foot_toe=foot_toe,
-                foot_heel=foot_heel,
+                phase=(
+                    state.phase
+                ),
+
+                support_side=(
+                    state.support_side
+                ),
+
+                foot_toe=(
+                    foot_toe
+                ),
+
+                foot_heel=(
+                    foot_heel
+                ),
+
                 foot_half_width=(
                     foot_half_width
                 ),
@@ -671,11 +742,21 @@ def build_support_preview(
             zmp_scale=zmp_scale,
         )
 
-        x_min_values[k] = x_min
-        x_max_values[k] = x_max
+        x_min_values[k] = (
+            x_min
+        )
 
-        y_min_values[k] = y_min
-        y_max_values[k] = y_max
+        x_max_values[k] = (
+            x_max
+        )
+
+        y_min_values[k] = (
+            y_min
+        )
+
+        y_max_values[k] = (
+            y_max
+        )
 
         phase_names.append(
             _phase_name(
@@ -693,18 +774,15 @@ def build_support_preview(
             polygon.copy()
         )
 
-        # Advance copied FSM by one MPC interval.
-        preview_fsm.update(
-            timestep
-        )
-
     return SupportPreview(
         time=times,
 
         x_min=x_min_values,
+
         x_max=x_max_values,
 
         y_min=y_min_values,
+
         y_max=y_max_values,
 
         phase=tuple(

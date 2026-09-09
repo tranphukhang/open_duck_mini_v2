@@ -1,5 +1,3 @@
-# lipm_mpc/test.py
-
 from __future__ import annotations
 
 import sys
@@ -16,6 +14,7 @@ CURRENT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = CURRENT_DIR.parent
 
 if str(ROOT_DIR) not in sys.path:
+
     sys.path.insert(
         0,
         str(ROOT_DIR),
@@ -66,7 +65,13 @@ from footstep_planning.walking_fsm import (
 
 MPC_TIMESTEP = 0.03
 
-MPC_HORIZON_STEPS = 16
+# ------------------------------------------------------------
+# Important change:
+#
+# 48 * 0.03 = 1.44 s preview horizon
+# ------------------------------------------------------------
+
+MPC_HORIZON_STEPS = 48
 
 COM_HEIGHT = 0.205
 
@@ -74,9 +79,9 @@ GRAVITY = 9.81
 
 
 # ------------------------------------------------------------
-# These weights are temporary.
+# Keep exactly the same weights as previous test.
 #
-# We are NOT tuning the controller yet.
+# We want to study ONLY the effect of horizon length.
 # ------------------------------------------------------------
 
 TERMINAL_WEIGHT = 1.0
@@ -92,9 +97,16 @@ STEP_LENGTH = 0.04
 
 FEET_SPACING = 0.16
 
+
+# ============================================================
+# GAIT TIMING
+# ============================================================
+
 SINGLE_SUPPORT_DURATION = 0.18
 
 DOUBLE_SUPPORT_DURATION = 0.09
+
+INITIAL_DOUBLE_SUPPORT_DURATION = 0.36
 
 
 # ============================================================
@@ -148,11 +160,6 @@ P_COM_INITIAL = np.array(
 # FOOT ORIENTATION
 # ============================================================
 
-# Straight walking.
-#
-# support_preview currently uses yaw only.
-# Initial feet are assumed aligned with world x-axis.
-
 R_LEFT_INITIAL = np.eye(
     3,
     dtype=float,
@@ -170,7 +177,7 @@ R_RIGHT_INITIAL = np.eye(
 
 SOLVER_OPTIONS = {
     "ftol": 1e-10,
-    "maxiter": 1000,
+    "maxiter": 2000,
 }
 
 
@@ -206,11 +213,15 @@ def create_fsm():
         ),
 
         first_swing_side="right",
+
+        initial_double_support_duration=(
+            INITIAL_DOUBLE_SUPPORT_DURATION
+        ),
     )
 
 
 # ============================================================
-# CREATE ONE 1D MPC
+# CREATE ONE GENERIC 1D MPC
 # ============================================================
 
 def create_mpc():
@@ -262,10 +273,6 @@ def check_axis_result(
     lower_bounds,
     upper_bounds,
 ):
-
-    # --------------------------------------------------------
-    # Basic dimensions
-    # --------------------------------------------------------
 
     assert result.success
 
@@ -340,12 +347,11 @@ def check_axis_result(
 
 
 # ============================================================
-# PRINT ONE AXIS
+# PRINT AXIS SUMMARY
 # ============================================================
 
 def print_axis_summary(
     axis_name,
-    unit_label,
     current_state,
     goal_state,
     result,
@@ -361,6 +367,26 @@ def print_axis_summary(
         result.state[-1, 0]
         -
         goal_state[0]
+    )
+
+    max_jerk = np.max(
+        np.abs(
+            result.control
+        )
+    )
+
+    max_jerk_index = int(
+        np.argmax(
+            np.abs(
+                result.control
+            )
+        )
+    )
+
+    max_jerk_time = (
+        max_jerk_index
+        *
+        MPC_TIMESTEP
     )
 
     print()
@@ -379,17 +405,17 @@ def print_axis_summary(
 
     print(
         f"Current CoM {axis_name.lower():<7}: "
-        f"{current_state[0]: .6f} {unit_label}"
+        f"{current_state[0]: .6f} m"
     )
 
     print(
         f"Goal {axis_name.lower():<14}: "
-        f"{goal_state[0]: .6f} {unit_label}"
+        f"{goal_state[0]: .6f} m"
     )
 
     print(
         f"Terminal CoM {axis_name.lower():<6}: "
-        f"{result.state[-1, 0]: .6f} {unit_label}"
+        f"{result.state[-1, 0]: .6f} m"
     )
 
     print(
@@ -405,6 +431,21 @@ def print_axis_summary(
     print(
         f"First jerk        : "
         f"{result.first_control: .6f} m/s^3"
+    )
+
+    print(
+        f"Max |jerk|        : "
+        f"{max_jerk: .6f} m/s^3"
+    )
+
+    print(
+        f"Max jerk index    : "
+        f"{max_jerk_index}"
+    )
+
+    print(
+        f"Max jerk time     : "
+        f"{max_jerk_time:.3f} s"
     )
 
     print(
@@ -492,18 +533,17 @@ def print_preview_table(
 
 
 # ============================================================
-# 2D MPC INTEGRATION TEST
+# X/Y MPC INTEGRATION TEST
 # ============================================================
 
 def test_xy_mpc_with_support_preview():
 
     # ========================================================
-    # 1. WALKING FSM
+    # 1. FSM
     # ========================================================
 
     fsm = create_fsm()
 
-    # Upcoming right-foot half step.
     swing_target = (
         fsm.get_next_swing_target()
     )
@@ -516,7 +556,6 @@ def test_xy_mpc_with_support_preview():
     print(
         "[PASS] FSM next swing target"
     )
-
 
     # ========================================================
     # 2. SUPPORT PREVIEW
@@ -570,14 +609,9 @@ def test_xy_mpc_with_support_preview():
         "[PASS] 2D support preview"
     )
 
-
     # ========================================================
     # 3. INITIAL LIPM STATES
     # ========================================================
-
-    # x state:
-    #
-    # [x_G, xdot_G, xddot_G]
 
     x_current = np.array(
         [
@@ -588,11 +622,6 @@ def test_xy_mpc_with_support_preview():
         dtype=float,
     )
 
-
-    # y state:
-    #
-    # [y_G, ydot_G, yddot_G]
-
     y_current = np.array(
         [
             P_COM_INITIAL[1],
@@ -602,18 +631,13 @@ def test_xy_mpc_with_support_preview():
         dtype=float,
     )
 
-
     # ========================================================
     # 4. TERMINAL GOALS
     # ========================================================
 
-    # Tutorial-style terminal goals:
+    # Keep the same terminal-goal definition as before.
     #
-    # x_goal =
-    # [x_swing_target, 0, 0]
-    #
-    # y_goal =
-    # [y_swing_target, 0, 0]
+    # We are changing ONLY the horizon in this experiment.
 
     x_goal = np.array(
         [
@@ -624,7 +648,6 @@ def test_xy_mpc_with_support_preview():
         dtype=float,
     )
 
-
     y_goal = np.array(
         [
             swing_target[1],
@@ -633,7 +656,6 @@ def test_xy_mpc_with_support_preview():
         ],
         dtype=float,
     )
-
 
     # ========================================================
     # 5. CREATE TWO INSTANCES OF SAME 1D MPC
@@ -656,7 +678,6 @@ def test_xy_mpc_with_support_preview():
     print(
         "[PASS] Same LIPMMPC1D used for x and y"
     )
-
 
     # ========================================================
     # 6. SOLVE X
@@ -702,7 +723,6 @@ def test_xy_mpc_with_support_preview():
         ),
     )
 
-
     # ========================================================
     # 7. SOLVE Y
     # ========================================================
@@ -747,15 +767,12 @@ def test_xy_mpc_with_support_preview():
         ),
     )
 
-
     # ========================================================
     # 8. PRINT RESULTS
     # ========================================================
 
     print_axis_summary(
         axis_name="X",
-
-        unit_label="m",
 
         current_state=x_current,
 
@@ -764,11 +781,8 @@ def test_xy_mpc_with_support_preview():
         result=x_result,
     )
 
-
     print_axis_summary(
         axis_name="Y",
-
-        unit_label="m",
 
         current_state=y_current,
 
@@ -777,7 +791,6 @@ def test_xy_mpc_with_support_preview():
         result=y_result,
     )
 
-
     print_preview_table(
         preview=preview,
 
@@ -785,7 +798,6 @@ def test_xy_mpc_with_support_preview():
 
         y_result=y_result,
     )
-
 
     return (
         preview,
@@ -805,12 +817,44 @@ def main():
     )
 
     print(
-        "LIPM-MPC X/Y INTEGRATION TEST"
+        "LIPM-MPC X/Y LONG-HORIZON TEST"
     )
 
     print(
         "=" * 60
     )
+
+    print(
+        f"Initial DS : "
+        f"{INITIAL_DOUBLE_SUPPORT_DURATION:.3f} s"
+    )
+
+    print(
+        f"Normal DS  : "
+        f"{DOUBLE_SUPPORT_DURATION:.3f} s"
+    )
+
+    print(
+        f"SS         : "
+        f"{SINGLE_SUPPORT_DURATION:.3f} s"
+    )
+
+    print(
+        f"MPC timestep: "
+        f"{MPC_TIMESTEP:.3f} s"
+    )
+
+    print(
+        f"MPC steps   : "
+        f"{MPC_HORIZON_STEPS}"
+    )
+
+    print(
+        f"MPC horizon : "
+        f"{MPC_HORIZON_STEPS * MPC_TIMESTEP:.3f} s"
+    )
+
+    print()
 
     test_xy_mpc_with_support_preview()
 
@@ -821,7 +865,7 @@ def main():
     )
 
     print(
-        "ALL X/Y MPC INTEGRATION TESTS PASSED"
+        "LONG-HORIZON X/Y MPC TEST PASSED"
     )
 
     print(
