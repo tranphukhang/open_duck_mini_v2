@@ -1,5 +1,6 @@
 from pathlib import Path
 import time
+import threading
 
 import numpy as np
 import mujoco
@@ -7,7 +8,12 @@ import mujoco.viewer
 import pinocchio as pin
 
 
+# ============================================================
+# IMPORTS
+# ============================================================
+
 if __package__:
+
     from .walking_fsm import (
         WalkingFSM,
         WalkingPhase,
@@ -31,7 +37,12 @@ if __package__:
         solve_double_support_ik,
     )
 
+    from .walking_visualization import (
+        WalkingVisualizer,
+    )
+
 else:
+
     from walking_fsm import (
         WalkingFSM,
         WalkingPhase,
@@ -53,6 +64,10 @@ else:
         TRUNK_FRAME,
         solve_single_support_ik,
         solve_double_support_ik,
+    )
+
+    from walking_visualization import (
+        WalkingVisualizer,
     )
 
 
@@ -163,10 +178,42 @@ VIEWER_SYNC_STEPS = max(
     ),
 )
 
-
 TRUNK_BODY_NAME = (
     "trunk_assembly"
 )
+
+
+# ============================================================
+# USER STOP REQUEST
+# ============================================================
+
+stop_requested = (
+    threading.Event()
+)
+
+
+def keyboard_callback(
+    keycode,
+):
+    if keycode in (
+        ord("F"),
+        ord("f"),
+    ):
+
+        if not stop_requested.is_set():
+
+            stop_requested.set()
+
+            print()
+
+            print(
+                "F pressed -> graceful stop requested."
+            )
+
+            print(
+                "The FSM will finish the current swing, "
+                "close the stance, then enter final double support."
+            )
 
 
 # ============================================================
@@ -174,6 +221,7 @@ TRUNK_BODY_NAME = (
 # ============================================================
 
 def separator():
+
     print(
         "=" * 90
     )
@@ -189,7 +237,6 @@ def rotation_matrix_to_pitch(
 
     pitch = np.arctan2(
         -R[2, 0],
-
         np.sqrt(
             R[0, 0] ** 2
             +
@@ -214,8 +261,10 @@ def get_mujoco_body_pitch(
     )
 
     if body_id < 0:
+
         raise RuntimeError(
-            f"Body '{body_name}' was not found."
+            f"Body '{body_name}' "
+            "was not found."
         )
 
     R = (
@@ -256,7 +305,7 @@ def get_trunk_local_y_error(
 
 
 # ============================================================
-# SETTLE ROBOT
+# SETTLING
 # ============================================================
 
 def settle_robot(
@@ -270,6 +319,7 @@ def settle_robot(
     )
 
     if home_id < 0:
+
         raise RuntimeError(
             "HOME keyframe was not found."
         )
@@ -340,21 +390,15 @@ def settle_robot(
             current_time
             >=
             MIN_SETTLE_TIME
-
             and
-
             base_linear_speed
             <
             BASE_LIN_TOL
-
             and
-
             base_angular_speed
             <
             BASE_ANG_TOL
-
             and
-
             max_joint_speed
             <
             JOINT_VEL_TOL
@@ -368,9 +412,7 @@ def settle_robot(
 
         else:
 
-            stable_time = (
-                0.0
-            )
+            stable_time = 0.0
 
         if (
             stable_time
@@ -508,9 +550,10 @@ def compute_references(
                 .copy()
             )
 
-            v_left_ref = np.zeros(
-                3,
-                dtype=float,
+            v_left_ref = (
+                np.zeros(
+                    3
+                )
             )
 
             p_right_ref = (
@@ -542,9 +585,10 @@ def compute_references(
                 .copy()
             )
 
-            v_right_ref = np.zeros(
-                3,
-                dtype=float,
+            v_right_ref = (
+                np.zeros(
+                    3
+                )
             )
 
 
@@ -574,19 +618,19 @@ def compute_references(
             .copy()
         )
 
-        v_left_ref = np.zeros(
-            3,
-            dtype=float,
+        v_left_ref = (
+            np.zeros(
+                3
+            )
         )
 
-        v_right_ref = np.zeros(
-            3,
-            dtype=float,
+        v_right_ref = (
+            np.zeros(
+                3
+            )
         )
 
-        v_swing_ref = (
-            None
-        )
+        v_swing_ref = None
 
 
     else:
@@ -631,31 +675,25 @@ def compute_references(
     return (
         p_left_ref,
         p_right_ref,
-
         p_com_ref,
         v_com_ref,
-
         v_swing_ref,
     )
 
 
 # ============================================================
-# IK DISPATCH
+# IK
 # ============================================================
 
 def solve_current_phase(
     robot,
     q_pin,
     state,
-
     p_left_ref,
     p_right_ref,
-
     p_com_ref,
     v_com_ref,
-
     v_swing_ref,
-
     trunk_rotation_ref,
 ):
     if (
@@ -678,11 +716,7 @@ def solve_current_phase(
                 p_right_ref
             )
 
-        elif (
-            state.support_side
-            ==
-            "right"
-        ):
+        else:
 
             support_position_ref = (
                 p_right_ref
@@ -692,12 +726,6 @@ def solve_current_phase(
                 p_left_ref
             )
 
-        else:
-
-            raise RuntimeError(
-                f"Invalid support side: "
-                f"{state.support_side}"
-            )
 
         return solve_single_support_ik(
             robot=robot,
@@ -758,62 +786,50 @@ def solve_current_phase(
         )
 
 
-    if state.phase in (
-        WalkingPhase.INITIAL_DOUBLE_SUPPORT,
-        WalkingPhase.DOUBLE_SUPPORT,
-        WalkingPhase.FINAL_DOUBLE_SUPPORT,
-    ):
+    return solve_double_support_ik(
+        robot=robot,
 
-        return solve_double_support_ik(
-            robot=robot,
+        q_pin=q_pin,
 
-            q_pin=q_pin,
+        left_position_ref=(
+            p_left_ref
+        ),
 
-            left_position_ref=(
-                p_left_ref
-            ),
+        right_position_ref=(
+            p_right_ref
+        ),
 
-            right_position_ref=(
-                p_right_ref
-            ),
+        com_position_ref=(
+            p_com_ref
+        ),
 
-            com_position_ref=(
-                p_com_ref
-            ),
+        com_velocity_ref=(
+            v_com_ref
+        ),
 
-            com_velocity_ref=(
-                v_com_ref
-            ),
+        trunk_rotation_ref=(
+            trunk_rotation_ref
+        ),
 
-            trunk_rotation_ref=(
-                trunk_rotation_ref
-            ),
+        foot_position_gain=(
+            SUPPORT_POSITION_KP
+        ),
 
-            foot_position_gain=(
-                SUPPORT_POSITION_KP
-            ),
+        com_position_gain=(
+            COM_POSITION_KP
+        ),
 
-            com_position_gain=(
-                COM_POSITION_KP
-            ),
+        trunk_orientation_gain=(
+            TRUNK_ORIENTATION_KP
+        ),
 
-            trunk_orientation_gain=(
-                TRUNK_ORIENTATION_KP
-            ),
+        damping=(
+            IK_DAMPING
+        ),
 
-            damping=(
-                IK_DAMPING
-            ),
-
-            rcond=(
-                IK_RCOND
-            ),
-        )
-
-
-    raise RuntimeError(
-        f"Cannot solve phase: "
-        f"{state.phase}"
+        rcond=(
+            IK_RCOND
+        ),
     )
 
 
@@ -822,6 +838,13 @@ def solve_current_phase(
 # ============================================================
 
 def main():
+
+    stop_requested.clear()
+
+
+    # ========================================================
+    # MUJOCO
+    # ========================================================
 
     separator()
 
@@ -832,12 +855,6 @@ def main():
     separator()
 
 
-    print(
-        f"scene = "
-        f"{SCENE_XML}"
-    )
-
-
     mj_model = (
         mujoco.MjModel.from_xml_path(
             str(
@@ -846,43 +863,11 @@ def main():
         )
     )
 
-
-    mj_data = mujoco.MjData(
-        mj_model
-    )
-
-
-    print(
-        f"timestep = "
-        f"{mj_model.opt.timestep:.7f} s"
-    )
-
-    print(
-        f"nq = "
-        f"{mj_model.nq}"
-    )
-
-    print(
-        f"nv = "
-        f"{mj_model.nv}"
-    )
-
-    print(
-        f"nu = "
-        f"{mj_model.nu}"
-    )
-
-
-    if abs(
-        mj_model.opt.timestep
-        -
-        DT
-    ) > 1e-12:
-
-        raise RuntimeError(
-            "MuJoCo timestep "
-            "does not match DT."
+    mj_data = (
+        mujoco.MjData(
+            mj_model
         )
+    )
 
 
     # ========================================================
@@ -898,9 +883,11 @@ def main():
     separator()
 
 
-    settle_info = settle_robot(
-        mj_model,
-        mj_data,
+    settle_info = (
+        settle_robot(
+            mj_model,
+            mj_data,
+        )
     )
 
 
@@ -909,34 +896,10 @@ def main():
         f"{settle_info['time']:.4f} s"
     )
 
-    print(
-        f"base linear speed = "
-        f"{settle_info['base_linear_speed']:.6e} m/s"
-    )
-
-    print(
-        f"base angular speed = "
-        f"{settle_info['base_angular_speed']:.6e} rad/s"
-    )
-
-    print(
-        f"max joint speed = "
-        f"{settle_info['max_joint_speed']:.6e} rad/s"
-    )
-
 
     # ========================================================
     # PINOCCHIO
     # ========================================================
-
-    separator()
-
-    print(
-        "CREATE PINOCCHIO MODEL"
-    )
-
-    separator()
-
 
     robot = PinocchioModel(
         mjcf_path=(
@@ -954,7 +917,6 @@ def main():
             mj_data.qpos.copy()
         )
     )
-
 
     robot.update(
         q_pin
@@ -1002,44 +964,9 @@ def main():
     )
 
 
-    print(
-        "settled LEFT foot  =",
-        p_left_0,
-    )
-
-    print(
-        "settled RIGHT foot =",
-        p_right_0,
-    )
-
-    print(
-        "settled CoM        =",
-        p_com_0,
-    )
-
-    print(
-        f"CoM y reference    = "
-        f"{COM_Y0:+.6f} m"
-    )
-
-    print(
-        f"settled trunk pitch = "
-        f"{initial_trunk_pitch_deg:+.4f} deg"
-    )
-
-
     # ========================================================
     # FSM
     # ========================================================
-
-    separator()
-
-    print(
-        "CREATE WALKING FSM"
-    )
-
-    separator()
-
 
     fsm = WalkingFSM(
         p_left_initial=(
@@ -1072,20 +999,22 @@ def main():
     )
 
 
-    print(
-        "initial phase =",
-        fsm.get_state().phase.value,
+    # ========================================================
+    # VISUALIZER
+    # ========================================================
+
+    visualizer = (
+        WalkingVisualizer(
+            mj_model
+        )
     )
 
-    print(
-        f"TRUNK_ORIENTATION_KP = "
-        f"{TRUNK_ORIENTATION_KP:.1f} 1/s"
+    visualizer.initialize(
+        robot
     )
 
 
-    mj_data.qvel[:] = (
-        0.0
-    )
+    mj_data.qvel[:] = 0.0
 
     mujoco.mj_forward(
         mj_model,
@@ -1094,7 +1023,7 @@ def main():
 
 
     # ========================================================
-    # WALK
+    # INFO
     # ========================================================
 
     separator()
@@ -1107,80 +1036,185 @@ def main():
 
 
     print(
-        "Foot/CoM position feedback is ACTIVE."
+        "Press F -> graceful stop."
     )
 
     print(
-        "Trunk local-Y task is ACTIVE."
+        "Close viewer -> exit immediately."
     )
 
     print(
-        "Trunk reference = settled orientation."
+        "Visualization:"
     )
 
     print(
-        "mj_step() is NOT called after settling."
+        "  green = left foot trail"
+    )
+
+    print(
+        "  red   = right foot trail"
+    )
+
+    print(
+        "  blue  = CoM trail"
+    )
+
+    print(
+        "  orange/yellow = current support polygon"
+    )
+
+    print(
+        "  dark red boxes = planned footsteps"
     )
 
 
-    kinematic_time = (
-        0.0
-    )
+    # ========================================================
+    # LOOP DATA
+    # ========================================================
 
-    iteration = (
-        0
-    )
+    kinematic_time = 0.0
 
-    completed_steps = (
-        0
-    )
+    iteration = 0
 
-    previous_step_index = (
-        -1
-    )
+    completed_steps = 0
+
+    previous_step_index = -1
+
+    stop_forwarded_to_fsm = False
+
+    finished_announced = False
 
 
-    wall_start = (
-        time.perf_counter()
-    )
-
+    # ========================================================
+    # VIEWER
+    # ========================================================
 
     with mujoco.viewer.launch_passive(
         mj_model,
         mj_data,
+        show_right_ui=True,
+        key_callback=(
+            keyboard_callback
+        ),
     ) as viewer:
 
 
-        viewer.sync()
+        visualizer.configure_viewer(
+            viewer
+        )
+
+
+        visualizer.update(
+            viewer,
+            robot,
+            fsm.get_state(),
+        )
+
+
+        wall_start = (
+            time.perf_counter()
+        )
 
 
         while viewer.is_running():
+
+            # =================================================
+            # FORWARD F EVENT TO FSM
+            # =================================================
+
+            if (
+                stop_requested.is_set()
+                and
+                not stop_forwarded_to_fsm
+            ):
+
+                fsm.request_stop()
+
+                stop_forwarded_to_fsm = (
+                    True
+                )
+
+                print()
+
+                print(
+                    "Stop request forwarded to WalkingFSM."
+                )
+
+
+            # =================================================
+            # CURRENT STATE
+            # =================================================
 
             state = (
                 fsm.get_state()
             )
 
 
+            # =================================================
+            # FINISHED -> HOLD STANDING POSE
+            # =================================================
+
             if state.finished:
 
-                separator()
+                if not finished_announced:
 
-                print(
-                    "FSM FINISHED"
+                    separator()
+
+                    print(
+                        "GRACEFUL STOP COMPLETED"
+                    )
+
+                    separator()
+
+                    print(
+                        "FSM state = FINISHED"
+                    )
+
+                    print(
+                        "Robot is holding the final standing pose."
+                    )
+
+                    print(
+                        "Close the viewer to exit."
+                    )
+
+                    finished_announced = (
+                        True
+                    )
+
+
+                visualizer.update(
+                    viewer,
+                    robot,
+                    state,
                 )
 
-                separator()
+                time.sleep(
+                    0.03
+                )
 
-                break
+                continue
 
+
+            # =================================================
+            # REGISTER CURRENT PLANNED STEP
+            # =================================================
+
+            visualizer.register_step(
+                state,
+                robot,
+            )
+
+
+            # =================================================
+            # NEW STEP MESSAGE
+            # =================================================
 
             if (
                 state.phase
                 ==
                 WalkingPhase.SINGLE_SUPPORT
-
                 and
-
                 state.step_index
                 !=
                 previous_step_index
@@ -1223,71 +1257,41 @@ def main():
                     state.swing_target,
                 )
 
-                print(
-                    f"walking time = "
-                    f"{kinematic_time:.3f} s"
-                )
 
+            # =================================================
+            # REFERENCES
+            # =================================================
 
             (
                 p_left_ref,
                 p_right_ref,
-
                 p_com_ref,
                 v_com_ref,
-
                 v_swing_ref,
             ) = compute_references(
-                state=(
-                    state
-                ),
-
-                com_y=(
-                    COM_Y0
-                ),
+                state,
+                COM_Y0,
             )
 
+
+            # =================================================
+            # IK
+            # =================================================
 
             (
                 qdot_full,
                 diagnostics,
                 Z,
             ) = solve_current_phase(
-                robot=(
-                    robot
-                ),
-
-                q_pin=(
-                    q_pin
-                ),
-
-                state=(
-                    state
-                ),
-
-                p_left_ref=(
-                    p_left_ref
-                ),
-
-                p_right_ref=(
-                    p_right_ref
-                ),
-
-                p_com_ref=(
-                    p_com_ref
-                ),
-
-                v_com_ref=(
-                    v_com_ref
-                ),
-
-                v_swing_ref=(
-                    v_swing_ref
-                ),
-
-                trunk_rotation_ref=(
-                    trunk_rotation_ref
-                ),
+                robot,
+                q_pin,
+                state,
+                p_left_ref,
+                p_right_ref,
+                p_com_ref,
+                v_com_ref,
+                v_swing_ref,
+                trunk_rotation_ref,
             )
 
 
@@ -1302,6 +1306,10 @@ def main():
                     "produced NaN/Inf."
                 )
 
+
+            # =================================================
+            # INTEGRATE
+            # =================================================
 
             q_pin = robot.integrate(
                 q_pin=(
@@ -1318,41 +1326,22 @@ def main():
             )
 
 
-            if not np.all(
-                np.isfinite(
-                    q_pin
-                )
-            ):
-
-                raise RuntimeError(
-                    "Pinocchio configuration "
-                    "contains NaN/Inf."
-                )
-
-
             robot.update(
                 q_pin
             )
 
 
             update_mujoco_from_pinocchio(
-                robot=(
-                    robot
-                ),
-
-                q_pin=(
-                    q_pin
-                ),
-
-                mj_model=(
-                    mj_model
-                ),
-
-                mj_data=(
-                    mj_data
-                ),
+                robot,
+                q_pin,
+                mj_model,
+                mj_data,
             )
 
+
+            # =================================================
+            # FSM
+            # =================================================
 
             phase_before = (
                 state.phase
@@ -1366,21 +1355,21 @@ def main():
             )
 
 
+            # =================================================
+            # LANDING
+            # =================================================
+
             if (
                 phase_before
                 ==
                 WalkingPhase.SINGLE_SUPPORT
-
                 and
-
                 state_after.phase
                 !=
                 WalkingPhase.SINGLE_SUPPORT
             ):
 
-                completed_steps += (
-                    1
-                )
+                completed_steps += 1
 
 
                 p_left_actual, _ = (
@@ -1411,8 +1400,7 @@ def main():
                     )
 
                     support_target = (
-                        state
-                        .right_contact_position
+                        state.right_contact_position
                     )
 
                 else:
@@ -1426,8 +1414,7 @@ def main():
                     )
 
                     support_target = (
-                        state
-                        .left_contact_position
+                        state.left_contact_position
                     )
 
 
@@ -1520,13 +1507,8 @@ def main():
 
                 trunk_local_y_error = (
                     get_trunk_local_y_error(
-                        robot=(
-                            robot
-                        ),
-
-                        trunk_rotation_ref=(
-                            trunk_rotation_ref
-                        ),
+                        robot,
+                        trunk_rotation_ref,
                     )
                 )
 
@@ -1553,8 +1535,8 @@ def main():
                 )
 
                 print(
-                    f"swing side = "
-                    f"{state.swing_side}"
+                    f"type = "
+                    f"{state.step_type.value}"
                 )
 
                 print(
@@ -1592,20 +1574,14 @@ def main():
                     f"{final_nullity}"
                 )
 
-                print(
-                    f"completed steps = "
-                    f"{completed_steps}"
-                )
 
+            # =================================================
+            # TIME
+            # =================================================
 
-            iteration += (
-                1
-            )
+            iteration += 1
 
-
-            kinematic_time += (
-                DT
-            )
+            kinematic_time += DT
 
 
             mj_data.time = (
@@ -1617,6 +1593,10 @@ def main():
             )
 
 
+            # =================================================
+            # VISUAL / REAL-TIME
+            # =================================================
+
             if (
                 iteration
                 %
@@ -1625,7 +1605,11 @@ def main():
                 0
             ):
 
-                viewer.sync()
+                visualizer.update(
+                    viewer,
+                    robot,
+                    state_after,
+                )
 
 
                 target_wall_time = (
@@ -1653,10 +1637,14 @@ def main():
                     )
 
 
+    # ========================================================
+    # FINAL OUTPUT
+    # ========================================================
+
     separator()
 
     print(
-        "WALKING STOPPED"
+        "PROGRAM ENDED"
     )
 
     separator()
@@ -1705,28 +1693,13 @@ def main():
     )
 
 
-    final_trunk_local_y_error_deg = float(
-        np.degrees(
-            get_trunk_local_y_error(
-                robot=(
-                    robot
-                ),
-
-                trunk_rotation_ref=(
-                    trunk_rotation_ref
-                ),
-            )
-        )
-    )
-
-
     print(
         f"kinematic walking time = "
         f"{kinematic_time:.3f} s"
     )
 
     print(
-        f"completed steps = "
+        f"completed swing steps = "
         f"{completed_steps}"
     )
 
@@ -1760,11 +1733,10 @@ def main():
         f"{final_trunk_pitch_drift_deg:+.4f} deg"
     )
 
-    print(
-        f"trunk local-Y error = "
-        f"{final_trunk_local_y_error_deg:+.4f} deg"
-    )
 
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
 
