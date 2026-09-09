@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -220,7 +222,7 @@ class WalkingFSM:
             0.5 * self.feet_spacing
         )
 
-        # Average settled foot-site height
+        # Average settled foot-site height.
         self.nominal_foot_z = 0.5 * (
             self.p_left_initial[2]
             +
@@ -281,7 +283,11 @@ class WalkingFSM:
             5. finish.
         """
 
-        if self.phase == WalkingPhase.FINISHED:
+        if (
+            self.phase
+            ==
+            WalkingPhase.FINISHED
+        ):
             return
 
         if (
@@ -298,7 +304,9 @@ class WalkingFSM:
     # ========================================================
 
     @staticmethod
-    def _opposite_side(side):
+    def _opposite_side(
+        side,
+    ):
 
         if side == "left":
             return "right"
@@ -314,26 +322,50 @@ class WalkingFSM:
     # GET CURRENT FOOT POSITION
     # ========================================================
 
-    def _get_foot_position(self, side):
+    def _get_foot_position(
+        self,
+        side,
+    ):
 
         if side == "left":
-            return self.left_position.copy()
+
+            return (
+                self.left_position.copy()
+            )
 
         if side == "right":
-            return self.right_position.copy()
+
+            return (
+                self.right_position.copy()
+            )
 
         raise ValueError(
             f"Unknown foot side: {side}"
         )
 
     # ========================================================
-    # CREATE STEP TARGET
+    # COMPUTE STEP TARGET
     # ========================================================
 
-    def _create_step(
+    def _compute_step_target(
         self,
         step_type: StepType,
     ):
+        """
+        Compute the next swing-step geometry WITHOUT modifying
+        the internal FSM state.
+
+        This function is shared by:
+            - the actual footstep planner,
+            - the LIPM-MPC preview.
+
+        Returns
+        -------
+        swing_side
+        support_side
+        swing_position
+        target_position
+        """
 
         swing_side = (
             self.next_swing_side
@@ -369,8 +401,6 @@ class WalkingFSM:
 
             # First transition:
             #
-            # half nominal step
-            #
             # x_target =
             # x_support + STEP_LENGTH / 2
             #
@@ -405,13 +435,9 @@ class WalkingFSM:
 
             # Graceful stop:
             #
-            # put the rear swing foot at
-            # the SAME longitudinal location
+            # Put the rear swing foot at
+            # the same longitudinal position
             # as the support foot.
-            #
-            # Final:
-            #
-            #     x_left = x_right
             #
             target_x = (
                 support_position[0]
@@ -420,8 +446,7 @@ class WalkingFSM:
         else:
 
             raise ValueError(
-                f"Unknown step type: "
-                f"{step_type}"
+                f"Unknown step type: {step_type}"
             )
 
         # ====================================================
@@ -455,6 +480,182 @@ class WalkingFSM:
                 target_z,
             ],
             dtype=float,
+        )
+
+        return (
+            swing_side,
+            support_side,
+            swing_position,
+            target_position,
+        )
+
+    # ========================================================
+    # GET NEXT SWING TARGET FOR MPC
+    # ========================================================
+
+    def get_next_swing_target(
+        self,
+    ) -> Optional[np.ndarray]:
+        """
+        Return the current or next planned swing-foot target.
+
+        This method does NOT modify the FSM.
+
+        It is intended primarily for preview control such as
+        LIPM-MPC, which needs the upcoming foothold even while
+        the robot is still in double support.
+
+        Returns
+        -------
+        np.ndarray, shape (3,)
+            Current/upcoming swing-foot target.
+
+        None
+            No future swing is scheduled.
+        """
+
+        # ----------------------------------------------------
+        # CURRENT SINGLE SUPPORT
+        # ----------------------------------------------------
+
+        if (
+            self.phase
+            ==
+            WalkingPhase.SINGLE_SUPPORT
+        ):
+
+            if self.current_step is None:
+
+                raise RuntimeError(
+                    "SINGLE_SUPPORT requires "
+                    "a current_step."
+                )
+
+            return (
+                self.current_step
+                .target_position
+                .copy()
+            )
+
+        # ----------------------------------------------------
+        # INITIAL DOUBLE SUPPORT
+        # ----------------------------------------------------
+
+        if (
+            self.phase
+            ==
+            WalkingPhase.INITIAL_DOUBLE_SUPPORT
+        ):
+
+            # Stop requested before walking starts:
+            # no future swing will occur.
+            if self.stop_requested:
+
+                return None
+
+            (
+                _,
+                _,
+                _,
+                target_position,
+            ) = self._compute_step_target(
+                StepType.START_HALF_STEP
+            )
+
+            return (
+                target_position.copy()
+            )
+
+        # ----------------------------------------------------
+        # NORMAL DOUBLE SUPPORT
+        # ----------------------------------------------------
+
+        if (
+            self.phase
+            ==
+            WalkingPhase.DOUBLE_SUPPORT
+        ):
+
+            # -----------------------------------------------
+            # Graceful stop
+            # -----------------------------------------------
+
+            if self.stop_requested:
+
+                longitudinal_error = abs(
+                    self.left_position[0]
+                    -
+                    self.right_position[0]
+                )
+
+                # Feet already aligned:
+                # no closing swing required.
+                if (
+                    longitudinal_error
+                    <
+                    1e-9
+                ):
+
+                    return None
+
+                next_step_type = (
+                    StepType.CLOSING_STEP
+                )
+
+            # -----------------------------------------------
+            # Continue walking
+            # -----------------------------------------------
+
+            else:
+
+                next_step_type = (
+                    StepType.NORMAL_STEP
+                )
+
+            (
+                _,
+                _,
+                _,
+                target_position,
+            ) = self._compute_step_target(
+                next_step_type
+            )
+
+            return (
+                target_position.copy()
+            )
+
+        # ----------------------------------------------------
+        # FINAL DOUBLE SUPPORT / FINISHED
+        # ----------------------------------------------------
+
+        if self.phase in (
+            WalkingPhase.FINAL_DOUBLE_SUPPORT,
+            WalkingPhase.FINISHED,
+        ):
+
+            return None
+
+        raise RuntimeError(
+            f"Unknown walking phase: {self.phase}"
+        )
+
+    # ========================================================
+    # CREATE STEP
+    # ========================================================
+
+    def _create_step(
+        self,
+        step_type: StepType,
+    ):
+
+        (
+            swing_side,
+            support_side,
+            swing_position,
+            target_position,
+        ) = self._compute_step_target(
+            step_type
         )
 
         command = StepCommand(
@@ -504,7 +705,9 @@ class WalkingFSM:
     # COMMIT LANDING
     # ========================================================
 
-    def _commit_current_step(self):
+    def _commit_current_step(
+        self,
+    ):
 
         if self.current_step is None:
 
@@ -544,7 +747,9 @@ class WalkingFSM:
     # CURRENT PHASE DURATION
     # ========================================================
 
-    def _phase_duration(self):
+    def _phase_duration(
+        self,
+    ):
 
         if (
             self.phase
@@ -552,7 +757,9 @@ class WalkingFSM:
             WalkingPhase.SINGLE_SUPPORT
         ):
 
-            return self.ss_duration
+            return (
+                self.ss_duration
+            )
 
         if self.phase in (
             WalkingPhase.INITIAL_DOUBLE_SUPPORT,
@@ -560,7 +767,9 @@ class WalkingFSM:
             WalkingPhase.FINAL_DOUBLE_SUPPORT,
         ):
 
-            return self.ds_duration
+            return (
+                self.ds_duration
+            )
 
         if (
             self.phase
@@ -578,7 +787,9 @@ class WalkingFSM:
     # PHASE TRANSITION
     # ========================================================
 
-    def _advance_phase(self):
+    def _advance_phase(
+        self,
+    ):
 
         # ====================================================
         # INITIAL DOUBLE SUPPORT
@@ -620,7 +831,8 @@ class WalkingFSM:
         ):
 
             completed_type = (
-                self.current_step.step_type
+                self.current_step
+                .step_type
             )
 
             self._commit_current_step()
@@ -629,9 +841,9 @@ class WalkingFSM:
 
             self.phase_time = 0.0
 
-            # -----------------------------------------------
+            # ------------------------------------------------
             # Closing step completed
-            # -----------------------------------------------
+            # ------------------------------------------------
 
             if (
                 completed_type
@@ -645,9 +857,9 @@ class WalkingFSM:
 
                 return
 
-            # -----------------------------------------------
+            # ------------------------------------------------
             # Normal / start step completed
-            # -----------------------------------------------
+            # ------------------------------------------------
 
             self.phase = (
                 WalkingPhase.DOUBLE_SUPPORT
@@ -667,22 +879,23 @@ class WalkingFSM:
 
             self.phase_time = 0.0
 
-            # -----------------------------------------------
+            # ------------------------------------------------
             # Stop requested
-            # -----------------------------------------------
+            # ------------------------------------------------
 
             if self.stop_requested:
 
-                # If both feet already have
-                # essentially identical x,
-                # no closing swing is required.
                 longitudinal_error = abs(
                     self.left_position[0]
                     -
                     self.right_position[0]
                 )
 
-                if longitudinal_error < 1e-9:
+                if (
+                    longitudinal_error
+                    <
+                    1e-9
+                ):
 
                     self.phase = (
                         WalkingPhase.FINAL_DOUBLE_SUPPORT
@@ -690,16 +903,15 @@ class WalkingFSM:
 
                     return
 
-                # Otherwise execute closing step.
                 self._start_step(
                     StepType.CLOSING_STEP
                 )
 
                 return
 
-            # -----------------------------------------------
+            # ------------------------------------------------
             # Continue normal walking
-            # -----------------------------------------------
+            # ------------------------------------------------
 
             self._start_step(
                 StepType.NORMAL_STEP
@@ -756,7 +968,9 @@ class WalkingFSM:
         asynchronous events such as request_stop().
         """
 
-        dt = float(dt)
+        dt = float(
+            dt
+        )
 
         if dt < 0.0:
 
@@ -769,7 +983,9 @@ class WalkingFSM:
         tolerance = 1e-12
 
         while (
-            remaining_dt > tolerance
+            remaining_dt
+            >
+            tolerance
             and
             self.phase
             !=
@@ -786,7 +1002,10 @@ class WalkingFSM:
                 self.phase_time
             )
 
-            # Stay inside current phase.
+            # ------------------------------------------------
+            # Stay inside current phase
+            # ------------------------------------------------
+
             if (
                 remaining_dt
                 <
@@ -799,7 +1018,10 @@ class WalkingFSM:
 
                 remaining_dt = 0.0
 
-            # Reach end of current phase.
+            # ------------------------------------------------
+            # Reach end of current phase
+            # ------------------------------------------------
+
             else:
 
                 self.phase_time = (
@@ -826,7 +1048,9 @@ class WalkingFSM:
             self._phase_duration()
         )
 
-        if np.isfinite(duration):
+        if np.isfinite(
+            duration
+        ):
 
             if duration > 0.0:
 
@@ -867,15 +1091,25 @@ class WalkingFSM:
             return WalkingState(
                 phase=self.phase,
 
-                phase_time=self.phase_time,
+                phase_time=(
+                    self.phase_time
+                ),
 
-                phase_duration=duration,
+                phase_duration=(
+                    duration
+                ),
 
-                phase_progress=progress,
+                phase_progress=(
+                    progress
+                ),
 
-                step_index=step.step_index,
+                step_index=(
+                    step.step_index
+                ),
 
-                step_type=step.step_type,
+                step_type=(
+                    step.step_type
+                ),
 
                 support_side=(
                     step.support_side
@@ -915,11 +1149,17 @@ class WalkingFSM:
         return WalkingState(
             phase=self.phase,
 
-            phase_time=self.phase_time,
+            phase_time=(
+                self.phase_time
+            ),
 
-            phase_duration=duration,
+            phase_duration=(
+                duration
+            ),
 
-            phase_progress=progress,
+            phase_progress=(
+                progress
+            ),
 
             step_index=-1,
 
