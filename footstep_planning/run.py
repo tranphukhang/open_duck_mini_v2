@@ -116,9 +116,20 @@ SWING_HEIGHT = 0.04
 
 COM_HEIGHT = 0.205
 
+
+# ------------------------------------------------------------
+# GAIT TIMING
+# ------------------------------------------------------------
+
+# Initial standing -> first single support
+INITIAL_DOUBLE_SUPPORT_DURATION = 0.36
+
+# Duration of each single-support phase
 SINGLE_SUPPORT_DURATION = 0.18
 
-DOUBLE_SUPPORT_DURATION = 0.09
+# Duration of normal double-support phases
+DOUBLE_SUPPORT_DURATION = 0.27
+
 
 FIRST_SWING_SIDE = "right"
 
@@ -195,6 +206,7 @@ stop_requested = (
 def keyboard_callback(
     keycode,
 ):
+
     if keycode in (
         ord("F"),
         ord("f"),
@@ -230,6 +242,7 @@ def separator():
 def rotation_matrix_to_pitch(
     R,
 ):
+
     R = np.asarray(
         R,
         dtype=float,
@@ -254,6 +267,7 @@ def get_mujoco_body_pitch(
     data,
     body_name,
 ):
+
     body_id = mujoco.mj_name2id(
         model,
         mujoco.mjtObj.mjOBJ_BODY,
@@ -287,6 +301,7 @@ def get_trunk_local_y_error(
     robot,
     trunk_rotation_ref,
 ):
+
     _, R_actual = (
         robot.get_frame_pose(
             TRUNK_FRAME
@@ -312,6 +327,7 @@ def settle_robot(
     model,
     data,
 ):
+
     home_id = mujoco.mj_name2id(
         model,
         mujoco.mjtObj.mjOBJ_KEY,
@@ -478,6 +494,7 @@ def update_mujoco_from_pinocchio(
     mj_model,
     mj_data,
 ):
+
     q_mj = (
         robot.pin_to_mujoco(
             q_pin
@@ -506,6 +523,11 @@ def compute_references(
     state,
     com_y,
 ):
+
+    # ========================================================
+    # SINGLE SUPPORT
+    # ========================================================
+
     if (
         state.phase
         ==
@@ -537,6 +559,9 @@ def compute_references(
             ),
         )
 
+        # ----------------------------------------------------
+        # RIGHT FOOT SWING
+        # ----------------------------------------------------
 
         if (
             state.swing_side
@@ -564,6 +589,9 @@ def compute_references(
                 v_swing_ref.copy()
             )
 
+        # ----------------------------------------------------
+        # LEFT FOOT SWING
+        # ----------------------------------------------------
 
         elif (
             state.swing_side
@@ -591,7 +619,6 @@ def compute_references(
                 )
             )
 
-
         else:
 
             raise RuntimeError(
@@ -599,6 +626,9 @@ def compute_references(
                 f"{state.swing_side}"
             )
 
+    # ========================================================
+    # DOUBLE SUPPORT
+    # ========================================================
 
     elif state.phase in (
         WalkingPhase.INITIAL_DOUBLE_SUPPORT,
@@ -632,7 +662,6 @@ def compute_references(
 
         v_swing_ref = None
 
-
     else:
 
         raise RuntimeError(
@@ -641,6 +670,13 @@ def compute_references(
             f"{state.phase}."
         )
 
+    # ========================================================
+    # CURRENT KINEMATIC COM REFERENCE
+    #
+    # NOTE:
+    # This is still the old kinematic CoM reference.
+    # LIPM-MPC is NOT connected here yet.
+    # ========================================================
 
     (
         p_com_ref,
@@ -671,7 +707,6 @@ def compute_references(
         ),
     )
 
-
     return (
         p_left_ref,
         p_right_ref,
@@ -696,6 +731,11 @@ def solve_current_phase(
     v_swing_ref,
     trunk_rotation_ref,
 ):
+
+    # ========================================================
+    # SINGLE SUPPORT
+    # ========================================================
+
     if (
         state.phase
         ==
@@ -725,7 +765,6 @@ def solve_current_phase(
             swing_position_ref = (
                 p_left_ref
             )
-
 
         return solve_single_support_ik(
             robot=robot,
@@ -785,6 +824,9 @@ def solve_current_phase(
             ),
         )
 
+    # ========================================================
+    # DOUBLE SUPPORT
+    # ========================================================
 
     return solve_double_support_ik(
         robot=robot,
@@ -841,7 +883,6 @@ def main():
 
     stop_requested.clear()
 
-
     # ========================================================
     # MUJOCO
     # ========================================================
@@ -853,7 +894,6 @@ def main():
     )
 
     separator()
-
 
     mj_model = (
         mujoco.MjModel.from_xml_path(
@@ -869,7 +909,6 @@ def main():
         )
     )
 
-
     # ========================================================
     # SETTLING
     # ========================================================
@@ -882,7 +921,6 @@ def main():
 
     separator()
 
-
     settle_info = (
         settle_robot(
             mj_model,
@@ -890,12 +928,10 @@ def main():
         )
     )
 
-
     print(
         f"settled at t = "
         f"{settle_info['time']:.4f} s"
     )
-
 
     # ========================================================
     # PINOCCHIO
@@ -911,7 +947,6 @@ def main():
         ),
     )
 
-
     q_pin = (
         robot.mujoco_to_pin(
             mj_data.qpos.copy()
@@ -921,7 +956,6 @@ def main():
     robot.update(
         q_pin
     )
-
 
     p_left_0, _ = (
         robot.get_left_foot_pose()
@@ -935,18 +969,15 @@ def main():
         robot.get_com()
     )
 
-
     _, trunk_rotation_ref = (
         robot.get_frame_pose(
             TRUNK_FRAME
         )
     )
 
-
     COM_Y0 = float(
         p_com_0[1]
     )
-
 
     initial_trunk_pitch = (
         get_mujoco_body_pitch(
@@ -956,13 +987,43 @@ def main():
         )
     )
 
-
     initial_trunk_pitch_deg = float(
         np.degrees(
             initial_trunk_pitch
         )
     )
 
+    # ========================================================
+    # INITIAL STATE INFORMATION
+    # ========================================================
+
+    separator()
+
+    print(
+        "SETTLED INITIAL STATE"
+    )
+
+    separator()
+
+    print(
+        "LEFT foot  =",
+        p_left_0,
+    )
+
+    print(
+        "RIGHT foot =",
+        p_right_0,
+    )
+
+    print(
+        "CoM        =",
+        p_com_0,
+    )
+
+    print(
+        f"trunk pitch = "
+        f"{initial_trunk_pitch_deg:+.4f} deg"
+    )
 
     # ========================================================
     # FSM
@@ -996,8 +1057,11 @@ def main():
         first_swing_side=(
             FIRST_SWING_SIDE
         ),
-    )
 
+        initial_double_support_duration=(
+            INITIAL_DOUBLE_SUPPORT_DURATION
+        ),
+    )
 
     # ========================================================
     # VISUALIZER
@@ -1013,14 +1077,12 @@ def main():
         robot
     )
 
-
     mj_data.qvel[:] = 0.0
 
     mujoco.mj_forward(
         mj_model,
         mj_data,
     )
-
 
     # ========================================================
     # INFO
@@ -1034,6 +1096,72 @@ def main():
 
     separator()
 
+    print(
+        "Walking parameters:"
+    )
+
+    print(
+        f"  STEP_LENGTH = "
+        f"{STEP_LENGTH:.3f} m"
+    )
+
+    print(
+        f"  FEET_SPACING = "
+        f"{FEET_SPACING:.3f} m"
+    )
+
+    print(
+        f"  SWING_HEIGHT = "
+        f"{SWING_HEIGHT:.3f} m"
+    )
+
+    print(
+        f"  COM_HEIGHT = "
+        f"{COM_HEIGHT:.3f} m"
+    )
+
+    print(
+        f"  INITIAL_DS = "
+        f"{INITIAL_DOUBLE_SUPPORT_DURATION:.3f} s"
+    )
+
+    print(
+        f"  SS = "
+        f"{SINGLE_SUPPORT_DURATION:.3f} s"
+    )
+
+    print(
+        f"  NORMAL_DS = "
+        f"{DOUBLE_SUPPORT_DURATION:.3f} s"
+    )
+
+    print()
+
+    print(
+        "Expected phase timing:"
+    )
+
+    print(
+        "  0.00 - 0.36 s : INITIAL DOUBLE SUPPORT"
+    )
+
+    print(
+        "  0.36 - 0.54 s : SINGLE SUPPORT"
+    )
+
+    print(
+        "  0.54 - 0.81 s : DOUBLE SUPPORT"
+    )
+
+    print(
+        "  0.81 - 0.99 s : SINGLE SUPPORT"
+    )
+
+    print(
+        "  0.99 - 1.26 s : DOUBLE SUPPORT"
+    )
+
+    print()
 
     print(
         "Press F -> graceful stop."
@@ -1042,6 +1170,8 @@ def main():
     print(
         "Close viewer -> exit immediately."
     )
+
+    print()
 
     print(
         "Visualization:"
@@ -1067,7 +1197,6 @@ def main():
         "  dark red boxes = planned footsteps"
     )
 
-
     # ========================================================
     # LOOP DATA
     # ========================================================
@@ -1084,7 +1213,6 @@ def main():
 
     finished_announced = False
 
-
     # ========================================================
     # VIEWER
     # ========================================================
@@ -1098,11 +1226,9 @@ def main():
         ),
     ) as viewer:
 
-
         visualizer.configure_viewer(
             viewer
         )
-
 
         visualizer.update(
             viewer,
@@ -1110,11 +1236,9 @@ def main():
             fsm.get_state(),
         )
 
-
         wall_start = (
             time.perf_counter()
         )
-
 
         while viewer.is_running():
 
@@ -1140,7 +1264,6 @@ def main():
                     "Stop request forwarded to WalkingFSM."
                 )
 
-
             # =================================================
             # CURRENT STATE
             # =================================================
@@ -1148,7 +1271,6 @@ def main():
             state = (
                 fsm.get_state()
             )
-
 
             # =================================================
             # FINISHED -> HOLD STANDING POSE
@@ -1182,7 +1304,6 @@ def main():
                         True
                     )
 
-
                 visualizer.update(
                     viewer,
                     robot,
@@ -1195,7 +1316,6 @@ def main():
 
                 continue
 
-
             # =================================================
             # REGISTER CURRENT PLANNED STEP
             # =================================================
@@ -1204,7 +1324,6 @@ def main():
                 state,
                 robot,
             )
-
 
             # =================================================
             # NEW STEP MESSAGE
@@ -1223,7 +1342,6 @@ def main():
                 previous_step_index = (
                     state.step_index
                 )
-
 
                 separator()
 
@@ -1257,7 +1375,6 @@ def main():
                     state.swing_target,
                 )
 
-
             # =================================================
             # REFERENCES
             # =================================================
@@ -1272,7 +1389,6 @@ def main():
                 state,
                 COM_Y0,
             )
-
 
             # =================================================
             # IK
@@ -1294,7 +1410,6 @@ def main():
                 trunk_rotation_ref,
             )
 
-
             if not np.all(
                 np.isfinite(
                     qdot_full
@@ -1305,7 +1420,6 @@ def main():
                     "Differential IK "
                     "produced NaN/Inf."
                 )
-
 
             # =================================================
             # INTEGRATE
@@ -1325,11 +1439,9 @@ def main():
                 ),
             )
 
-
             robot.update(
                 q_pin
             )
-
 
             update_mujoco_from_pinocchio(
                 robot,
@@ -1337,7 +1449,6 @@ def main():
                 mj_model,
                 mj_data,
             )
-
 
             # =================================================
             # FSM
@@ -1347,13 +1458,11 @@ def main():
                 state.phase
             )
 
-
             state_after = (
                 fsm.update(
                     DT
                 )
             )
-
 
             # =================================================
             # LANDING
@@ -1371,7 +1480,6 @@ def main():
 
                 completed_steps += 1
 
-
                 p_left_actual, _ = (
                     robot.get_left_foot_pose()
                 )
@@ -1384,6 +1492,9 @@ def main():
                     robot.get_com()
                 )
 
+                # ---------------------------------------------
+                # CURRENT SWING / SUPPORT FOOT
+                # ---------------------------------------------
 
                 if (
                     state.swing_side
@@ -1400,7 +1511,8 @@ def main():
                     )
 
                     support_target = (
-                        state.right_contact_position
+                        state
+                        .right_contact_position
                     )
 
                 else:
@@ -1414,9 +1526,13 @@ def main():
                     )
 
                     support_target = (
-                        state.left_contact_position
+                        state
+                        .left_contact_position
                     )
 
+                # ---------------------------------------------
+                # FOOT ERRORS
+                # ---------------------------------------------
 
                 landing_error = float(
                     np.linalg.norm(
@@ -1426,7 +1542,6 @@ def main():
                     )
                 )
 
-
                 support_error = float(
                     np.linalg.norm(
                         support_target
@@ -1435,6 +1550,9 @@ def main():
                     )
                 )
 
+                # ---------------------------------------------
+                # COM ERROR
+                # ---------------------------------------------
 
                 p_com_target, _ = (
                     compute_com_reference(
@@ -1470,7 +1588,6 @@ def main():
                     )
                 )
 
-
                 com_error = float(
                     np.linalg.norm(
                         p_com_target
@@ -1479,6 +1596,9 @@ def main():
                     )
                 )
 
+                # ---------------------------------------------
+                # TRUNK
+                # ---------------------------------------------
 
                 trunk_pitch = (
                     get_mujoco_body_pitch(
@@ -1488,13 +1608,11 @@ def main():
                     )
                 )
 
-
                 trunk_pitch_deg = float(
                     np.degrees(
                         trunk_pitch
                     )
                 )
-
 
                 trunk_pitch_drift_deg = float(
                     np.degrees(
@@ -1504,7 +1622,6 @@ def main():
                     )
                 )
 
-
                 trunk_local_y_error = (
                     get_trunk_local_y_error(
                         robot,
@@ -1512,13 +1629,11 @@ def main():
                     )
                 )
 
-
                 trunk_local_y_error_deg = float(
                     np.degrees(
                         trunk_local_y_error
                     )
                 )
-
 
                 final_nullity = int(
                     Z.shape[
@@ -1526,6 +1641,9 @@ def main():
                     ]
                 )
 
+                # ---------------------------------------------
+                # PRINT LANDING INFORMATION
+                # ---------------------------------------------
 
                 separator()
 
@@ -1574,15 +1692,15 @@ def main():
                     f"{final_nullity}"
                 )
 
-
             # =================================================
             # TIME
             # =================================================
 
             iteration += 1
 
-            kinematic_time += DT
-
+            kinematic_time += (
+                DT
+            )
 
             mj_data.time = (
                 settle_info[
@@ -1591,7 +1709,6 @@ def main():
                 +
                 kinematic_time
             )
-
 
             # =================================================
             # VISUAL / REAL-TIME
@@ -1611,20 +1728,17 @@ def main():
                     state_after,
                 )
 
-
                 target_wall_time = (
                     wall_start
                     +
                     kinematic_time
                 )
 
-
                 remaining_time = (
                     target_wall_time
                     -
                     time.perf_counter()
                 )
-
 
                 if (
                     remaining_time
@@ -1635,7 +1749,6 @@ def main():
                     time.sleep(
                         remaining_time
                     )
-
 
     # ========================================================
     # FINAL OUTPUT
@@ -1649,11 +1762,9 @@ def main():
 
     separator()
 
-
     robot.update(
         q_pin
     )
-
 
     p_left_final, _ = (
         robot.get_left_foot_pose()
@@ -1667,7 +1778,6 @@ def main():
         robot.get_com()
     )
 
-
     final_trunk_pitch = (
         get_mujoco_body_pitch(
             mj_model,
@@ -1676,13 +1786,11 @@ def main():
         )
     )
 
-
     final_trunk_pitch_deg = float(
         np.degrees(
             final_trunk_pitch
         )
     )
-
 
     final_trunk_pitch_drift_deg = float(
         np.degrees(
@@ -1691,7 +1799,6 @@ def main():
             initial_trunk_pitch
         )
     )
-
 
     print(
         f"kinematic walking time = "

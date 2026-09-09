@@ -104,7 +104,7 @@ FEET_SPACING = 0.16
 
 SINGLE_SUPPORT_DURATION = 0.18
 
-DOUBLE_SUPPORT_DURATION = 0.09
+DOUBLE_SUPPORT_DURATION = 0.27
 
 INITIAL_DOUBLE_SUPPORT_DURATION = 0.36
 
@@ -634,27 +634,73 @@ def test_xy_mpc_with_support_preview():
     # ========================================================
     # 4. TERMINAL GOALS
     # ========================================================
-
-    # Keep the same terminal-goal definition as before.
     #
-    # We are changing ONLY the horizon in this experiment.
+    # Terminal state:
+    #
+    #     [p_goal, 0, 0]
+    #
+    # If terminal acceleration is zero:
+    #
+    #     p_Z,N = p_G,N
+    #
+    # Therefore the terminal CoM position should be
+    # consistent with the support region at the END
+    # of the prediction horizon.
+    #
+    # For the current decoupled x/y formulation, use the
+    # center of the final safe support bounds.
+    # ========================================================
+
+    x_terminal_center = 0.5 * (
+        preview.x_min[-1]
+        +
+        preview.x_max[-1]
+    )
+
+    y_terminal_center = 0.5 * (
+        preview.y_min[-1]
+        +
+        preview.y_max[-1]
+    )
+
 
     x_goal = np.array(
         [
-            swing_target[0],
+            x_terminal_center,
             0.0,
             0.0,
         ],
         dtype=float,
     )
 
+
     y_goal = np.array(
         [
-            swing_target[1],
+            y_terminal_center,
             0.0,
             0.0,
         ],
         dtype=float,
+    )
+
+    print(
+        f"Terminal support phase : "
+        f"{preview.phase[-1]}"
+    )
+
+    print(
+        f"Terminal support side  : "
+        f"{preview.support_side[-1]}"
+    )
+
+    print(
+        f"Terminal goal x        : "
+        f"{x_terminal_center:.6f} m"
+    )
+
+    print(
+        f"Terminal goal y        : "
+        f"{y_terminal_center:.6f} m"
     )
 
     # ========================================================
