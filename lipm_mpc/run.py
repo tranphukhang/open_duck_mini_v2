@@ -1,3 +1,5 @@
+# lipm_mpc/run.py
+
 from __future__ import annotations
 
 import sys
@@ -15,10 +17,16 @@ import pinocchio as pin
 # PATH
 # ============================================================
 
-CURRENT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = CURRENT_DIR.parent
+CURRENT_DIR = Path(
+    __file__
+).resolve().parent
+
+ROOT_DIR = (
+    CURRENT_DIR.parent
+)
 
 if str(ROOT_DIR) not in sys.path:
+
     sys.path.insert(
         0,
         str(ROOT_DIR),
@@ -47,6 +55,11 @@ if __package__:
         ConstantJerkCoMSegment,
     )
 
+    from .zmp_visualization import (
+        ZMPVisualizationConfig,
+        LIPMZMPVisualizer,
+    )
+
 else:
 
     from lipm_model import (
@@ -63,6 +76,11 @@ else:
 
     from com_trajectory import (
         ConstantJerkCoMSegment,
+    )
+
+    from zmp_visualization import (
+        ZMPVisualizationConfig,
+        LIPMZMPVisualizer,
     )
 
 
@@ -220,7 +238,7 @@ TRUNK_ORIENTATION_KP = 10.0
 
 
 # ============================================================
-# SETTLING
+# SETTLING PARAMETERS
 # ============================================================
 
 BASE_LIN_TOL = 5e-4
@@ -257,7 +275,127 @@ VIEWER_SYNC_STEPS = max(
     ),
 )
 
-TRUNK_BODY_NAME = "trunk_assembly"
+TRUNK_BODY_NAME = (
+    "trunk_assembly"
+)
+
+
+# ============================================================
+# ZMP VISUALIZATION PARAMETERS
+# ============================================================
+#
+# These are visualization parameters only.
+#
+# All configuration remains in run.py.
+# zmp_visualization.py contains only implementation logic.
+# ============================================================
+
+ZMP_VISUALIZATION_CONFIG = (
+    ZMPVisualizationConfig(
+
+        show_current=True,
+
+        show_trail=True,
+
+        show_preview=True,
+
+        # ----------------------------------------------------
+        # Height above ground
+        # ----------------------------------------------------
+
+        current_z=0.010,
+
+        trail_z=0.008,
+
+        preview_z=0.007,
+
+        # ----------------------------------------------------
+        # Marker sizes
+        # ----------------------------------------------------
+
+        current_radius=0.007,
+
+        preview_radius=0.0028,
+
+        # ----------------------------------------------------
+        # Line widths
+        # ----------------------------------------------------
+
+        trail_width=5.0,
+
+        preview_width=2.5,
+
+        # ----------------------------------------------------
+        # Trail
+        # ----------------------------------------------------
+
+        trail_min_distance=5e-4,
+
+        trail_max_points=180,
+
+        # ----------------------------------------------------
+        # Draw one future sphere every N samples
+        # ----------------------------------------------------
+
+        preview_point_stride=2,
+
+        # ----------------------------------------------------
+        # Current ZMP = magenta
+        # ----------------------------------------------------
+
+        current_rgba=np.array(
+            [
+                1.00,
+                0.00,
+                1.00,
+                1.00,
+            ],
+            dtype=np.float32,
+        ),
+
+        # ----------------------------------------------------
+        # ZMP history
+        # ----------------------------------------------------
+
+        trail_rgba=np.array(
+            [
+                0.90,
+                0.10,
+                0.95,
+                0.80,
+            ],
+            dtype=np.float32,
+        ),
+
+        # ----------------------------------------------------
+        # Future ZMP points
+        # ----------------------------------------------------
+
+        preview_rgba=np.array(
+            [
+                0.72,
+                0.28,
+                1.00,
+                0.72,
+            ],
+            dtype=np.float32,
+        ),
+
+        # ----------------------------------------------------
+        # Future ZMP line
+        # ----------------------------------------------------
+
+        preview_line_rgba=np.array(
+            [
+                0.72,
+                0.28,
+                1.00,
+                0.55,
+            ],
+            dtype=np.float32,
+        ),
+    )
+)
 
 
 # ============================================================
@@ -295,10 +433,12 @@ MPC_PRINT_EVERY = 10
 
 
 # ============================================================
-# STOP EVENT
+# USER STOP REQUEST
 # ============================================================
 
-stop_requested = threading.Event()
+stop_requested = (
+    threading.Event()
+)
 
 
 def keyboard_callback(
@@ -604,8 +744,10 @@ def update_mujoco_from_pinocchio(
     mj_data,
 ):
 
-    q_mj = robot.pin_to_mujoco(
-        q_pin
+    q_mj = (
+        robot.pin_to_mujoco(
+            q_pin
+        )
     )
 
     mj_data.qpos[:] = (
@@ -712,7 +854,9 @@ def shift_control_sequence(
         control[-1]
     )
 
-    return shifted
+    return (
+        shifted
+    )
 
 
 # ============================================================
@@ -832,7 +976,9 @@ def solve_mpc_segment(
     # SOLVE
     # ========================================================
 
-    wall_start = time.perf_counter()
+    wall_start = (
+        time.perf_counter()
+    )
 
     x_result = x_mpc.solve(
         current_state=(
@@ -895,6 +1041,20 @@ def solve_mpc_segment(
         -
         wall_start
     )
+
+    if not x_result.success:
+
+        raise RuntimeError(
+            "X-MPC failed: "
+            f"{x_result.message}"
+        )
+
+    if not y_result.success:
+
+        raise RuntimeError(
+            "Y-MPC failed: "
+            f"{y_result.message}"
+        )
 
     # ========================================================
     # CONTINUOUS COM SEGMENT
@@ -1272,14 +1432,18 @@ def main():
 
     separator()
 
-    mj_model = mujoco.MjModel.from_xml_path(
-        str(
-            SCENE_XML
+    mj_model = (
+        mujoco.MjModel.from_xml_path(
+            str(
+                SCENE_XML
+            )
         )
     )
 
-    mj_data = mujoco.MjData(
-        mj_model
+    mj_data = (
+        mujoco.MjData(
+            mj_model
+        )
     )
 
     # ========================================================
@@ -1294,9 +1458,11 @@ def main():
 
     separator()
 
-    settle_info = settle_robot(
-        mj_model,
-        mj_data,
+    settle_info = (
+        settle_robot(
+            mj_model,
+            mj_data,
+        )
     )
 
     print(
@@ -1318,8 +1484,10 @@ def main():
         ),
     )
 
-    q_pin = robot.mujoco_to_pin(
-        mj_data.qpos.copy()
+    q_pin = (
+        robot.mujoco_to_pin(
+            mj_data.qpos.copy()
+        )
     )
 
     robot.update(
@@ -1336,7 +1504,9 @@ def main():
         R_right_0,
     ) = robot.get_right_foot_pose()
 
-    p_com_0 = robot.get_com()
+    p_com_0 = (
+        robot.get_com()
+    )
 
     (
         _,
@@ -1360,7 +1530,7 @@ def main():
     )
 
     # ========================================================
-    # INITIAL STATE
+    # INITIAL STATE INFORMATION
     # ========================================================
 
     separator()
@@ -1455,23 +1625,61 @@ def main():
     # MPC OBJECTS
     # ========================================================
 
-    _, x_mpc = create_axis_mpc()
+    _, x_mpc = (
+        create_axis_mpc()
+    )
 
-    _, y_mpc = create_axis_mpc()
+    _, y_mpc = (
+        create_axis_mpc()
+    )
 
     # ========================================================
-    # VISUALIZER
+    # WALKING VISUALIZER
     # ========================================================
 
-    visualizer = WalkingVisualizer(
-        mj_model
+    visualizer = (
+        WalkingVisualizer(
+            mj_model
+        )
     )
 
     visualizer.initialize(
         robot
     )
 
-    mj_data.qvel[:] = 0.0
+    # ========================================================
+    # LIPM ZMP VISUALIZER
+    # ========================================================
+
+    zmp_visualizer = (
+        LIPMZMPVisualizer(
+            config=(
+                ZMP_VISUALIZATION_CONFIG
+            ),
+
+            com_height=(
+                COM_HEIGHT
+            ),
+
+            gravity=(
+                GRAVITY
+            ),
+        )
+    )
+
+    zmp_visualizer.initialize_from_states(
+        x_state=(
+            x_state
+        ),
+
+        y_state=(
+            y_state
+        ),
+    )
+
+    mj_data.qvel[:] = (
+        0.0
+    )
 
     mujoco.mj_forward(
         mj_model,
@@ -1523,7 +1731,9 @@ def main():
     print(
         f"  horizon    = "
         f"{MPC_HORIZON_STEPS} steps "
-        f"({MPC_HORIZON_STEPS * MPC_TIMESTEP:.3f} s)"
+        f"("
+        f"{MPC_HORIZON_STEPS * MPC_TIMESTEP:.3f} s"
+        f")"
     )
 
     print(
@@ -1531,7 +1741,8 @@ def main():
         f"diag("
         f"{TERMINAL_POSITION_WEIGHT:.3f}, "
         f"{TERMINAL_VELOCITY_WEIGHT:.3f}, "
-        f"{TERMINAL_ACCELERATION_WEIGHT:.3f})"
+        f"{TERMINAL_ACCELERATION_WEIGHT:.3f}"
+        f")"
     )
 
     print(
@@ -1572,6 +1783,54 @@ def main():
     print()
 
     print(
+        "Visualization:"
+    )
+
+    print(
+        "  green   = left-foot trail"
+    )
+
+    print(
+        "  red     = right-foot trail"
+    )
+
+    print(
+        "  blue    = actual CoM trail"
+    )
+
+    print(
+        "  orange  = current support polygon"
+    )
+
+    print(
+        "  magenta sphere = current LIPM ZMP"
+    )
+
+    print(
+        "  magenta trail  = LIPM ZMP history"
+    )
+
+    print(
+        "  violet line/dots = future MPC ZMP preview"
+    )
+
+    print()
+
+    print(
+        "IMPORTANT:"
+    )
+
+    print(
+        "  Displayed ZMP is generated by the LIPM."
+    )
+
+    print(
+        "  It is NOT MuJoCo contact COP."
+    )
+
+    print()
+
+    print(
         "NOTE:"
     )
 
@@ -1598,7 +1857,7 @@ def main():
     )
 
     # ========================================================
-    # LOOP VARIABLES
+    # LOOP DATA
     # ========================================================
 
     kinematic_time = 0.0
@@ -1648,7 +1907,7 @@ def main():
     max_swing_tracking_error = 0.0
 
     # ========================================================
-    # VIEWER LOOP
+    # VIEWER
     # ========================================================
 
     with mujoco.viewer.launch_passive(
@@ -1664,18 +1923,32 @@ def main():
             viewer
         )
 
-        visualizer.update(
-            viewer,
-            robot,
-            fsm.get_state(),
+        zmp_visualizer.update_viewer(
+            walking_visualizer=(
+                visualizer
+            ),
+
+            viewer=(
+                viewer
+            ),
+
+            robot=(
+                robot
+            ),
+
+            state=(
+                fsm.get_state()
+            ),
         )
 
-        wall_start = time.perf_counter()
+        wall_start = (
+            time.perf_counter()
+        )
 
         while viewer.is_running():
 
             # =================================================
-            # STOP
+            # FORWARD STOP REQUEST
             # =================================================
 
             if (
@@ -1686,7 +1959,9 @@ def main():
 
                 fsm.request_stop()
 
-                stop_forwarded_to_fsm = True
+                stop_forwarded_to_fsm = (
+                    True
+                )
 
                 print()
 
@@ -1695,10 +1970,12 @@ def main():
                 )
 
             # =================================================
-            # CURRENT FSM STATE
+            # CURRENT STATE
             # =================================================
 
-            state = fsm.get_state()
+            state = (
+                fsm.get_state()
+            )
 
             # =================================================
             # FINISHED
@@ -1728,12 +2005,26 @@ def main():
                         "Close viewer to exit."
                     )
 
-                    finished_announced = True
+                    finished_announced = (
+                        True
+                    )
 
-                visualizer.update(
-                    viewer,
-                    robot,
-                    state,
+                zmp_visualizer.update_viewer(
+                    walking_visualizer=(
+                        visualizer
+                    ),
+
+                    viewer=(
+                        viewer
+                    ),
+
+                    robot=(
+                        robot
+                    ),
+
+                    state=(
+                        state
+                    ),
                 )
 
                 time.sleep(
@@ -1748,42 +2039,44 @@ def main():
 
             if current_segment is None:
 
-                current_mpc_info = solve_mpc_segment(
-                    fsm=(
-                        fsm
-                    ),
+                current_mpc_info = (
+                    solve_mpc_segment(
+                        fsm=(
+                            fsm
+                        ),
 
-                    left_rotation=(
-                        R_left_0
-                    ),
+                        left_rotation=(
+                            R_left_0
+                        ),
 
-                    right_rotation=(
-                        R_right_0
-                    ),
+                        right_rotation=(
+                            R_right_0
+                        ),
 
-                    x_state=(
-                        x_state
-                    ),
+                        x_state=(
+                            x_state
+                        ),
 
-                    y_state=(
-                        y_state
-                    ),
+                        y_state=(
+                            y_state
+                        ),
 
-                    x_mpc=(
-                        x_mpc
-                    ),
+                        x_mpc=(
+                            x_mpc
+                        ),
 
-                    y_mpc=(
-                        y_mpc
-                    ),
+                        y_mpc=(
+                            y_mpc
+                        ),
 
-                    previous_x_control=(
-                        previous_x_control
-                    ),
+                        previous_x_control=(
+                            previous_x_control
+                        ),
 
-                    previous_y_control=(
-                        previous_y_control
-                    ),
+                        previous_y_control=(
+                            previous_y_control
+                        ),
+                    )
                 )
 
                 current_segment = (
@@ -1802,6 +2095,20 @@ def main():
                     current_mpc_info[
                         "y_result"
                     ]
+                )
+
+                # =============================================
+                # UPDATE FUTURE ZMP VISUAL
+                # =============================================
+
+                zmp_visualizer.update_preview(
+                    x_result=(
+                        x_result
+                    ),
+
+                    y_result=(
+                        y_result
+                    ),
                 )
 
                 previous_x_control = (
@@ -1911,7 +2218,7 @@ def main():
                     )
 
             # =================================================
-            # REGISTER PLANNED STEP
+            # REGISTER CURRENT PLANNED STEP
             # =================================================
 
             visualizer.register_step(
@@ -1997,8 +2304,9 @@ def main():
                 .copy()
             )
 
-            # Reference after this 0.5 ms IK step.
-            # Used only to evaluate tracking error.
+            # -------------------------------------------------
+            # Reference after this executor interval
+            # -------------------------------------------------
 
             tau_next = min(
                 tau
@@ -2010,6 +2318,24 @@ def main():
             com_reference_next = (
                 current_segment.evaluate(
                     tau_next
+                )
+            )
+
+            # =================================================
+            # UPDATE CURRENT LIPM ZMP
+            # =================================================
+
+            current_zmp_xy = (
+                zmp_visualizer.update_current(
+                    com_position=(
+                        com_reference_next
+                        .position
+                    ),
+
+                    com_acceleration=(
+                        com_reference_next
+                        .acceleration
+                    ),
                 )
             )
 
@@ -2026,7 +2352,7 @@ def main():
             )
 
             # =================================================
-            # HIERARCHICAL IK
+            # IK
             # =================================================
 
             (
@@ -2082,7 +2408,7 @@ def main():
                 )
 
             # =================================================
-            # INTEGRATE PINOCCHIO
+            # INTEGRATE
             # =================================================
 
             q_pin = robot.integrate(
@@ -2207,15 +2533,17 @@ def main():
                 )
 
             # =================================================
-            # FSM UPDATE
+            # FSM
             # =================================================
 
             phase_before = (
                 state.phase
             )
 
-            state_after = fsm.update(
-                DT
+            state_after = (
+                fsm.update(
+                    DT
+                )
             )
 
             # =================================================
@@ -2245,6 +2573,10 @@ def main():
                 p_com_actual = (
                     robot.get_com()
                 )
+
+                # ---------------------------------------------
+                # CURRENT SWING / SUPPORT FOOT
+                # ---------------------------------------------
 
                 if (
                     state.swing_side
@@ -2280,6 +2612,10 @@ def main():
                         .left_contact_position
                     )
 
+                # ---------------------------------------------
+                # ERRORS
+                # ---------------------------------------------
+
                 landing_error = float(
                     np.linalg.norm(
                         state.swing_target
@@ -2303,6 +2639,10 @@ def main():
                         p_com_actual
                     )
                 )
+
+                # ---------------------------------------------
+                # TRUNK
+                # ---------------------------------------------
 
                 trunk_pitch = (
                     get_mujoco_body_pitch(
@@ -2345,6 +2685,10 @@ def main():
                     ]
                 )
 
+                # ---------------------------------------------
+                # PRINT
+                # ---------------------------------------------
+
                 separator()
 
                 print(
@@ -2370,6 +2714,14 @@ def main():
                 print(
                     f"MPC CoM tracking error = "
                     f"{com_error:.6e} m"
+                )
+
+                print(
+                    f"LIPM ZMP = "
+                    f"("
+                    f"{current_zmp_xy[0]:+.6f}, "
+                    f"{current_zmp_xy[1]:+.6f}"
+                    f") m"
                 )
 
                 print(
@@ -2404,9 +2756,6 @@ def main():
                 MPC_IK_STEPS
             ):
 
-                # Continuous terminal state becomes the
-                # next receding-horizon MPC initial state.
-
                 x_state = (
                     current_segment
                     .get_terminal_x_state()
@@ -2429,7 +2778,9 @@ def main():
 
             iteration += 1
 
-            kinematic_time += DT
+            kinematic_time += (
+                DT
+            )
 
             mj_data.time = (
                 settle_info[
@@ -2440,7 +2791,7 @@ def main():
             )
 
             # =================================================
-            # VIEWER / WALL TIME
+            # VISUAL / REAL-TIME
             # =================================================
 
             if (
@@ -2451,10 +2802,22 @@ def main():
                 0
             ):
 
-                visualizer.update(
-                    viewer,
-                    robot,
-                    state_after,
+                zmp_visualizer.update_viewer(
+                    walking_visualizer=(
+                        visualizer
+                    ),
+
+                    viewer=(
+                        viewer
+                    ),
+
+                    robot=(
+                        robot
+                    ),
+
+                    state=(
+                        state_after
+                    ),
                 )
 
                 target_wall_time = (
@@ -2530,7 +2893,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Planner state at the actual stop time
+    # LIPM state at actual stop time
     # --------------------------------------------------------
 
     if (
@@ -2538,19 +2901,22 @@ def main():
         is not None
     ):
 
+        planner_tau = min(
+            mpc_substep
+            *
+            DT,
+            MPC_TIMESTEP,
+        )
+
         planner_x_state = (
             current_segment.get_x_state(
-                mpc_substep
-                *
-                DT
+                planner_tau
             )
         )
 
         planner_y_state = (
             current_segment.get_y_state(
-                mpc_substep
-                *
-                DT
+                planner_tau
             )
         )
 
@@ -2564,6 +2930,13 @@ def main():
             y_state.copy()
         )
 
+    final_lipm_zmp = (
+        zmp_visualizer.compute_zmp_from_states(
+            planner_x_state,
+            planner_y_state,
+        )
+    )
+
     mean_mpc_solve_wall_time = (
         total_mpc_solve_wall_time
         /
@@ -2572,6 +2945,10 @@ def main():
             1,
         )
     )
+
+    # ========================================================
+    # PRINT FINAL
+    # ========================================================
 
     print(
         f"kinematic walking time = "
@@ -2613,6 +2990,11 @@ def main():
     print(
         "LIPM Y state      =",
         planner_y_state,
+    )
+
+    print(
+        "LIPM ZMP final    =",
+        final_lipm_zmp,
     )
 
     print()
