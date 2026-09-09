@@ -1,29 +1,8 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
-
-
-# ============================================================
-# PATH
-# ============================================================
-
-CURRENT_DIR = Path(
-    __file__
-).resolve().parent
-
-ROOT_DIR = (
-    CURRENT_DIR.parent
-)
-
-if str(ROOT_DIR) not in sys.path:
-
-    sys.path.insert(
-        0,
-        str(ROOT_DIR),
-    )
 
 
 # ============================================================
@@ -32,22 +11,28 @@ if str(ROOT_DIR) not in sys.path:
 
 if __package__:
 
-    from .lipm_model import (
-        LIPMModel1D,
+    from .pinocchio_model import (
+        LEFT_FOOT_FRAME,
+        RIGHT_FOOT_FRAME,
     )
 
-    from .com_trajectory import (
-        ConstantJerkCoMSegment,
+    from .differential_ik import (
+        TRUNK_FRAME,
+        solve_single_support_ik,
+        solve_double_support_ik,
     )
 
 else:
 
-    from lipm_model import (
-        LIPMModel1D,
+    from pinocchio_model import (
+        LEFT_FOOT_FRAME,
+        RIGHT_FOOT_FRAME,
     )
 
-    from com_trajectory import (
-        ConstantJerkCoMSegment,
+    from differential_ik import (
+        TRUNK_FRAME,
+        solve_single_support_ik,
+        solve_double_support_ik,
     )
 
 
@@ -62,709 +47,888 @@ np.set_printoptions(
 
 
 # ============================================================
-# TIMING
+# TEST ROBOT
 # ============================================================
 
-MPC_TIMESTEP = 0.03
+class FakeRobot:
+    """
+    Synthetic 16-DoF robot used only to verify hierarchy.
 
-IK_TIMESTEP = 0.0005
+    Coordinates:
 
-IK_STEPS_PER_MPC = int(
-    round(
-        MPC_TIMESTEP
-        /
-        IK_TIMESTEP
-    )
-)
+        q0 ... q4:
+            left-foot task
+
+        q5 ... q7:
+            CoM task
+
+        q8 ... q12:
+            extra directions available to swing foot
+
+        q13:
+            trunk pitch
+
+        q14, q15:
+            remaining nullspace
+
+    The right-foot Jacobian contains q5...q7 as well as
+    q8...q12.
+
+    Therefore when CoM has higher priority, the swing-foot
+    task must use its remaining directions without changing
+    the previously satisfied CoM task.
+    """
+
+    def __init__(
+        self,
+    ):
+
+        self.walking_velocity_indices = (
+            np.arange(
+                16,
+                dtype=int,
+            )
+        )
+
+        self.model = (
+            SimpleNamespace(
+                nv=16
+            )
+        )
+
+        # ----------------------------------------------------
+        # LEFT FOOT: rank 5
+        # q0 ... q4
+        # ----------------------------------------------------
+
+        self.J_left = np.zeros(
+            (
+                5,
+                16,
+            ),
+            dtype=float,
+        )
+
+        self.J_left[
+            :,
+            0:5,
+        ] = np.eye(
+            5
+        )
+
+        # ----------------------------------------------------
+        # COM: rank 3
+        # q5, q6, q7
+        # ----------------------------------------------------
+
+        self.J_com = np.zeros(
+            (
+                3,
+                16,
+            ),
+            dtype=float,
+        )
+
+        self.J_com[
+            0,
+            5,
+        ] = 1.0
+
+        self.J_com[
+            1,
+            6,
+        ] = 1.0
+
+        self.J_com[
+            2,
+            7,
+        ] = 1.0
+
+        # ----------------------------------------------------
+        # RIGHT FOOT: rank 5
+        #
+        # First three rows depend partly on CoM coordinates,
+        # but also have independent swing directions.
+        # ----------------------------------------------------
+
+        self.J_right = np.zeros(
+            (
+                5,
+                16,
+            ),
+            dtype=float,
+        )
+
+        self.J_right[
+            0,
+            5,
+        ] = 1.0
+
+        self.J_right[
+            0,
+            8,
+        ] = 1.0
+
+        self.J_right[
+            1,
+            6,
+        ] = 1.0
+
+        self.J_right[
+            1,
+            9,
+        ] = 1.0
+
+        self.J_right[
+            2,
+            7,
+        ] = 1.0
+
+        self.J_right[
+            2,
+            10,
+        ] = 1.0
+
+        self.J_right[
+            3,
+            11,
+        ] = 1.0
+
+        self.J_right[
+            4,
+            12,
+        ] = 1.0
+
+        # ----------------------------------------------------
+        # TRUNK LOCAL JACOBIAN
+        # ----------------------------------------------------
+
+        self.J_trunk = np.zeros(
+            (
+                6,
+                16,
+            ),
+            dtype=float,
+        )
+
+        # local angular Y
+        self.J_trunk[
+            4,
+            13,
+        ] = 1.0
+
+
+    # ========================================================
+    # REQUIRED ROBOT API
+    # ========================================================
+
+    def update(
+        self,
+        q_pin,
+    ):
+
+        return None
+
+
+    def get_left_foot_pose(
+        self,
+    ):
+
+        return (
+            np.zeros(
+                3,
+                dtype=float,
+            ),
+
+            np.eye(
+                3,
+                dtype=float,
+            ),
+        )
+
+
+    def get_right_foot_pose(
+        self,
+    ):
+
+        return (
+            np.zeros(
+                3,
+                dtype=float,
+            ),
+
+            np.eye(
+                3,
+                dtype=float,
+            ),
+        )
+
+
+    def get_com(
+        self,
+    ):
+
+        return np.zeros(
+            3,
+            dtype=float,
+        )
+
+
+    def get_foot_task_jacobian(
+        self,
+        frame_name,
+        active_only=True,
+    ):
+
+        if frame_name == (
+            LEFT_FOOT_FRAME
+        ):
+
+            return (
+                self.J_left.copy()
+            )
+
+        if frame_name == (
+            RIGHT_FOOT_FRAME
+        ):
+
+            return (
+                self.J_right.copy()
+            )
+
+        raise ValueError(
+            f"Unknown foot frame: "
+            f"{frame_name}"
+        )
+
+
+    def get_com_jacobian(
+        self,
+        active_only=True,
+    ):
+
+        return (
+            self.J_com.copy()
+        )
+
+
+    def get_frame_pose(
+        self,
+        frame_name,
+    ):
+
+        if frame_name != (
+            TRUNK_FRAME
+        ):
+
+            raise ValueError(
+                f"Unknown frame: "
+                f"{frame_name}"
+            )
+
+        return (
+            np.zeros(
+                3,
+                dtype=float,
+            ),
+
+            np.eye(
+                3,
+                dtype=float,
+            ),
+        )
+
+
+    def get_frame_jacobian_local(
+        self,
+        frame_name,
+    ):
+
+        if frame_name != (
+            TRUNK_FRAME
+        ):
+
+            raise ValueError(
+                f"Unknown frame: "
+                f"{frame_name}"
+            )
+
+        return (
+            self.J_trunk.copy()
+        )
 
 
 # ============================================================
-# LIPM
-# ============================================================
-
-COM_HEIGHT = 0.205
-
-GRAVITY = 9.81
-
-
-# ============================================================
-# INITIAL STATE
-# ============================================================
-
-X_INITIAL = np.array(
-    [
-        -0.0308300889,
-        0.0,
-        0.0,
-    ],
-    dtype=float,
-)
-
-Y_INITIAL = np.array(
-    [
-        -0.0003994468,
-        0.0,
-        0.0,
-    ],
-    dtype=float,
-)
-
-
-# ============================================================
-# REPRESENTATIVE FIRST MPC COMMAND
-# ============================================================
-#
-# Taken from the already-passed receding-horizon test.
-#
-# This test does NOT solve MPC again.
-#
-# It tests only:
-#
-# MPC state + constant jerk
-#        ->
-# continuous CoM reference
-# ============================================================
-
-X_JERK = 1.599988
-
-Y_JERK = 15.870031
-
-
-# ============================================================
-# HELPER
+# HELPERS
 # ============================================================
 
 def separator():
 
     print(
-        "=" * 72
+        "=" * 76
     )
 
 
-# ============================================================
-# MAIN TEST
-# ============================================================
+def print_diagnostics(
+    diagnostics,
+):
 
-def test_constant_jerk_com_segment():
+    print()
 
-    # ========================================================
-    # 1. CREATE DISCRETE LIPM MODEL
-    # ========================================================
-
-    model = LIPMModel1D(
-        timestep=(
-            MPC_TIMESTEP
-        ),
-
-        com_height=(
-            COM_HEIGHT
-        ),
-
-        gravity=(
-            GRAVITY
-        ),
+    print(
+        f"{'task':<24}"
+        f"{'rank':>8}"
+        f"{'residual':>16}"
+        f"{'nullity':>12}"
     )
 
     print(
-        "[PASS] LIPM model created"
+        "-" * 60
     )
 
-    # ========================================================
-    # 2. CREATE CONTINUOUS SEGMENT
-    # ========================================================
-
-    segment = ConstantJerkCoMSegment(
-        x_state=(
-            X_INITIAL
-        ),
-
-        y_state=(
-            Y_INITIAL
-        ),
-
-        x_jerk=(
-            X_JERK
-        ),
-
-        y_jerk=(
-            Y_JERK
-        ),
-
-        com_height=(
-            COM_HEIGHT
-        ),
-
-        duration=(
-            MPC_TIMESTEP
-        ),
-    )
-
-    print(
-        "[PASS] Constant-jerk CoM segment created"
-    )
-
-    # ========================================================
-    # 3. CHECK TAU = 0
-    # ========================================================
-
-    ref_0 = (
-        segment.evaluate(
-            0.0
-        )
-    )
-
-    expected_position_0 = np.array(
-        [
-            X_INITIAL[0],
-            Y_INITIAL[0],
-            COM_HEIGHT,
-        ],
-        dtype=float,
-    )
-
-    expected_velocity_0 = np.array(
-        [
-            X_INITIAL[1],
-            Y_INITIAL[1],
-            0.0,
-        ],
-        dtype=float,
-    )
-
-    expected_acceleration_0 = np.array(
-        [
-            X_INITIAL[2],
-            Y_INITIAL[2],
-            0.0,
-        ],
-        dtype=float,
-    )
-
-    np.testing.assert_allclose(
-        ref_0.position,
-        expected_position_0,
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        ref_0.velocity,
-        expected_velocity_0,
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        ref_0.acceleration,
-        expected_acceleration_0,
-        atol=1e-12,
-    )
-
-    print(
-        "[PASS] tau = 0 reference"
-    )
-
-    # ========================================================
-    # 4. DISCRETE LIPM TERMINAL STATE
-    # ========================================================
-
-    x_discrete_next = (
-        model.propagate(
-            state=(
-                X_INITIAL
-            ),
-
-            jerk=(
-                X_JERK
-            ),
-        )
-    )
-
-    y_discrete_next = (
-        model.propagate(
-            state=(
-                Y_INITIAL
-            ),
-
-            jerk=(
-                Y_JERK
-            ),
-        )
-    )
-
-    # ========================================================
-    # 5. CONTINUOUS SEGMENT AT TAU = T_MPC
-    # ========================================================
-
-    x_continuous_next = (
-        segment.get_terminal_x_state()
-    )
-
-    y_continuous_next = (
-        segment.get_terminal_y_state()
-    )
-
-    np.testing.assert_allclose(
-        x_continuous_next,
-        x_discrete_next,
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        y_continuous_next,
-        y_discrete_next,
-        atol=1e-12,
-    )
-
-    print(
-        "[PASS] continuous terminal state matches LIPM discrete propagation"
-    )
-
-    # ========================================================
-    # 6. FULL TERMINAL REFERENCE
-    # ========================================================
-
-    ref_T = (
-        segment.evaluate(
-            MPC_TIMESTEP
-        )
-    )
-
-    np.testing.assert_allclose(
-        ref_T.position,
-        np.array(
-            [
-                x_discrete_next[0],
-                y_discrete_next[0],
-                COM_HEIGHT,
-            ],
-            dtype=float,
-        ),
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        ref_T.velocity,
-        np.array(
-            [
-                x_discrete_next[1],
-                y_discrete_next[1],
-                0.0,
-            ],
-            dtype=float,
-        ),
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        ref_T.acceleration,
-        np.array(
-            [
-                x_discrete_next[2],
-                y_discrete_next[2],
-                0.0,
-            ],
-            dtype=float,
-        ),
-        atol=1e-12,
-    )
-
-    print(
-        "[PASS] terminal 3D CoM reference"
-    )
-
-    # ========================================================
-    # 7. SAMPLE AT IK RATE
-    # ========================================================
-    #
-    # 0.03 / 0.0005 = 60 executor intervals
-    #
-    # Including both endpoints:
-    #
-    # tau =
-    # 0,
-    # 0.0005,
-    # ...
-    # 0.0300
-    #
-    # gives 61 samples.
-    # ========================================================
-
-    assert (
-        IK_STEPS_PER_MPC
-        ==
-        60
-    )
-
-    tau_samples = np.linspace(
-        0.0,
-        MPC_TIMESTEP,
-        IK_STEPS_PER_MPC + 1,
-    )
-
-    position_log = []
-
-    velocity_log = []
-
-    acceleration_log = []
-
-    for tau in (
-        tau_samples
+    for item in (
+        diagnostics
     ):
 
-        ref = (
-            segment.evaluate(
-                tau
-            )
+        if item["name"] == (
+            "tracking_errors"
+        ):
+
+            continue
+
+        print(
+            f"{item['name']:<24}"
+            f"{item['reduced_rank']:>8d}"
+            f"{item['residual_after_norm']:>16.3e}"
+            f"{item['remaining_nullity']:>12d}"
         )
 
-        position_log.append(
-            ref.position
-        )
 
-        velocity_log.append(
-            ref.velocity
-        )
+# ============================================================
+# SINGLE SUPPORT TEST
+# ============================================================
 
-        acceleration_log.append(
-            ref.acceleration
-        )
+def test_single_support_priority():
 
-    position_log = np.asarray(
-        position_log,
+    robot = (
+        FakeRobot()
+    )
+
+    q_pin = np.zeros(
+        16,
         dtype=float,
     )
 
-    velocity_log = np.asarray(
-        velocity_log,
+    # ========================================================
+    # REFERENCES
+    # ========================================================
+
+    support_position_ref = np.zeros(
+        3,
         dtype=float,
     )
 
-    acceleration_log = np.asarray(
-        acceleration_log,
+    swing_position_ref = np.array(
+        [
+            +0.010,
+            -0.020,
+            +0.030,
+        ],
         dtype=float,
     )
 
-    assert position_log.shape == (
-        61,
+    swing_velocity_ref = np.array(
+        [
+            +0.020,
+            -0.010,
+            +0.015,
+        ],
+        dtype=float,
+    )
+
+    com_position_ref = np.array(
+        [
+            +0.020,
+            -0.010,
+            +0.030,
+        ],
+        dtype=float,
+    )
+
+    com_velocity_ref = np.array(
+        [
+            +0.100,
+            +0.200,
+            -0.100,
+        ],
+        dtype=float,
+    )
+
+    trunk_rotation_ref = np.eye(
         3,
+        dtype=float,
     )
 
-    assert velocity_log.shape == (
-        61,
+    SUPPORT_GAIN = 25.0
+
+    SWING_GAIN = 20.0
+
+    COM_GAIN = 10.0
+
+    # ========================================================
+    # SOLVE
+    # ========================================================
+
+    (
+        qdot,
+        diagnostics,
+        Z,
+    ) = solve_single_support_ik(
+        robot=(
+            robot
+        ),
+
+        q_pin=(
+            q_pin
+        ),
+
+        support_side=(
+            "left"
+        ),
+
+        support_position_ref=(
+            support_position_ref
+        ),
+
+        swing_position_ref=(
+            swing_position_ref
+        ),
+
+        swing_linear_velocity_ref=(
+            swing_velocity_ref
+        ),
+
+        com_position_ref=(
+            com_position_ref
+        ),
+
+        com_velocity_ref=(
+            com_velocity_ref
+        ),
+
+        trunk_rotation_ref=(
+            trunk_rotation_ref
+        ),
+
+        support_position_gain=(
+            SUPPORT_GAIN
+        ),
+
+        swing_position_gain=(
+            SWING_GAIN
+        ),
+
+        com_position_gain=(
+            COM_GAIN
+        ),
+
+        trunk_orientation_gain=(
+            10.0
+        ),
+
+        damping=(
+            1e-10
+        ),
+
+        rcond=(
+            1e-12
+        ),
+    )
+
+    # ========================================================
+    # EXPECTED TASK ORDER
+    # ========================================================
+
+    task_names = [
+        item["name"]
+        for item in diagnostics[:-1]
+    ]
+
+    expected_names = [
+        "left_support",
+        "com",
+        "right_swing",
+        "trunk_pitch",
+    ]
+
+    assert (
+        task_names
+        ==
+        expected_names
+    )
+
+    print(
+        "[PASS] single-support hierarchy order"
+    )
+
+    # ========================================================
+    # EXPECTED NULLSPACE SEQUENCE
+    # ========================================================
+
+    expected_nullities = [
+        11,
+        8,
         3,
+        2,
+    ]
+
+    actual_nullities = [
+        item["remaining_nullity"]
+        for item in diagnostics[:-1]
+    ]
+
+    assert (
+        actual_nullities
+        ==
+        expected_nullities
     )
 
-    assert acceleration_log.shape == (
-        61,
-        3,
-    )
-
-    assert np.all(
-        np.isfinite(
-            position_log
-        )
-    )
-
-    assert np.all(
-        np.isfinite(
-            velocity_log
-        )
-    )
-
-    assert np.all(
-        np.isfinite(
-            acceleration_log
-        )
-    )
-
-    print(
-        "[PASS] 60 IK intervals generated inside one MPC interval"
-    )
-
-    # ========================================================
-    # 8. CONSTANT Z
-    # ========================================================
-
-    np.testing.assert_allclose(
-        position_log[:, 2],
-        COM_HEIGHT,
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        velocity_log[:, 2],
-        0.0,
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        acceleration_log[:, 2],
-        0.0,
-        atol=1e-12,
-    )
-
-    print(
-        "[PASS] CoM height remains constant"
-    )
-
-    # ========================================================
-    # 9. CHECK CONTINUITY INSIDE SEGMENT
-    # ========================================================
-
-    position_difference = np.diff(
-        position_log,
-        axis=0,
-    )
-
-    velocity_difference = np.diff(
-        velocity_log,
-        axis=0,
-    )
-
-    acceleration_difference = np.diff(
-        acceleration_log,
-        axis=0,
-    )
-
-    assert np.all(
-        np.isfinite(
-            position_difference
-        )
-    )
-
-    assert np.all(
-        np.isfinite(
-            velocity_difference
-        )
-    )
-
-    assert np.all(
-        np.isfinite(
-            acceleration_difference
+    assert (
+        Z.shape
+        ==
+        (
+            16,
+            2,
         )
     )
 
     print(
-        "[PASS] continuous reference across IK samples"
+        "[PASS] single-support final nullity = 2"
     )
 
     # ========================================================
-    # 10. SECOND SEGMENT
-    #
-    # Verify exact continuity when the next MPC solve starts
-    # from the terminal state of the previous segment.
+    # EXPECTED COMMANDS
     # ========================================================
 
-    SECOND_X_JERK = (
-        -0.30
+    expected_support_cmd = np.zeros(
+        5,
+        dtype=float,
     )
 
-    SECOND_Y_JERK = (
-        -12.0
+    expected_com_cmd = (
+        com_velocity_ref
+        +
+        COM_GAIN
+        *
+        com_position_ref
     )
 
-    second_segment = ConstantJerkCoMSegment(
-        x_state=(
-            x_continuous_next
-        ),
-
-        y_state=(
-            y_continuous_next
-        ),
-
-        x_jerk=(
-            SECOND_X_JERK
-        ),
-
-        y_jerk=(
-            SECOND_Y_JERK
-        ),
-
-        com_height=(
-            COM_HEIGHT
-        ),
-
-        duration=(
-            MPC_TIMESTEP
-        ),
+    expected_swing_linear = (
+        swing_velocity_ref
+        +
+        SWING_GAIN
+        *
+        swing_position_ref
     )
 
-    second_ref_0 = (
-        second_segment.evaluate(
-            0.0
-        )
-    )
+    expected_swing_cmd = np.concatenate(
+        [
+            expected_swing_linear,
 
-    np.testing.assert_allclose(
-        second_ref_0.position,
-        ref_T.position,
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        second_ref_0.velocity,
-        ref_T.velocity,
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        second_ref_0.acceleration,
-        ref_T.acceleration,
-        atol=1e-12,
-    )
-
-    print(
-        "[PASS] exact continuity between consecutive MPC segments"
-    )
-
-    # ========================================================
-    # PRINT REPRESENTATIVE VALUES
-    # ========================================================
-
-    separator()
-
-    print(
-        "COM TRAJECTORY SEGMENT SUMMARY"
-    )
-
-    separator()
-
-    print(
-        f"MPC interval        : "
-        f"{MPC_TIMESTEP:.6f} s"
-    )
-
-    print(
-        f"IK interval         : "
-        f"{IK_TIMESTEP:.6f} s"
-    )
-
-    print(
-        f"IK intervals / MPC  : "
-        f"{IK_STEPS_PER_MPC}"
-    )
-
-    print()
-
-    print(
-        "Initial X state:"
-    )
-
-    print(
-        " ",
-        X_INITIAL
-    )
-
-    print(
-        "Initial Y state:"
-    )
-
-    print(
-        " ",
-        Y_INITIAL
-    )
-
-    print()
-
-    print(
-        f"Applied jerk x      : "
-        f"{X_JERK:+.6f} m/s^3"
-    )
-
-    print(
-        f"Applied jerk y      : "
-        f"{Y_JERK:+.6f} m/s^3"
-    )
-
-    print()
-
-    print(
-        "CoM reference at tau = 0:"
-    )
-
-    print(
-        "  position     =",
-        ref_0.position,
-    )
-
-    print(
-        "  velocity     =",
-        ref_0.velocity,
-    )
-
-    print(
-        "  acceleration =",
-        ref_0.acceleration,
-    )
-
-    print()
-
-    midpoint_index = (
-        IK_STEPS_PER_MPC
-        //
-        2
-    )
-
-    midpoint_tau = (
-        tau_samples[
-            midpoint_index
+            np.zeros(
+                2,
+                dtype=float,
+            ),
         ]
     )
 
-    midpoint_ref = (
-        segment.evaluate(
-            midpoint_tau
+    # ========================================================
+    # ACTUAL FINAL TASK VELOCITIES
+    # ========================================================
+
+    support_velocity = (
+        robot.J_left
+        @
+        qdot
+    )
+
+    com_velocity = (
+        robot.J_com
+        @
+        qdot
+    )
+
+    swing_velocity = (
+        robot.J_right
+        @
+        qdot
+    )
+
+    # ========================================================
+    # HIGH-PRIORITY SUPPORT
+    # ========================================================
+
+    np.testing.assert_allclose(
+        support_velocity,
+        expected_support_cmd,
+        atol=1e-8,
+    )
+
+    print(
+        "[PASS] swing/CoM cannot corrupt support task"
+    )
+
+    # ========================================================
+    # SECOND-PRIORITY COM
+    # ========================================================
+
+    np.testing.assert_allclose(
+        com_velocity,
+        expected_com_cmd,
+        atol=1e-8,
+    )
+
+    print(
+        "[PASS] swing task cannot corrupt CoM task"
+    )
+
+    # ========================================================
+    # SWING STILL TRACKABLE
+    # ========================================================
+
+    np.testing.assert_allclose(
+        swing_velocity,
+        expected_swing_cmd,
+        atol=1e-8,
+    )
+
+    print(
+        "[PASS] swing task remains achievable"
+    )
+
+    # ========================================================
+    # FINITE SOLUTION
+    # ========================================================
+
+    assert np.all(
+        np.isfinite(
+            qdot
         )
     )
 
     print(
-        f"CoM reference at tau = "
-        f"{midpoint_tau:.6f} s:"
+        "[PASS] single-support qdot finite"
     )
 
-    print(
-        "  position     =",
-        midpoint_ref.position,
+    print_diagnostics(
+        diagnostics
     )
 
-    print(
-        "  velocity     =",
-        midpoint_ref.velocity,
+
+# ============================================================
+# DOUBLE SUPPORT TEST
+# ============================================================
+
+def test_double_support_priority():
+
+    robot = (
+        FakeRobot()
     )
 
-    print(
-        "  acceleration =",
-        midpoint_ref.acceleration,
+    q_pin = np.zeros(
+        16,
+        dtype=float,
+    )
+
+    left_ref = np.zeros(
+        3,
+        dtype=float,
+    )
+
+    right_ref = np.zeros(
+        3,
+        dtype=float,
+    )
+
+    com_ref = np.array(
+        [
+            +0.020,
+            -0.010,
+            +0.030,
+        ],
+        dtype=float,
+    )
+
+    com_velocity_ref = np.array(
+        [
+            +0.050,
+            +0.020,
+            -0.010,
+        ],
+        dtype=float,
+    )
+
+    trunk_ref = np.eye(
+        3,
+        dtype=float,
+    )
+
+    COM_GAIN = 10.0
+
+    (
+        qdot,
+        diagnostics,
+        Z,
+    ) = solve_double_support_ik(
+        robot=(
+            robot
+        ),
+
+        q_pin=(
+            q_pin
+        ),
+
+        left_position_ref=(
+            left_ref
+        ),
+
+        right_position_ref=(
+            right_ref
+        ),
+
+        com_position_ref=(
+            com_ref
+        ),
+
+        com_velocity_ref=(
+            com_velocity_ref
+        ),
+
+        trunk_rotation_ref=(
+            trunk_ref
+        ),
+
+        foot_position_gain=(
+            25.0
+        ),
+
+        com_position_gain=(
+            COM_GAIN
+        ),
+
+        trunk_orientation_gain=(
+            10.0
+        ),
+
+        damping=(
+            1e-10
+        ),
+
+        rcond=(
+            1e-12
+        ),
+    )
+
+    # ========================================================
+    # ORDER
+    # ========================================================
+
+    task_names = [
+        item["name"]
+        for item in diagnostics[:-1]
+    ]
+
+    expected_names = [
+        "double_support_feet",
+        "com",
+        "trunk_pitch",
+    ]
+
+    assert (
+        task_names
+        ==
+        expected_names
     )
 
     print()
 
     print(
-        f"CoM reference at tau = "
-        f"{MPC_TIMESTEP:.6f} s:"
+        "[PASS] double-support hierarchy unchanged"
+    )
+
+    # ========================================================
+    # FINAL NULLITY
+    # ========================================================
+
+    assert (
+        Z.shape
+        ==
+        (
+            16,
+            2,
+        )
     )
 
     print(
-        "  position     =",
-        ref_T.position,
+        "[PASS] double-support final nullity = 2"
+    )
+
+    # ========================================================
+    # BOTH FEET REMAIN FIXED
+    # ========================================================
+
+    both_feet_velocity = (
+        np.vstack(
+            [
+                robot.J_left,
+                robot.J_right,
+            ]
+        )
+        @
+        qdot
+    )
+
+    np.testing.assert_allclose(
+        both_feet_velocity,
+        0.0,
+        atol=1e-8,
     )
 
     print(
-        "  velocity     =",
-        ref_T.velocity,
+        "[PASS] CoM cannot corrupt double-support feet"
+    )
+
+    # ========================================================
+    # COM
+    # ========================================================
+
+    expected_com_cmd = (
+        com_velocity_ref
+        +
+        COM_GAIN
+        *
+        com_ref
+    )
+
+    actual_com_cmd = (
+        robot.J_com
+        @
+        qdot
+    )
+
+    np.testing.assert_allclose(
+        actual_com_cmd,
+        expected_com_cmd,
+        atol=1e-8,
     )
 
     print(
-        "  acceleration =",
-        ref_T.acceleration,
+        "[PASS] double-support CoM task achievable"
     )
 
-    separator()
-
-    print(
-        "CONSTANT-JERK COM TRAJECTORY TEST PASSED"
+    print_diagnostics(
+        diagnostics
     )
-
-    separator()
 
 
 # ============================================================
@@ -776,29 +940,52 @@ def main():
     separator()
 
     print(
-        "MPC -> IK CONTINUOUS COM REFERENCE TEST"
+        "DIFFERENTIAL IK PRIORITY TEST"
     )
 
     separator()
 
+    print()
+
     print(
-        f"MPC timestep : "
-        f"{MPC_TIMESTEP:.6f} s"
+        "Single support target hierarchy:"
     )
 
     print(
-        f"IK timestep  : "
-        f"{IK_TIMESTEP:.6f} s"
+        "  P1 support"
     )
 
     print(
-        f"Ratio        : "
-        f"{IK_STEPS_PER_MPC} IK intervals / MPC interval"
+        "  P2 CoM"
+    )
+
+    print(
+        "  P3 swing"
+    )
+
+    print(
+        "  P4 trunk"
     )
 
     print()
 
-    test_constant_jerk_com_segment()
+    test_single_support_priority()
+
+    print()
+
+    separator()
+
+    test_double_support_priority()
+
+    print()
+
+    separator()
+
+    print(
+        "DIFFERENTIAL IK PRIORITY TEST PASSED"
+    )
+
+    separator()
 
 
 if __name__ == "__main__":
