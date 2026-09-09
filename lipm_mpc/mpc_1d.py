@@ -36,24 +36,16 @@ else:
 @dataclass
 class MPC1DResult:
 
-    # Optimal jerk sequence:
-    #
-    # control[k] = u_k
     control: np.ndarray
 
-    # State trajectory:
-    #
-    # state[0] = current state x_0
-    # state[1] = predicted state x_1
+    # state[0] = x_0
     # ...
-    # state[N] = terminal state x_N
+    # state[N] = x_N
     state: np.ndarray
 
-    # Predicted ZMP trajectory:
-    #
-    # zmp[0]     = ZMP of x_1
+    # zmp[0] = ZMP(x_1)
     # ...
-    # zmp[N - 1] = ZMP of x_N
+    # zmp[N-1] = ZMP(x_N)
     zmp: np.ndarray
 
     objective: float
@@ -69,12 +61,6 @@ class MPC1DResult:
     def first_control(
         self,
     ) -> float:
-        """
-        First jerk command of the optimal sequence.
-
-        In receding-horizon MPC, this is the only command
-        applied before solving the optimization problem again.
-        """
 
         return float(
             self.control[0]
@@ -87,68 +73,50 @@ class MPC1DResult:
 
 class LIPMMPC1D:
     """
-    One-dimensional LIPM Model Predictive Controller.
+    Generic 1D LIPM-MPC.
 
-    The same class is instantiated independently for:
-
-        x-axis:
-            [x_G, xdot_G, xddot_G]
-
-        y-axis:
-            [y_G, ydot_G, yddot_G]
-
-    State
-    -----
+    State:
         x_k = [p_G, v_G, a_G]^T
 
-    Control
-    -------
+    Control:
         u_k = jerk
 
-    Dynamics
-    --------
-        x_{k+1} = A x_k + B u_k
+    Dynamics:
+        x_(k+1) = A x_k + B u_k
 
-    ZMP
-    ---
-        p_Z,k = C_zmp x_k
+    ZMP:
+        p_Z = C_zmp x
 
-    Cost
-    ----
-        J =
-            w_terminal * ||x_N - x_goal||^2
-            +
-            w_control * sum(u_k^2)
+    Terminal cost:
+        J_terminal =
+            (x_N - x_goal)^T
+            Q_f
+            (x_N - x_goal)
 
-    ZMP constraints
-    ---------------
-        lower_k
-        <=
-        C_zmp x_{k+1}
-        <=
-        upper_k
+    where:
 
-        k = 0, ..., N-1
+        Q_f =
+            diag(q_p, q_v, q_a)
 
-    Therefore the N support-preview entries correspond to:
+    Control cost:
+        J_control =
+            w_u * U^T U
 
-        x_1, x_2, ..., x_N
+    ZMP constraints are imposed on:
 
-    rather than:
-
-        x_0, ..., x_{N-1}.
+        x_1, ..., x_N.
     """
 
     def __init__(
         self,
         model: LIPMModel1D,
         horizon_steps: int,
-        terminal_weight: float,
+        terminal_weights,
         control_weight: float,
     ) -> None:
 
         # ====================================================
-        # CHECK PARAMETERS
+        # VALIDATE BASIC PARAMETERS
         # ====================================================
 
         if not isinstance(
@@ -166,12 +134,6 @@ class LIPMMPC1D:
                 "horizon_steps must be positive."
             )
 
-        if terminal_weight < 0.0:
-
-            raise ValueError(
-                "terminal_weight cannot be negative."
-            )
-
         if control_weight <= 0.0:
 
             raise ValueError(
@@ -179,7 +141,44 @@ class LIPMMPC1D:
             )
 
         # ====================================================
-        # STORE MODEL
+        # TERMINAL WEIGHTS
+        # ====================================================
+
+        terminal_weights = np.asarray(
+            terminal_weights,
+            dtype=float,
+        )
+
+        if terminal_weights.shape != (
+            3,
+        ):
+
+            raise ValueError(
+                "terminal_weights must have shape (3,)."
+            )
+
+        if not np.all(
+            np.isfinite(
+                terminal_weights
+            )
+        ):
+
+            raise ValueError(
+                "terminal_weights must contain finite values."
+            )
+
+        if np.any(
+            terminal_weights
+            <
+            0.0
+        ):
+
+            raise ValueError(
+                "terminal_weights cannot be negative."
+            )
+
+        # ====================================================
+        # STORE PARAMETERS
         # ====================================================
 
         self.model = model
@@ -188,8 +187,12 @@ class LIPMMPC1D:
             horizon_steps
         )
 
-        self.terminal_weight = float(
-            terminal_weight
+        self.terminal_weights = (
+            terminal_weights.copy()
+        )
+
+        self.Q_terminal = np.diag(
+            self.terminal_weights
         )
 
         self.control_weight = float(
@@ -204,15 +207,19 @@ class LIPMMPC1D:
         self.B = np.asarray(
             model.B,
             dtype=float,
-        ).reshape(3)
+        ).reshape(
+            3
+        )
 
         self.C_zmp = np.asarray(
             model.C_zmp,
             dtype=float,
-        ).reshape(3)
+        ).reshape(
+            3
+        )
 
         # ====================================================
-        # BUILD CONSTANT PREDICTION MATRICES
+        # CONSTANT PREDICTION MATRICES
         # ====================================================
 
         self._build_prediction_matrices()
@@ -225,50 +232,13 @@ class LIPMMPC1D:
     def _build_prediction_matrices(
         self,
     ) -> None:
-        """
-        Build constant prediction matrices.
 
-        Terminal state:
-
-            x_N =
-                F x_0
-                +
-                G_t U
-
-        Predicted ZMP:
-
-            Z =
-                Z_x x_0
-                +
-                Z_u U
-
-        where:
-
-            Z =
-            [
-                z_1
-                z_2
-                ...
-                z_N
-            ]^T
-
-        and:
-
-            U =
-            [
-                u_0
-                u_1
-                ...
-                u_{N-1}
-            ]^T.
-        """
-
-        N = self.horizon_steps
+        N = (
+            self.horizon_steps
+        )
 
         # ----------------------------------------------------
-        # Powers of A
-        #
-        # A_powers[k] = A^k
+        # A^k
         # ----------------------------------------------------
 
         A_powers = [
@@ -278,7 +248,9 @@ class LIPMMPC1D:
             )
         ]
 
-        for _ in range(N):
+        for _ in range(
+            N
+        ):
 
             A_powers.append(
                 A_powers[-1]
@@ -288,32 +260,29 @@ class LIPMMPC1D:
 
         # ====================================================
         # TERMINAL STATE
-        # ====================================================
         #
         # x_N =
-        # A^N x_0
         #
-        # + A^(N-1) B u_0
-        # + A^(N-2) B u_1
-        # ...
-        # + B u_(N-1)
+        # F x_0
+        # +
+        # G_t U
         # ====================================================
 
         self.terminal_state_matrix = (
             A_powers[N].copy()
         )
 
-        self.terminal_control_matrix = (
-            np.zeros(
-                (
-                    3,
-                    N,
-                ),
-                dtype=float,
-            )
+        self.terminal_control_matrix = np.zeros(
+            (
+                3,
+                N,
+            ),
+            dtype=float,
         )
 
-        for j in range(N):
+        for j in range(
+            N
+        ):
 
             self.terminal_control_matrix[
                 :,
@@ -328,50 +297,41 @@ class LIPMMPC1D:
 
         # ====================================================
         # ZMP PREDICTION
-        # ====================================================
         #
-        # Row k corresponds to predicted state:
+        # Z =
+        # [z_1 ... z_N]^T
         #
-        #     x_(k+1)
-        #
-        # Therefore:
-        #
-        # z_(k+1)
-        # =
-        # C A^(k+1) x_0
-        #
+        # Z =
+        # Z_x x_0
         # +
-        # sum_{j=0}^{k}
-        # C A^(k-j) B u_j
-        #
+        # Z_u U
         # ====================================================
 
-        self.zmp_state_matrix = (
-            np.zeros(
-                (
-                    N,
-                    3,
-                ),
-                dtype=float,
-            )
+        self.zmp_state_matrix = np.zeros(
+            (
+                N,
+                3,
+            ),
+            dtype=float,
         )
 
-        self.zmp_control_matrix = (
-            np.zeros(
-                (
-                    N,
-                    N,
-                ),
-                dtype=float,
-            )
+        self.zmp_control_matrix = np.zeros(
+            (
+                N,
+                N,
+            ),
+            dtype=float,
         )
 
-        for k in range(N):
+        for k in range(
+            N
+        ):
 
             # ------------------------------------------------
-            # Free response:
+            # Free response
             #
-            # C A^(k+1) x0
+            # z_(k+1) =
+            # C A^(k+1) x_0
             # ------------------------------------------------
 
             self.zmp_state_matrix[
@@ -386,9 +346,7 @@ class LIPMMPC1D:
             )
 
             # ------------------------------------------------
-            # Controlled response:
-            #
-            # j = 0, ..., k
+            # Controlled response
             # ------------------------------------------------
 
             for j in range(
@@ -412,7 +370,7 @@ class LIPMMPC1D:
 
 
     # ========================================================
-    # VALIDATION
+    # STATE VALIDATION
     # ========================================================
 
     @staticmethod
@@ -426,7 +384,9 @@ class LIPMMPC1D:
             dtype=float,
         )
 
-        if state.shape != (3,):
+        if state.shape != (
+            3,
+        ):
 
             raise ValueError(
                 f"{name} must have shape (3,)."
@@ -445,14 +405,15 @@ class LIPMMPC1D:
         return state
 
 
+    # ========================================================
+    # BOUNDS VALIDATION
+    # ========================================================
+
     def _validate_bounds(
         self,
         lower_bounds,
         upper_bounds,
-    ) -> tuple[
-        np.ndarray,
-        np.ndarray,
-    ]:
+    ):
 
         lower_bounds = np.asarray(
             lower_bounds,
@@ -468,9 +429,7 @@ class LIPMMPC1D:
             self.horizon_steps,
         )
 
-        if (
-            lower_bounds.shape
-            !=
+        if lower_bounds.shape != (
             expected_shape
         ):
 
@@ -479,9 +438,7 @@ class LIPMMPC1D:
                 f"{expected_shape}."
             )
 
-        if (
-            upper_bounds.shape
-            !=
+        if upper_bounds.shape != (
             expected_shape
         ):
 
@@ -538,27 +495,6 @@ class LIPMMPC1D:
         lower_bounds,
         upper_bounds,
     ):
-        """
-        Build:
-
-            min
-                1/2 U^T H U
-                +
-                f^T U
-
-        subject to:
-
-            lb
-            <=
-            G U
-            <=
-            ub
-
-        where:
-
-            U =
-            [u_0, ..., u_(N-1)]^T.
-        """
 
         x0 = self._validate_state(
             current_state,
@@ -580,6 +516,9 @@ class LIPMMPC1D:
 
         # ====================================================
         # TERMINAL STATE
+        #
+        # x_N =
+        # F x0 + G_t U
         # ====================================================
 
         F = (
@@ -596,37 +535,34 @@ class LIPMMPC1D:
             x_goal
         )
 
+        Q = (
+            self.Q_terminal
+        )
+
         # ====================================================
         # COST
-        # ====================================================
         #
         # J =
         #
-        # wt ||F x0 + G_t U - x_goal||^2
+        # (F x0 + G_t U - x_goal)^T
+        # Q
+        # (F x0 + G_t U - x_goal)
         #
         # +
         #
-        # wu ||U||^2
+        # w_u U^T U
         #
         # Standard QP:
         #
-        # J =
-        # 1/2 U^T H U
-        # +
-        # f^T U
-        # +
-        # constant
-        #
+        # 1/2 U^T H U + f^T U
         # ====================================================
 
         H = 2.0 * (
-            self.terminal_weight
-            *
-            (
-                G_t.T
-                @
-                G_t
-            )
+            G_t.T
+            @
+            Q
+            @
+            G_t
             +
             self.control_weight
             *
@@ -636,35 +572,16 @@ class LIPMMPC1D:
             )
         )
 
-        f = (
-            2.0
-            *
-            self.terminal_weight
-            *
-            (
-                G_t.T
-                @
-                terminal_offset
-            )
+        f = 2.0 * (
+            G_t.T
+            @
+            Q
+            @
+            terminal_offset
         )
 
         # ====================================================
-        # ZMP CONSTRAINTS
-        # ====================================================
-        #
-        # Z =
-        #
-        # Z_x x0
-        #
-        # +
-        #
-        # Z_u U
-        #
-        # where:
-        #
-        # Z =
-        # [z_1, ..., z_N]^T
-        #
+        # ZMP CONSTRAINT
         # ====================================================
 
         zmp_free = (
@@ -676,20 +593,6 @@ class LIPMMPC1D:
         G = (
             self.zmp_control_matrix
         )
-
-        # ----------------------------------------------------
-        # lower <= Z <= upper
-        #
-        # lower - Z_free
-        #
-        # <=
-        #
-        # Z_u U
-        #
-        # <=
-        #
-        # upper - Z_free
-        # ----------------------------------------------------
 
         lb = (
             lower_bounds
@@ -725,18 +628,6 @@ class LIPMMPC1D:
         initial_control=None,
         solver_options=None,
     ) -> MPC1DResult:
-        """
-        Solve the 1D LIPM-MPC optimization problem.
-
-        Note
-        ----
-        lower_bounds[0] and upper_bounds[0] correspond to
-        predicted state x_1, NOT current state x_0.
-
-        Current-state ZMP feasibility should therefore be
-        checked externally using the current support region
-        if required.
-        """
 
         x0 = self._validate_state(
             current_state,
@@ -767,10 +658,21 @@ class LIPMMPC1D:
             lb,
             ub,
         ) = self.build_qp(
-            current_state=x0,
-            goal_state=x_goal,
-            lower_bounds=lower_bounds,
-            upper_bounds=upper_bounds,
+            current_state=(
+                x0
+            ),
+
+            goal_state=(
+                x_goal
+            ),
+
+            lower_bounds=(
+                lower_bounds
+            ),
+
+            upper_bounds=(
+                upper_bounds
+            ),
         )
 
         # ====================================================
@@ -861,12 +763,22 @@ class LIPMMPC1D:
         result = minimize(
             objective,
             U0,
-            jac=gradient,
+
+            jac=(
+                gradient
+            ),
+
             constraints=[
                 linear_constraint
             ],
-            method="SLSQP",
-            options=solver_options,
+
+            method=(
+                "SLSQP"
+            ),
+
+            options=(
+                solver_options
+            ),
         )
 
         if not result.success:
@@ -895,7 +807,9 @@ class LIPMMPC1D:
             dtype=float,
         )
 
-        X[0] = x0
+        X[0] = (
+            x0
+        )
 
         for k in range(
             self.horizon_steps
@@ -903,23 +817,20 @@ class LIPMMPC1D:
 
             X[k + 1] = (
                 self.model.propagate(
-                    state=X[k],
-                    jerk=U[k],
+                    state=(
+                        X[k]
+                    ),
+
+                    jerk=(
+                        U[k]
+                    ),
                 )
             )
 
         # ====================================================
-        # RECONSTRUCT ZMP TRAJECTORY
-        # ====================================================
+        # RECONSTRUCT ZMP
         #
-        # Constraints correspond to:
-        #
-        # x_1, x_2, ..., x_N
-        #
-        # Therefore:
-        #
-        # zmp[k] = C_zmp x_(k+1)
-        #
+        # zmp[k] corresponds to X[k+1]
         # ====================================================
 
         zmp = np.array(
@@ -945,30 +856,46 @@ class LIPMMPC1D:
             x_goal
         )
 
-        objective_value = (
-            self.terminal_weight
-            *
-            float(
-                terminal_error
-                @
-                terminal_error
-            )
-            +
+        terminal_cost = float(
+            terminal_error
+            @
+            self.Q_terminal
+            @
+            terminal_error
+        )
+
+        control_cost = (
             self.control_weight
             *
             float(
-                U @ U
+                U
+                @
+                U
             )
         )
 
+        objective_value = (
+            terminal_cost
+            +
+            control_cost
+        )
+
         return MPC1DResult(
-            control=U,
+            control=(
+                U
+            ),
 
-            state=X,
+            state=(
+                X
+            ),
 
-            zmp=zmp,
+            zmp=(
+                zmp
+            ),
 
-            objective=objective_value,
+            objective=(
+                objective_value
+            ),
 
             success=bool(
                 result.success
