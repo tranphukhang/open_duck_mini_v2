@@ -10,8 +10,13 @@ import numpy as np
 # PATH
 # ============================================================
 
-CURRENT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = CURRENT_DIR.parent
+CURRENT_DIR = Path(
+    __file__
+).resolve().parent
+
+ROOT_DIR = (
+    CURRENT_DIR.parent
+)
 
 if str(ROOT_DIR) not in sys.path:
 
@@ -31,12 +36,8 @@ if __package__:
         LIPMModel1D,
     )
 
-    from .support_preview import (
-        build_support_preview,
-    )
-
-    from .mpc_1d import (
-        LIPMMPC1D,
+    from .com_trajectory import (
+        ConstantJerkCoMSegment,
     )
 
 else:
@@ -45,186 +46,110 @@ else:
         LIPMModel1D,
     )
 
-    from support_preview import (
-        build_support_preview,
-    )
-
-    from mpc_1d import (
-        LIPMMPC1D,
+    from com_trajectory import (
+        ConstantJerkCoMSegment,
     )
 
 
-from footstep_planning.walking_fsm import (
-    WalkingFSM,
+# ============================================================
+# DISPLAY
+# ============================================================
+
+np.set_printoptions(
+    precision=9,
+    suppress=True,
 )
 
 
 # ============================================================
-# TEMPORARY MPC PARAMETERS
+# TIMING
 # ============================================================
 
 MPC_TIMESTEP = 0.03
 
-# ------------------------------------------------------------
-# Important change:
-#
-# 48 * 0.03 = 1.44 s preview horizon
-# ------------------------------------------------------------
+IK_TIMESTEP = 0.0005
 
-MPC_HORIZON_STEPS = 48
+IK_STEPS_PER_MPC = int(
+    round(
+        MPC_TIMESTEP
+        /
+        IK_TIMESTEP
+    )
+)
+
+
+# ============================================================
+# LIPM
+# ============================================================
 
 COM_HEIGHT = 0.205
 
 GRAVITY = 9.81
 
 
-# ------------------------------------------------------------
-# Keep exactly the same weights as previous test.
-#
-# We want to study ONLY the effect of horizon length.
-# ------------------------------------------------------------
-
-TERMINAL_WEIGHT = 1.0
-
-CONTROL_WEIGHT = 2e-5
-
-
 # ============================================================
-# WALKING PARAMETERS
+# INITIAL STATE
 # ============================================================
 
-STEP_LENGTH = 0.04
-
-FEET_SPACING = 0.16
-
-
-# ============================================================
-# GAIT TIMING
-# ============================================================
-
-SINGLE_SUPPORT_DURATION = 0.18
-
-DOUBLE_SUPPORT_DURATION = 0.27
-
-INITIAL_DOUBLE_SUPPORT_DURATION = 0.36
-
-
-# ============================================================
-# SUPPORT REGION
-# ============================================================
-
-ZMP_SUPPORT_SCALE = 0.9
-
-FOOT_TOE = 0.0645
-
-FOOT_HEEL = 0.0386
-
-FOOT_HALF_WIDTH = 0.02065
-
-
-# ============================================================
-# SETTLED INITIAL CONFIGURATION
-# ============================================================
-
-P_LEFT_INITIAL = np.array(
-    [
-        -0.0295957703,
-        +0.0839454760,
-        0.0023691268,
-    ],
-    dtype=float,
-)
-
-
-P_RIGHT_INITIAL = np.array(
-    [
-        -0.0299839476,
-        -0.0842981118,
-        0.0025529409,
-    ],
-    dtype=float,
-)
-
-
-P_COM_INITIAL = np.array(
+X_INITIAL = np.array(
     [
         -0.0308300889,
+        0.0,
+        0.0,
+    ],
+    dtype=float,
+)
+
+Y_INITIAL = np.array(
+    [
         -0.0003994468,
-        0.2048464890,
+        0.0,
+        0.0,
     ],
     dtype=float,
 )
 
 
 # ============================================================
-# FOOT ORIENTATION
+# REPRESENTATIVE FIRST MPC COMMAND
+# ============================================================
+#
+# Taken from the already-passed receding-horizon test.
+#
+# This test does NOT solve MPC again.
+#
+# It tests only:
+#
+# MPC state + constant jerk
+#        ->
+# continuous CoM reference
 # ============================================================
 
-R_LEFT_INITIAL = np.eye(
-    3,
-    dtype=float,
-)
+X_JERK = 1.599988
 
-R_RIGHT_INITIAL = np.eye(
-    3,
-    dtype=float,
-)
-
-
-# ============================================================
-# SOLVER
-# ============================================================
-
-SOLVER_OPTIONS = {
-    "ftol": 1e-10,
-    "maxiter": 2000,
-}
+Y_JERK = 15.870031
 
 
 # ============================================================
-# CREATE FSM
+# HELPER
 # ============================================================
 
-def create_fsm():
+def separator():
 
-    return WalkingFSM(
-        p_left_initial=(
-            P_LEFT_INITIAL
-        ),
-
-        p_right_initial=(
-            P_RIGHT_INITIAL
-        ),
-
-        step_length=(
-            STEP_LENGTH
-        ),
-
-        feet_spacing=(
-            FEET_SPACING
-        ),
-
-        single_support_duration=(
-            SINGLE_SUPPORT_DURATION
-        ),
-
-        double_support_duration=(
-            DOUBLE_SUPPORT_DURATION
-        ),
-
-        first_swing_side="right",
-
-        initial_double_support_duration=(
-            INITIAL_DOUBLE_SUPPORT_DURATION
-        ),
+    print(
+        "=" * 72
     )
 
 
 # ============================================================
-# CREATE ONE GENERIC 1D MPC
+# MAIN TEST
 # ============================================================
 
-def create_mpc():
+def test_constant_jerk_com_segment():
+
+    # ========================================================
+    # 1. CREATE DISCRETE LIPM MODEL
+    # ========================================================
 
     model = LIPMModel1D(
         timestep=(
@@ -240,616 +165,606 @@ def create_mpc():
         ),
     )
 
-    mpc = LIPMMPC1D(
-        model=model,
+    print(
+        "[PASS] LIPM model created"
+    )
 
-        horizon_steps=(
-            MPC_HORIZON_STEPS
+    # ========================================================
+    # 2. CREATE CONTINUOUS SEGMENT
+    # ========================================================
+
+    segment = ConstantJerkCoMSegment(
+        x_state=(
+            X_INITIAL
         ),
 
-        terminal_weight=(
-            TERMINAL_WEIGHT
+        y_state=(
+            Y_INITIAL
         ),
 
-        control_weight=(
-            CONTROL_WEIGHT
+        x_jerk=(
+            X_JERK
+        ),
+
+        y_jerk=(
+            Y_JERK
+        ),
+
+        com_height=(
+            COM_HEIGHT
+        ),
+
+        duration=(
+            MPC_TIMESTEP
         ),
     )
 
-    return (
-        model,
-        mpc,
+    print(
+        "[PASS] Constant-jerk CoM segment created"
     )
 
+    # ========================================================
+    # 3. CHECK TAU = 0
+    # ========================================================
 
-# ============================================================
-# CHECK ONE MPC AXIS
-# ============================================================
-
-def check_axis_result(
-    axis_name,
-    model,
-    result,
-    lower_bounds,
-    upper_bounds,
-):
-
-    assert result.success
-
-    assert result.control.shape == (
-        MPC_HORIZON_STEPS,
+    ref_0 = (
+        segment.evaluate(
+            0.0
+        )
     )
 
-    assert result.state.shape == (
-        MPC_HORIZON_STEPS + 1,
+    expected_position_0 = np.array(
+        [
+            X_INITIAL[0],
+            Y_INITIAL[0],
+            COM_HEIGHT,
+        ],
+        dtype=float,
+    )
+
+    expected_velocity_0 = np.array(
+        [
+            X_INITIAL[1],
+            Y_INITIAL[1],
+            0.0,
+        ],
+        dtype=float,
+    )
+
+    expected_acceleration_0 = np.array(
+        [
+            X_INITIAL[2],
+            Y_INITIAL[2],
+            0.0,
+        ],
+        dtype=float,
+    )
+
+    np.testing.assert_allclose(
+        ref_0.position,
+        expected_position_0,
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        ref_0.velocity,
+        expected_velocity_0,
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        ref_0.acceleration,
+        expected_acceleration_0,
+        atol=1e-12,
+    )
+
+    print(
+        "[PASS] tau = 0 reference"
+    )
+
+    # ========================================================
+    # 4. DISCRETE LIPM TERMINAL STATE
+    # ========================================================
+
+    x_discrete_next = (
+        model.propagate(
+            state=(
+                X_INITIAL
+            ),
+
+            jerk=(
+                X_JERK
+            ),
+        )
+    )
+
+    y_discrete_next = (
+        model.propagate(
+            state=(
+                Y_INITIAL
+            ),
+
+            jerk=(
+                Y_JERK
+            ),
+        )
+    )
+
+    # ========================================================
+    # 5. CONTINUOUS SEGMENT AT TAU = T_MPC
+    # ========================================================
+
+    x_continuous_next = (
+        segment.get_terminal_x_state()
+    )
+
+    y_continuous_next = (
+        segment.get_terminal_y_state()
+    )
+
+    np.testing.assert_allclose(
+        x_continuous_next,
+        x_discrete_next,
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        y_continuous_next,
+        y_discrete_next,
+        atol=1e-12,
+    )
+
+    print(
+        "[PASS] continuous terminal state matches LIPM discrete propagation"
+    )
+
+    # ========================================================
+    # 6. FULL TERMINAL REFERENCE
+    # ========================================================
+
+    ref_T = (
+        segment.evaluate(
+            MPC_TIMESTEP
+        )
+    )
+
+    np.testing.assert_allclose(
+        ref_T.position,
+        np.array(
+            [
+                x_discrete_next[0],
+                y_discrete_next[0],
+                COM_HEIGHT,
+            ],
+            dtype=float,
+        ),
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        ref_T.velocity,
+        np.array(
+            [
+                x_discrete_next[1],
+                y_discrete_next[1],
+                0.0,
+            ],
+            dtype=float,
+        ),
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        ref_T.acceleration,
+        np.array(
+            [
+                x_discrete_next[2],
+                y_discrete_next[2],
+                0.0,
+            ],
+            dtype=float,
+        ),
+        atol=1e-12,
+    )
+
+    print(
+        "[PASS] terminal 3D CoM reference"
+    )
+
+    # ========================================================
+    # 7. SAMPLE AT IK RATE
+    # ========================================================
+    #
+    # 0.03 / 0.0005 = 60 executor intervals
+    #
+    # Including both endpoints:
+    #
+    # tau =
+    # 0,
+    # 0.0005,
+    # ...
+    # 0.0300
+    #
+    # gives 61 samples.
+    # ========================================================
+
+    assert (
+        IK_STEPS_PER_MPC
+        ==
+        60
+    )
+
+    tau_samples = np.linspace(
+        0.0,
+        MPC_TIMESTEP,
+        IK_STEPS_PER_MPC + 1,
+    )
+
+    position_log = []
+
+    velocity_log = []
+
+    acceleration_log = []
+
+    for tau in (
+        tau_samples
+    ):
+
+        ref = (
+            segment.evaluate(
+                tau
+            )
+        )
+
+        position_log.append(
+            ref.position
+        )
+
+        velocity_log.append(
+            ref.velocity
+        )
+
+        acceleration_log.append(
+            ref.acceleration
+        )
+
+    position_log = np.asarray(
+        position_log,
+        dtype=float,
+    )
+
+    velocity_log = np.asarray(
+        velocity_log,
+        dtype=float,
+    )
+
+    acceleration_log = np.asarray(
+        acceleration_log,
+        dtype=float,
+    )
+
+    assert position_log.shape == (
+        61,
         3,
     )
 
-    assert result.zmp.shape == (
-        MPC_HORIZON_STEPS,
+    assert velocity_log.shape == (
+        61,
+        3,
     )
 
-    # --------------------------------------------------------
-    # Dynamics consistency
-    # --------------------------------------------------------
-
-    for k in range(
-        MPC_HORIZON_STEPS
-    ):
-
-        expected_next = (
-            model.propagate(
-                state=(
-                    result.state[k]
-                ),
-
-                jerk=(
-                    result.control[k]
-                ),
-            )
-        )
-
-        np.testing.assert_allclose(
-            result.state[k + 1],
-            expected_next,
-            atol=1e-8,
-        )
-
-    # --------------------------------------------------------
-    # ZMP constraints
-    # --------------------------------------------------------
-
-    tolerance = 1e-6
-
-    assert np.all(
-        result.zmp
-        >=
-        lower_bounds
-        -
-        tolerance
+    assert acceleration_log.shape == (
+        61,
+        3,
     )
 
     assert np.all(
-        result.zmp
-        <=
-        upper_bounds
-        +
-        tolerance
-    )
-
-    print(
-        f"[PASS] {axis_name}-MPC dynamics"
-    )
-
-    print(
-        f"[PASS] {axis_name}-MPC ZMP constraints"
-    )
-
-
-# ============================================================
-# PRINT AXIS SUMMARY
-# ============================================================
-
-def print_axis_summary(
-    axis_name,
-    current_state,
-    goal_state,
-    result,
-):
-
-    initial_position_error = abs(
-        current_state[0]
-        -
-        goal_state[0]
-    )
-
-    terminal_position_error = abs(
-        result.state[-1, 0]
-        -
-        goal_state[0]
-    )
-
-    max_jerk = np.max(
-        np.abs(
-            result.control
+        np.isfinite(
+            position_log
         )
     )
 
-    max_jerk_index = int(
-        np.argmax(
-            np.abs(
-                result.control
-            )
+    assert np.all(
+        np.isfinite(
+            velocity_log
         )
     )
 
-    max_jerk_time = (
-        max_jerk_index
-        *
-        MPC_TIMESTEP
+    assert np.all(
+        np.isfinite(
+            acceleration_log
+        )
+    )
+
+    print(
+        "[PASS] 60 IK intervals generated inside one MPC interval"
+    )
+
+    # ========================================================
+    # 8. CONSTANT Z
+    # ========================================================
+
+    np.testing.assert_allclose(
+        position_log[:, 2],
+        COM_HEIGHT,
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        velocity_log[:, 2],
+        0.0,
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        acceleration_log[:, 2],
+        0.0,
+        atol=1e-12,
+    )
+
+    print(
+        "[PASS] CoM height remains constant"
+    )
+
+    # ========================================================
+    # 9. CHECK CONTINUITY INSIDE SEGMENT
+    # ========================================================
+
+    position_difference = np.diff(
+        position_log,
+        axis=0,
+    )
+
+    velocity_difference = np.diff(
+        velocity_log,
+        axis=0,
+    )
+
+    acceleration_difference = np.diff(
+        acceleration_log,
+        axis=0,
+    )
+
+    assert np.all(
+        np.isfinite(
+            position_difference
+        )
+    )
+
+    assert np.all(
+        np.isfinite(
+            velocity_difference
+        )
+    )
+
+    assert np.all(
+        np.isfinite(
+            acceleration_difference
+        )
+    )
+
+    print(
+        "[PASS] continuous reference across IK samples"
+    )
+
+    # ========================================================
+    # 10. SECOND SEGMENT
+    #
+    # Verify exact continuity when the next MPC solve starts
+    # from the terminal state of the previous segment.
+    # ========================================================
+
+    SECOND_X_JERK = (
+        -0.30
+    )
+
+    SECOND_Y_JERK = (
+        -12.0
+    )
+
+    second_segment = ConstantJerkCoMSegment(
+        x_state=(
+            x_continuous_next
+        ),
+
+        y_state=(
+            y_continuous_next
+        ),
+
+        x_jerk=(
+            SECOND_X_JERK
+        ),
+
+        y_jerk=(
+            SECOND_Y_JERK
+        ),
+
+        com_height=(
+            COM_HEIGHT
+        ),
+
+        duration=(
+            MPC_TIMESTEP
+        ),
+    )
+
+    second_ref_0 = (
+        second_segment.evaluate(
+            0.0
+        )
+    )
+
+    np.testing.assert_allclose(
+        second_ref_0.position,
+        ref_T.position,
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        second_ref_0.velocity,
+        ref_T.velocity,
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        second_ref_0.acceleration,
+        ref_T.acceleration,
+        atol=1e-12,
+    )
+
+    print(
+        "[PASS] exact continuity between consecutive MPC segments"
+    )
+
+    # ========================================================
+    # PRINT REPRESENTATIVE VALUES
+    # ========================================================
+
+    separator()
+
+    print(
+        "COM TRAJECTORY SEGMENT SUMMARY"
+    )
+
+    separator()
+
+    print(
+        f"MPC interval        : "
+        f"{MPC_TIMESTEP:.6f} s"
+    )
+
+    print(
+        f"IK interval         : "
+        f"{IK_TIMESTEP:.6f} s"
+    )
+
+    print(
+        f"IK intervals / MPC  : "
+        f"{IK_STEPS_PER_MPC}"
     )
 
     print()
 
     print(
-        "-" * 72
+        "Initial X state:"
     )
 
     print(
-        f"{axis_name}-MPC SUMMARY"
+        " ",
+        X_INITIAL
     )
 
     print(
-        "-" * 72
+        "Initial Y state:"
     )
 
     print(
-        f"Current CoM {axis_name.lower():<7}: "
-        f"{current_state[0]: .6f} m"
+        " ",
+        Y_INITIAL
     )
-
-    print(
-        f"Goal {axis_name.lower():<14}: "
-        f"{goal_state[0]: .6f} m"
-    )
-
-    print(
-        f"Terminal CoM {axis_name.lower():<6}: "
-        f"{result.state[-1, 0]: .6f} m"
-    )
-
-    print(
-        f"Terminal velocity : "
-        f"{result.state[-1, 1]: .6f} m/s"
-    )
-
-    print(
-        f"Terminal accel.   : "
-        f"{result.state[-1, 2]: .6f} m/s^2"
-    )
-
-    print(
-        f"First jerk        : "
-        f"{result.first_control: .6f} m/s^3"
-    )
-
-    print(
-        f"Max |jerk|        : "
-        f"{max_jerk: .6f} m/s^3"
-    )
-
-    print(
-        f"Max jerk index    : "
-        f"{max_jerk_index}"
-    )
-
-    print(
-        f"Max jerk time     : "
-        f"{max_jerk_time:.3f} s"
-    )
-
-    print(
-        f"Initial pos error : "
-        f"{initial_position_error:.6f} m"
-    )
-
-    print(
-        f"Terminal pos error: "
-        f"{terminal_position_error:.6f} m"
-    )
-
-    print(
-        f"Objective         : "
-        f"{result.objective:.10f}"
-    )
-
-    print(
-        f"Solver iterations : "
-        f"{result.iterations}"
-    )
-
-
-# ============================================================
-# PRINT PREVIEW TABLE
-# ============================================================
-
-def print_preview_table(
-    preview,
-    x_result,
-    y_result,
-):
 
     print()
 
     print(
-        "=" * 138
+        f"Applied jerk x      : "
+        f"{X_JERK:+.6f} m/s^3"
     )
 
     print(
-        "2D ZMP PREVIEW RESULT"
+        f"Applied jerk y      : "
+        f"{Y_JERK:+.6f} m/s^3"
+    )
+
+    print()
+
+    print(
+        "CoM reference at tau = 0:"
     )
 
     print(
-        "=" * 138
+        "  position     =",
+        ref_0.position,
     )
 
     print(
-        f"{'k':>2} "
-        f"{'t':>6} "
-        f"{'phase':>24} "
-        f"{'support':>8} "
-        f"{'x_Z':>10} "
-        f"{'x_min':>10} "
-        f"{'x_max':>10} "
-        f"{'y_Z':>10} "
-        f"{'y_min':>10} "
-        f"{'y_max':>10}"
+        "  velocity     =",
+        ref_0.velocity,
     )
 
     print(
-        "-" * 138
+        "  acceleration =",
+        ref_0.acceleration,
     )
 
-    for k in range(
-        MPC_HORIZON_STEPS
-    ):
+    print()
 
-        print(
-            f"{k:2d} "
-            f"{preview.time[k]:6.3f} "
-            f"{preview.phase[k]:>24} "
-            f"{preview.support_side[k]:>8} "
-            f"{x_result.zmp[k]:10.6f} "
-            f"{preview.x_min[k]:10.6f} "
-            f"{preview.x_max[k]:10.6f} "
-            f"{y_result.zmp[k]:10.6f} "
-            f"{preview.y_min[k]:10.6f} "
-            f"{preview.y_max[k]:10.6f}"
-        )
-
-    print(
-        "-" * 138
+    midpoint_index = (
+        IK_STEPS_PER_MPC
+        //
+        2
     )
 
-
-# ============================================================
-# X/Y MPC INTEGRATION TEST
-# ============================================================
-
-def test_xy_mpc_with_support_preview():
-
-    # ========================================================
-    # 1. FSM
-    # ========================================================
-
-    fsm = create_fsm()
-
-    swing_target = (
-        fsm.get_next_swing_target()
+    midpoint_tau = (
+        tau_samples[
+            midpoint_index
+        ]
     )
 
-    assert (
-        swing_target
-        is not None
-    )
-
-    print(
-        "[PASS] FSM next swing target"
-    )
-
-    # ========================================================
-    # 2. SUPPORT PREVIEW
-    # ========================================================
-
-    preview = (
-        build_support_preview(
-            fsm=fsm,
-
-            left_rotation=(
-                R_LEFT_INITIAL
-            ),
-
-            right_rotation=(
-                R_RIGHT_INITIAL
-            ),
-
-            timestep=(
-                MPC_TIMESTEP
-            ),
-
-            horizon_steps=(
-                MPC_HORIZON_STEPS
-            ),
-
-            foot_toe=(
-                FOOT_TOE
-            ),
-
-            foot_heel=(
-                FOOT_HEEL
-            ),
-
-            foot_half_width=(
-                FOOT_HALF_WIDTH
-            ),
-
-            zmp_scale=(
-                ZMP_SUPPORT_SCALE
-            ),
+    midpoint_ref = (
+        segment.evaluate(
+            midpoint_tau
         )
     )
 
-    assert (
-        preview.horizon_steps
-        ==
-        MPC_HORIZON_STEPS
+    print(
+        f"CoM reference at tau = "
+        f"{midpoint_tau:.6f} s:"
     )
 
     print(
-        "[PASS] 2D support preview"
-    )
-
-    # ========================================================
-    # 3. INITIAL LIPM STATES
-    # ========================================================
-
-    x_current = np.array(
-        [
-            P_COM_INITIAL[0],
-            0.0,
-            0.0,
-        ],
-        dtype=float,
-    )
-
-    y_current = np.array(
-        [
-            P_COM_INITIAL[1],
-            0.0,
-            0.0,
-        ],
-        dtype=float,
-    )
-
-    # ========================================================
-    # 4. TERMINAL GOALS
-    # ========================================================
-    #
-    # Terminal state:
-    #
-    #     [p_goal, 0, 0]
-    #
-    # If terminal acceleration is zero:
-    #
-    #     p_Z,N = p_G,N
-    #
-    # Therefore the terminal CoM position should be
-    # consistent with the support region at the END
-    # of the prediction horizon.
-    #
-    # For the current decoupled x/y formulation, use the
-    # center of the final safe support bounds.
-    # ========================================================
-
-    x_terminal_center = 0.5 * (
-        preview.x_min[-1]
-        +
-        preview.x_max[-1]
-    )
-
-    y_terminal_center = 0.5 * (
-        preview.y_min[-1]
-        +
-        preview.y_max[-1]
-    )
-
-
-    x_goal = np.array(
-        [
-            x_terminal_center,
-            0.0,
-            0.0,
-        ],
-        dtype=float,
-    )
-
-
-    y_goal = np.array(
-        [
-            y_terminal_center,
-            0.0,
-            0.0,
-        ],
-        dtype=float,
+        "  position     =",
+        midpoint_ref.position,
     )
 
     print(
-        f"Terminal support phase : "
-        f"{preview.phase[-1]}"
+        "  velocity     =",
+        midpoint_ref.velocity,
     )
 
     print(
-        f"Terminal support side  : "
-        f"{preview.support_side[-1]}"
+        "  acceleration =",
+        midpoint_ref.acceleration,
+    )
+
+    print()
+
+    print(
+        f"CoM reference at tau = "
+        f"{MPC_TIMESTEP:.6f} s:"
     )
 
     print(
-        f"Terminal goal x        : "
-        f"{x_terminal_center:.6f} m"
+        "  position     =",
+        ref_T.position,
     )
 
     print(
-        f"Terminal goal y        : "
-        f"{y_terminal_center:.6f} m"
-    )
-
-    # ========================================================
-    # 5. CREATE TWO INSTANCES OF SAME 1D MPC
-    # ========================================================
-
-    x_model, x_mpc = (
-        create_mpc()
-    )
-
-    y_model, y_mpc = (
-        create_mpc()
-    )
-
-    assert (
-        type(x_mpc)
-        is
-        type(y_mpc)
+        "  velocity     =",
+        ref_T.velocity,
     )
 
     print(
-        "[PASS] Same LIPMMPC1D used for x and y"
+        "  acceleration =",
+        ref_T.acceleration,
     )
 
-    # ========================================================
-    # 6. SOLVE X
-    # ========================================================
+    separator()
 
-    x_result = (
-        x_mpc.solve(
-            current_state=(
-                x_current
-            ),
-
-            goal_state=(
-                x_goal
-            ),
-
-            lower_bounds=(
-                preview.x_min
-            ),
-
-            upper_bounds=(
-                preview.x_max
-            ),
-
-            solver_options=(
-                SOLVER_OPTIONS
-            ),
-        )
+    print(
+        "CONSTANT-JERK COM TRAJECTORY TEST PASSED"
     )
 
-    check_axis_result(
-        axis_name="X",
-
-        model=x_model,
-
-        result=x_result,
-
-        lower_bounds=(
-            preview.x_min
-        ),
-
-        upper_bounds=(
-            preview.x_max
-        ),
-    )
-
-    # ========================================================
-    # 7. SOLVE Y
-    # ========================================================
-
-    y_result = (
-        y_mpc.solve(
-            current_state=(
-                y_current
-            ),
-
-            goal_state=(
-                y_goal
-            ),
-
-            lower_bounds=(
-                preview.y_min
-            ),
-
-            upper_bounds=(
-                preview.y_max
-            ),
-
-            solver_options=(
-                SOLVER_OPTIONS
-            ),
-        )
-    )
-
-    check_axis_result(
-        axis_name="Y",
-
-        model=y_model,
-
-        result=y_result,
-
-        lower_bounds=(
-            preview.y_min
-        ),
-
-        upper_bounds=(
-            preview.y_max
-        ),
-    )
-
-    # ========================================================
-    # 8. PRINT RESULTS
-    # ========================================================
-
-    print_axis_summary(
-        axis_name="X",
-
-        current_state=x_current,
-
-        goal_state=x_goal,
-
-        result=x_result,
-    )
-
-    print_axis_summary(
-        axis_name="Y",
-
-        current_state=y_current,
-
-        goal_state=y_goal,
-
-        result=y_result,
-    )
-
-    print_preview_table(
-        preview=preview,
-
-        x_result=x_result,
-
-        y_result=y_result,
-    )
-
-    return (
-        preview,
-        x_result,
-        y_result,
-    )
+    separator()
 
 
 # ============================================================
@@ -858,66 +773,34 @@ def test_xy_mpc_with_support_preview():
 
 def main():
 
+    separator()
+
     print(
-        "=" * 60
+        "MPC -> IK CONTINUOUS COM REFERENCE TEST"
+    )
+
+    separator()
+
+    print(
+        f"MPC timestep : "
+        f"{MPC_TIMESTEP:.6f} s"
     )
 
     print(
-        "LIPM-MPC X/Y LONG-HORIZON TEST"
+        f"IK timestep  : "
+        f"{IK_TIMESTEP:.6f} s"
     )
 
     print(
-        "=" * 60
-    )
-
-    print(
-        f"Initial DS : "
-        f"{INITIAL_DOUBLE_SUPPORT_DURATION:.3f} s"
-    )
-
-    print(
-        f"Normal DS  : "
-        f"{DOUBLE_SUPPORT_DURATION:.3f} s"
-    )
-
-    print(
-        f"SS         : "
-        f"{SINGLE_SUPPORT_DURATION:.3f} s"
-    )
-
-    print(
-        f"MPC timestep: "
-        f"{MPC_TIMESTEP:.3f} s"
-    )
-
-    print(
-        f"MPC steps   : "
-        f"{MPC_HORIZON_STEPS}"
-    )
-
-    print(
-        f"MPC horizon : "
-        f"{MPC_HORIZON_STEPS * MPC_TIMESTEP:.3f} s"
+        f"Ratio        : "
+        f"{IK_STEPS_PER_MPC} IK intervals / MPC interval"
     )
 
     print()
 
-    test_xy_mpc_with_support_preview()
-
-    print()
-
-    print(
-        "=" * 60
-    )
-
-    print(
-        "LONG-HORIZON X/Y MPC TEST PASSED"
-    )
-
-    print(
-        "=" * 60
-    )
+    test_constant_jerk_com_segment()
 
 
 if __name__ == "__main__":
+
     main()
