@@ -1,14 +1,13 @@
 """
 step_timing_adaptation/visualization.py
 ========================================
-Vẽ CoM, CoM-desired, DCM, ZMP, support polygon trong MuJoCo GUI.
+Vẽ CoM, CoM-desired, DCM, ZMP, foot markers + trails, support polygon.
 
-Không vẽ foot markers.
-
-Đơn vị:
-  - Sphere radius: meters.
-  - Line width:    pixels.
-  - Kích thước tham khảo từ lipm_mpc/run.py và walking_visualization.py.
+Đặc điểm:
+  - Trail giới hạn theo THỜI GIAN (0.5 giây gần nhất) cho tất cả đối tượng.
+  - Foot markers: xanh lá (L), đỏ đậm (R) — kèm trail tương ứng.
+  - ZMP: tím. DCM: đen. CoM_des: xanh lá mờ.
+  - Đơn vị: sphere radius = meters, line width = pixels.
 """
 
 import numpy as np
@@ -25,15 +24,18 @@ from footstep_planning.walking_visualization import (
     CAMERA_AZIMUTH,
     CAMERA_ELEVATION,
     TRAIL_MIN_DISTANCE,
-    TRAIL_MAX_POINTS,
+    LEFT_TRAIL_RGBA,
+    RIGHT_TRAIL_RGBA,
+    LEFT_TRAIL_WIDTH,
+    RIGHT_TRAIL_WIDTH,
     COM_MARKER_RGBA,
     COM_TRAIL_RGBA,
-    COM_MARKER_RADIUS,     # 0.007
-    COM_TRAIL_WIDTH,       # 10.0
+    COM_MARKER_RADIUS,
+    COM_TRAIL_WIDTH,
     SUPPORT_HULL_RGBA,
     SUPPORT_VERTEX_RGBA,
-    SUPPORT_HULL_WIDTH,    # 7.0
-    SUPPORT_VERTEX_RADIUS, # 0.0035
+    SUPPORT_HULL_WIDTH,
+    SUPPORT_VERTEX_RADIUS,
     FOOT_TOE,
     FOOT_HEEL,
     FOOT_HALF_WIDTH,
@@ -45,35 +47,48 @@ from footstep_planning.walking_visualization import (
 # ============================================================
 
 # CoM desired: xanh lá
-COM_DES_RGBA      = np.array([0.10, 0.80, 0.20, 0.85], dtype=np.float32)
-COM_DES_RADIUS    = 0.005
+COM_DES_RGBA        = np.array([0.10, 0.80, 0.20, 0.85], dtype=np.float32)
+COM_DES_TRAIL_RGBA  = np.array([0.10, 0.80, 0.20, 0.65], dtype=np.float32)
+COM_DES_RADIUS      = 0.005
 COM_DES_TRAIL_WIDTH = 6.0
 
-# DCM: đỏ
-DCM_RGBA          = np.array([1.00, 0.10, 0.10, 1.00], dtype=np.float32)
-DCM_TRAIL_RGBA    = np.array([1.00, 0.10, 0.10, 0.65], dtype=np.float32)
-DCM_MARKER_RADIUS = 0.007       # khớp current_radius của reference ZMP
-DCM_TRAIL_WIDTH   = 5.0         # khớp trail_width của reference
+# DCM: đen
+DCM_RGBA          = np.array([0.00, 0.00, 0.00, 1.00], dtype=np.float32)
+DCM_TRAIL_RGBA    = np.array([0.00, 0.00, 0.00, 0.65], dtype=np.float32)
+DCM_MARKER_RADIUS = 0.007
+DCM_TRAIL_WIDTH   = 5.0
 
 # ZMP: tím
 ZMP_RGBA          = np.array([0.60, 0.10, 0.90, 1.00], dtype=np.float32)
 ZMP_TRAIL_RGBA    = np.array([0.60, 0.10, 0.90, 0.65], dtype=np.float32)
-ZMP_MARKER_RADIUS = 0.007       # khớp current_radius của reference ZMP
-ZMP_TRAIL_WIDTH   = 5.0         # khớp trail_width của reference
+ZMP_MARKER_RADIUS = 0.007
+ZMP_TRAIL_WIDTH   = 5.0
+
+FOOT_MARKER_RADIUS = 0.006
 
 
 # ============================================================
 # ĐỘ CAO MARKER (xếp lớp z)
 # ============================================================
 
-COM_MARKER_Z = GROUND_Z + 0.016
-COM_DES_Z    = GROUND_Z + 0.014
-DCM_MARKER_Z = GROUND_Z + 0.012
-ZMP_MARKER_Z = GROUND_Z + 0.010
+COM_MARKER_Z  = GROUND_Z + 0.016
+COM_DES_Z     = GROUND_Z + 0.014
+DCM_MARKER_Z  = GROUND_Z + 0.012
+ZMP_MARKER_Z  = GROUND_Z + 0.010
+FOOT_MARKER_Z = GROUND_Z + 0.008
 
-COM_TRAIL_Z  = GROUND_Z + 0.016
-DCM_TRAIL_Z  = GROUND_Z + 0.012
-ZMP_TRAIL_Z  = GROUND_Z + 0.010
+COM_TRAIL_Z     = GROUND_Z + 0.016
+COM_DES_TRAIL_Z = GROUND_Z + 0.014
+DCM_TRAIL_Z     = GROUND_Z + 0.012
+ZMP_TRAIL_Z     = GROUND_Z + 0.010
+FOOT_TRAIL_Z    = GROUND_Z + 0.008
+
+
+# ============================================================
+# TRAIL DURATION
+# ============================================================
+
+TRAIL_DURATION_S = 0.5   # giữ 0.5 giây gần nhất
 
 
 # ============================================================
@@ -81,15 +96,18 @@ ZMP_TRAIL_Z  = GROUND_Z + 0.010
 # ============================================================
 
 class WBCVisualizer:
-    def __init__(self, mj_model, trail_max_points=TRAIL_MAX_POINTS):
+    def __init__(self, mj_model, trail_duration_s=TRAIL_DURATION_S):
         self.mj_model = mj_model
-        self.trail_max_points = trail_max_points
+        self.trail_duration_s = trail_duration_s
         self.base_body_id = self._find_base_body_id(mj_model)
 
-        self.com_trail = []
+        # Trail: list[(t, np.array(3))]
+        self.com_trail     = []
         self.com_des_trail = []
-        self.dcm_trail = []
-        self.zmp_trail = []
+        self.dcm_trail     = []
+        self.zmp_trail     = []
+        self.foot_L_trail  = []
+        self.foot_R_trail  = []
 
     @staticmethod
     def _find_base_body_id(mj_model):
@@ -99,10 +117,12 @@ class WBCVisualizer:
         raise RuntimeError("Không tìm thấy floating-base joint.")
 
     def reset(self):
-        self.com_trail = []
+        self.com_trail     = []
         self.com_des_trail = []
-        self.dcm_trail = []
-        self.zmp_trail = []
+        self.dcm_trail     = []
+        self.zmp_trail     = []
+        self.foot_L_trail  = []
+        self.foot_R_trail  = []
 
     def configure_camera(self, viewer):
         with viewer.lock():
@@ -121,16 +141,25 @@ class WBCVisualizer:
     def _make_world_point(xy, z):
         return np.array([xy[0], xy[1], z], dtype=float)
 
-    def _append_trail(self, trail, xy, z):
+    def _append_trail(self, trail, t, xy, z):
+        """Thêm điểm nếu di chuyển đủ xa, rồi cắt bỏ điểm cũ hơn trail_duration."""
         if xy is None:
             return
         p = self._make_world_point(xy, z)
         if len(trail) == 0:
-            trail.append(p)
-        elif np.linalg.norm(p[:2] - trail[-1][:2]) >= TRAIL_MIN_DISTANCE:
-            trail.append(p)
-        if len(trail) > self.trail_max_points:
-            del trail[0:len(trail) - self.trail_max_points]
+            trail.append([t, p])
+        else:
+            last_p = trail[-1][1]
+            if np.linalg.norm(p[:2] - last_p[:2]) >= TRAIL_MIN_DISTANCE:
+                trail.append([t, p])
+
+        # Cắt theo thời gian
+        t_cut = t - self.trail_duration_s
+        idx = 0
+        while idx < len(trail) and trail[idx][0] < t_cut:
+            idx += 1
+        if idx > 0:
+            del trail[0:idx]
 
     # --------------------------------------------------------
     # SUPPORT POLYGON
@@ -162,17 +191,28 @@ class WBCVisualizer:
     # --------------------------------------------------------
     # UPDATE
     # --------------------------------------------------------
-    def update(self, viewer,
+    def update(self, viewer, t,
                com_xy,
                com_des_xy=None,
                dcm_xy=None,
                zmp_xy=None,
                foot_L_pose=None,
                foot_R_pose=None):
-        self._append_trail(self.com_trail, com_xy, COM_TRAIL_Z)
-        self._append_trail(self.com_des_trail, com_des_xy, COM_DES_Z)
-        self._append_trail(self.dcm_trail, dcm_xy, DCM_TRAIL_Z)
-        self._append_trail(self.zmp_trail, zmp_xy, ZMP_TRAIL_Z)
+        # --- Cập nhật trail ---
+        self._append_trail(self.com_trail,     t, com_xy,     COM_TRAIL_Z)
+        self._append_trail(self.com_des_trail, t, com_des_xy, COM_DES_TRAIL_Z)
+        self._append_trail(self.dcm_trail,     t, dcm_xy,     DCM_TRAIL_Z)
+        self._append_trail(self.zmp_trail,     t, zmp_xy,     ZMP_TRAIL_Z)
+
+        foot_L_xy = None
+        foot_R_xy = None
+        if foot_L_pose is not None:
+            foot_L_xy = foot_L_pose[0][:2]
+        if foot_R_pose is not None:
+            foot_R_xy = foot_R_pose[0][:2]
+
+        self._append_trail(self.foot_L_trail, t, foot_L_xy, FOOT_TRAIL_Z)
+        self._append_trail(self.foot_R_trail, t, foot_R_xy, FOOT_TRAIL_Z)
 
         with viewer.lock():
             scene = viewer.user_scn
@@ -198,14 +238,25 @@ class WBCVisualizer:
                                  SUPPORT_HULL_WIDTH, SUPPORT_HULL_RGBA)
 
             # --- 2. Trails ---
-            draw_polyline(scene, self.com_trail,
+            com_pts     = [p for (_, p) in self.com_trail]
+            com_des_pts = [p for (_, p) in self.com_des_trail]
+            dcm_pts     = [p for (_, p) in self.dcm_trail]
+            zmp_pts     = [p for (_, p) in self.zmp_trail]
+            footL_pts   = [p for (_, p) in self.foot_L_trail]
+            footR_pts   = [p for (_, p) in self.foot_R_trail]
+
+            draw_polyline(scene, com_pts,
                           COM_TRAIL_WIDTH, COM_TRAIL_RGBA)
-            draw_polyline(scene, self.com_des_trail,
-                          COM_DES_TRAIL_WIDTH, COM_DES_RGBA)
-            draw_polyline(scene, self.dcm_trail,
+            draw_polyline(scene, com_des_pts,
+                          COM_DES_TRAIL_WIDTH, COM_DES_TRAIL_RGBA)
+            draw_polyline(scene, dcm_pts,
                           DCM_TRAIL_WIDTH, DCM_TRAIL_RGBA)
-            draw_polyline(scene, self.zmp_trail,
+            draw_polyline(scene, zmp_pts,
                           ZMP_TRAIL_WIDTH, ZMP_TRAIL_RGBA)
+            draw_polyline(scene, footL_pts,
+                          LEFT_TRAIL_WIDTH, LEFT_TRAIL_RGBA)
+            draw_polyline(scene, footR_pts,
+                          RIGHT_TRAIL_WIDTH, RIGHT_TRAIL_RGBA)
 
             # --- 3. Markers ---
             if com_xy is not None:
@@ -224,5 +275,13 @@ class WBCVisualizer:
                 add_sphere(scene,
                            [zmp_xy[0], zmp_xy[1], ZMP_MARKER_Z],
                            ZMP_MARKER_RADIUS, ZMP_RGBA)
+            if foot_L_xy is not None:
+                add_sphere(scene,
+                           [foot_L_xy[0], foot_L_xy[1], FOOT_MARKER_Z],
+                           FOOT_MARKER_RADIUS, LEFT_TRAIL_RGBA)
+            if foot_R_xy is not None:
+                add_sphere(scene,
+                           [foot_R_xy[0], foot_R_xy[1], FOOT_MARKER_Z],
+                           FOOT_MARKER_RADIUS, RIGHT_TRAIL_RGBA)
 
         viewer.sync()

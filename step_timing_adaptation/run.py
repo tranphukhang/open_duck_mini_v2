@@ -3,14 +3,9 @@ step_timing_adaptation/run.py
 ==============================
 Entry point: load models, khởi tạo WBC + DCM + visualizer, chạy test.
 
-Nguyên tắc: những gì MuJoCo có sẵn thì đọc trực tiếp, không tính lại qua Pinocchio.
-    - CoM position:       mj_data.subtree_com[0]
-    - CoM velocity:       mj_data.cvel[0][:3]
-    - CoM acceleration:   mj_data.cacc[0]
-    - Foot site pose:     mj_data.site_xpos[site_id], mj_data.site_xmat[site_id]
-
-Pinocchio chỉ dùng cho WBC (M, h, Jacobians, ID) — vì MuJoCo không expose những
-đại lượng đó ở dạng thuận tiện cho QP.
+Quy tắc đọc dữ liệu:
+    - CoM position/velocity/acceleration: Pinocchio (analytical).
+    - Foot site pose: đọc trực tiếp từ MuJoCo.
 
 Cách chạy:
     python -m step_timing_adaptation.run          # all tests
@@ -57,38 +52,25 @@ CFG = {
     'KEYFRAME_NAME':  'home',
     'TEST_SELECTOR':  'all',
     'USE_VIEWER':     True,
+    'DEBUG_DCM':      True,
 }
 
 
 # ============================================================
-# HELPERS — đọc trực tiếp từ MuJoCo
+# HELPERS
 # ============================================================
-def mj_get_com_state(mj_data):
-    """Đọc CoM position/velocity/acceleration trực tiếp từ MuJoCo.
-
-    Lưu ý: cvel/cacc là 6D [angular(3), linear(3)], không phải 3D.
-        - cvel[0][0:3] = angular velocity
-        - cvel[0][3:6] = linear velocity    ← dùng cái này cho DCM
-        - cacc[0][0:3] = angular acceleration
-        - cacc[0][3:6] = linear acceleration ← dùng cái này cho ZMP
-    """
-    com     = mj_data.subtree_com[0].copy()
-    com_vel = mj_data.cvel[0][3:6].copy()    # linear part
-    com_acc = mj_data.cacc[0][3:6].copy()    # linear part
-    return com, com_vel, com_acc
+def pin_get_com_state(pin_model, pin_data, q_pin, v_pin, a_pin):
+    """CoM position / velocity / acceleration từ Pinocchio."""
+    pin.centerOfMass(pin_model, pin_data, q_pin, v_pin, a_pin)
+    return (pin_data.com[0].copy(),
+            pin_data.vcom[0].copy(),
+            pin_data.acom[0].copy())
 
 
 def mj_get_site_pose(mj_data, site_id):
-    """Đọc pose của site trực tiếp từ MuJoCo.
-
-    Returns
-    -------
-    position : np.array (3,)
-    rotation : np.array (3, 3)   — column-major, khớp convention Pinocchio
-    """
+    """Đọc pose của site trực tiếp từ MuJoCo."""
     pos = mj_data.site_xpos[site_id].copy()
-    mat_flat = mj_data.site_xmat[site_id]   # (9,) row-major flatten
-    rot = mat_flat.reshape(3, 3).copy()
+    rot = mj_data.site_xmat[site_id].reshape(3, 3).copy()
     return pos, rot
 
 
@@ -111,8 +93,11 @@ def run_wbc(mj_model, mj_data, pin_model, pin_data, wbc, qpos0,
     v = np.zeros(pin_model.nv)
     S_mat = compute_S_matrix(pin_model.nv, 14)
 
-    # --- Reference ở frame 0, đọc từ MuJoCo ---
-    com0, _, _ = mj_get_com_state(mj_data)
+    q_pin0 = mj_qpos_to_pin_q(qpos, pin_model)
+    v_zero = np.zeros(pin_model.nv)
+    a_zero = np.zeros(pin_model.nv)
+    com0, _, _ = pin_get_com_state(pin_model, pin_data,
+                                    q_pin0, v_zero, a_zero)
     fl0, _ = mj_get_site_pose(mj_data, site_L_id)
     fr0, _ = mj_get_site_pose(mj_data, site_R_id)
     print(f"  CoM0   = {com0}", flush=True)
@@ -131,7 +116,6 @@ def run_wbc(mj_model, mj_data, pin_model, pin_data, wbc, qpos0,
     tau_held = np.zeros(14)
     visualizer.reset()
 
-    # Warm-up
     _ = wbc.compute_control(qpos, v, 0.0, pin_model, pin_data,
                             x_des_com_fn, com0, fl0, fr0, S_mat)
 
@@ -159,45 +143,57 @@ def run_wbc(mj_model, mj_data, pin_model, pin_data, wbc, qpos0,
             # --- Physics step ---
             mj_data.ctrl[:] = tau_held
             mujoco.mj_step(mj_model, mj_data)
+            # Sync qacc với state mới để Pinocchio tính đúng CoM acceleration
+            mujoco.mj_forward(mj_model, mj_data)
             qpos = mj_data.qpos.copy()
             v = mj_data.qvel.copy()
 
             # --- Visualization ---
             if viewer is not None:
                 if step % vis_every == 0:
-                    # Đọc CoM trực tiếp từ MuJoCo
-                    com, com_vel, com_acc = mj_get_com_state(mj_data)
+                    q_pin_now = mj_qpos_to_pin_q(qpos, pin_model)
+                    a_pin_now = mj_data.qacc.copy()
+
+                    com, com_vel, com_acc = pin_get_com_state(
+                        pin_model, pin_data,
+                        q_pin_now, v, a_pin_now)
 
                     com_xy     = com[:2]
                     com_vel_xy = com_vel[:2]
                     com_acc_xy = com_acc[:2]
                     com_des_xy = np.asarray(x_des_com_fn(t, com0))[:2]
 
-                    # DCM và ZMP
                     dcm_xy = dcm_calc.compute_dcm_xy(com_xy, com_vel_xy)
                     zmp_xy = dcm_calc.compute_zmp_from_lipm(com_xy, com_acc_xy)
 
-                    # Foot poses — đọc trực tiếp từ MuJoCo
+                    if CFG['DEBUG_DCM'] and step % 1000 == 0:
+                        offset_mm = np.linalg.norm(dcm_xy - com_xy) * 1000
+                        v_mag = np.linalg.norm(com_vel_xy)
+                        print(f"  [DBG t={t:5.2f}] |v_com|={v_mag:.5f} m/s, "
+                              f"|DCM-CoM|={offset_mm:.3f} mm",
+                              flush=True)
+
                     p_l, R_l = mj_get_site_pose(mj_data, site_L_id)
                     p_r, R_r = mj_get_site_pose(mj_data, site_R_id)
-                    foot_L_pose = (p_l, R_l)
-                    foot_R_pose = (p_r, R_r)
 
                     visualizer.update(
-                        viewer,
+                        viewer, t,
                         com_xy=com_xy,
                         com_des_xy=com_des_xy,
                         dcm_xy=dcm_xy,
                         zmp_xy=zmp_xy,
-                        foot_L_pose=foot_L_pose,
-                        foot_R_pose=foot_R_pose,
+                        foot_L_pose=(p_l, R_l),
+                        foot_R_pose=(p_r, R_r),
                     )
                 else:
                     viewer.sync()
 
-            # --- Log (đọc trực tiếp từ MuJoCo) ---
+            # --- Log ---
             if step % 500 == 0:
-                com, _, _ = mj_get_com_state(mj_data)
+                q_pin_now = mj_qpos_to_pin_q(qpos, pin_model)
+                a_pin_now = mj_data.qacc.copy()
+                com, _, _ = pin_get_com_state(pin_model, pin_data,
+                                               q_pin_now, v, a_pin_now)
                 fl, _ = mj_get_site_pose(mj_data, site_L_id)
                 fr, _ = mj_get_site_pose(mj_data, site_R_id)
                 x_des_com = np.asarray(x_des_com_fn(t, com0))
@@ -259,7 +255,6 @@ def main():
     kf_qpos = mj_model.key_qpos[kf_id].copy()
     print(f"Keyframe '{CFG['KEYFRAME_NAME']}': base_z={kf_qpos[2]}", flush=True)
 
-    # --- Site IDs cho foot (đọc từ MuJoCo) ---
     site_L_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE,
                                    "left_foot")
     site_R_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE,
@@ -270,22 +265,20 @@ def main():
     print(f"[Site] left_foot id={site_L_id}, right_foot id={site_R_id}",
           flush=True)
 
-    # --- WBC ---
     wbc = WBCSolver(cfg=CFG['WBC'], solver_backend=None)
 
-    # --- DCM calculator: com_height đọc trực tiếp từ MuJoCo qpos0 ---
-    mj_data.qpos[:] = kf_qpos
-    mj_data.qvel[:] = 0.0
-    mujoco.mj_forward(mj_model, mj_data)
-    com_z = float(mj_data.subtree_com[0][2])
+    q_pin0 = mj_qpos_to_pin_q(kf_qpos, pin_model)
+    v_zero = np.zeros(pin_model.nv)
+    a_zero = np.zeros(pin_model.nv)
+    com_init, _, _ = pin_get_com_state(pin_model, pin_data,
+                                        q_pin0, v_zero, a_zero)
+    com_z = float(com_init[2])
     dcm_calc = DCMCalculator(com_height=com_z)
     print(f"[DCM] com_height = {com_z:.4f} m, "
           f"omega = {dcm_calc.omega:.4f} rad/s", flush=True)
 
-    # --- Visualizer ---
     visualizer = WBCVisualizer(mj_model)
 
-    # --- Chạy test ---
     if test_sel in ("all", "1"):
         run_wbc(mj_model, mj_data, pin_model, pin_data, wbc, kf_qpos,
                 lambda t, c: c,
