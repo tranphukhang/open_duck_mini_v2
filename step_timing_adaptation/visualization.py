@@ -1,46 +1,39 @@
 """
 step_timing_adaptation/visualization.py
 ========================================
-Vẽ CoM, CoM-desired, DCM, foot markers, support polygon trong MuJoCo GUI.
+Vẽ CoM, CoM-desired, DCM, ZMP, support polygon trong MuJoCo GUI.
 
-Style & màu đồng nhất với:
-    - footstep_planning/walking_visualization.py
-    - lipm_mpc/zmp_visualization.py
+Không vẽ foot markers.
 
-Pattern: reset scene.ngeom=0 mỗi frame (giống WalkingVisualizer.update).
-
-Lưu ý: CoP chỉ vẽ point hiện tại (màu đen), KHÔNG vẽ trail.
+Đơn vị:
+  - Sphere radius: meters.
+  - Line width:    pixels.
+  - Kích thước tham khảo từ lipm_mpc/run.py và walking_visualization.py.
 """
 
 import numpy as np
 import mujoco
 
 from footstep_planning.walking_visualization import (
-    # Hàm cơ bản
     add_sphere,
     add_line,
     draw_polyline,
     convex_hull_2d,
     yaw_rotation,
-    # Constants
     GROUND_Z,
     CAMERA_DISTANCE,
     CAMERA_AZIMUTH,
     CAMERA_ELEVATION,
     TRAIL_MIN_DISTANCE,
     TRAIL_MAX_POINTS,
-    # Màu có sẵn
-    LEFT_TRAIL_RGBA,
-    RIGHT_TRAIL_RGBA,
     COM_MARKER_RGBA,
     COM_TRAIL_RGBA,
-    COM_MARKER_RADIUS,
-    COM_TRAIL_WIDTH,
+    COM_MARKER_RADIUS,     # 0.007
+    COM_TRAIL_WIDTH,       # 10.0
     SUPPORT_HULL_RGBA,
     SUPPORT_VERTEX_RGBA,
-    SUPPORT_HULL_WIDTH,
-    SUPPORT_VERTEX_RADIUS,
-    # Foot geometry
+    SUPPORT_HULL_WIDTH,    # 7.0
+    SUPPORT_VERTEX_RADIUS, # 0.0035
     FOOT_TOE,
     FOOT_HEEL,
     FOOT_HALF_WIDTH,
@@ -48,36 +41,39 @@ from footstep_planning.walking_visualization import (
 
 
 # ============================================================
-# MÀU MỚI (đồng bộ style với ZMP = magenta)
+# MÀU MARKER
 # ============================================================
 
-COM_DES_RGBA      = np.array([0.55, 0.70, 1.00, 0.75], dtype=np.float32)
+# CoM desired: xanh lá
+COM_DES_RGBA      = np.array([0.10, 0.80, 0.20, 0.85], dtype=np.float32)
 COM_DES_RADIUS    = 0.005
+COM_DES_TRAIL_WIDTH = 6.0
 
-DCM_RGBA          = np.array([1.00, 0.00, 1.00, 1.00], dtype=np.float32)
-DCM_TRAIL_RGBA    = np.array([0.90, 0.10, 0.95, 0.85], dtype=np.float32)
-DCM_MARKER_RADIUS = 0.007
-DCM_TRAIL_WIDTH   = 8.0
+# DCM: đỏ
+DCM_RGBA          = np.array([1.00, 0.10, 0.10, 1.00], dtype=np.float32)
+DCM_TRAIL_RGBA    = np.array([1.00, 0.10, 0.10, 0.65], dtype=np.float32)
+DCM_MARKER_RADIUS = 0.007       # khớp current_radius của reference ZMP
+DCM_TRAIL_WIDTH   = 5.0         # khớp trail_width của reference
 
-# CoP: đen, chỉ point, không trail
-COP_RGBA          = np.array([0.00, 0.00, 0.00, 1.00], dtype=np.float32)
-COP_MARKER_RADIUS = 0.006
-
-FOOT_MARKER_RADIUS = 0.006
+# ZMP: tím
+ZMP_RGBA          = np.array([0.60, 0.10, 0.90, 1.00], dtype=np.float32)
+ZMP_TRAIL_RGBA    = np.array([0.60, 0.10, 0.90, 0.65], dtype=np.float32)
+ZMP_MARKER_RADIUS = 0.007       # khớp current_radius của reference ZMP
+ZMP_TRAIL_WIDTH   = 5.0         # khớp trail_width của reference
 
 
 # ============================================================
-# ĐỘ CAO MARKER (phân lớp z để dễ nhìn)
+# ĐỘ CAO MARKER (xếp lớp z)
 # ============================================================
 
-COM_MARKER_Z      = GROUND_Z + 0.014
-COM_DES_Z         = GROUND_Z + 0.012
-DCM_MARKER_Z      = GROUND_Z + 0.010
-COP_MARKER_Z      = GROUND_Z + 0.008
-FOOT_MARKER_Z     = GROUND_Z + 0.006
+COM_MARKER_Z = GROUND_Z + 0.016
+COM_DES_Z    = GROUND_Z + 0.014
+DCM_MARKER_Z = GROUND_Z + 0.012
+ZMP_MARKER_Z = GROUND_Z + 0.010
 
-COM_TRAIL_Z       = GROUND_Z + 0.014
-DCM_TRAIL_Z       = GROUND_Z + 0.010
+COM_TRAIL_Z  = GROUND_Z + 0.016
+DCM_TRAIL_Z  = GROUND_Z + 0.012
+ZMP_TRAIL_Z  = GROUND_Z + 0.010
 
 
 # ============================================================
@@ -90,12 +86,11 @@ class WBCVisualizer:
         self.trail_max_points = trail_max_points
         self.base_body_id = self._find_base_body_id(mj_model)
 
-        # Trails liên tục (CoP không có trail)
         self.com_trail = []
         self.com_des_trail = []
         self.dcm_trail = []
+        self.zmp_trail = []
 
-    # --------------------------------------------------------
     @staticmethod
     def _find_base_body_id(mj_model):
         for jid in range(mj_model.njnt):
@@ -103,14 +98,12 @@ class WBCVisualizer:
                 return int(mj_model.jnt_bodyid[jid])
         raise RuntimeError("Không tìm thấy floating-base joint.")
 
-    # --------------------------------------------------------
     def reset(self):
-        """Xóa trail — gọi đầu mỗi test."""
         self.com_trail = []
         self.com_des_trail = []
         self.dcm_trail = []
+        self.zmp_trail = []
 
-    # --------------------------------------------------------
     def configure_camera(self, viewer):
         with viewer.lock():
             viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
@@ -140,7 +133,7 @@ class WBCVisualizer:
             del trail[0:len(trail) - self.trail_max_points]
 
     # --------------------------------------------------------
-    # SUPPORT POLYGON (convex hull của 2 bàn chân)
+    # SUPPORT POLYGON
     # --------------------------------------------------------
     @staticmethod
     def _sole_corners(position, rotation):
@@ -163,23 +156,23 @@ class WBCVisualizer:
         corners_L = self._sole_corners(p_l, R_l)
         corners_R = self._sole_corners(p_r, R_r)
         all_corners = np.vstack([corners_L, corners_R])
-        hull = convex_hull_2d(all_corners)   # (N, 3)
+        hull = convex_hull_2d(all_corners)
         return hull[:, :2]
 
     # --------------------------------------------------------
-    # UPDATE (main API)
+    # UPDATE
     # --------------------------------------------------------
     def update(self, viewer,
                com_xy,
                com_des_xy=None,
                dcm_xy=None,
-               cop_xy=None,
+               zmp_xy=None,
                foot_L_pose=None,
                foot_R_pose=None):
-        # Trail (không có CoP)
         self._append_trail(self.com_trail, com_xy, COM_TRAIL_Z)
         self._append_trail(self.com_des_trail, com_des_xy, COM_DES_Z)
         self._append_trail(self.dcm_trail, dcm_xy, DCM_TRAIL_Z)
+        self._append_trail(self.zmp_trail, zmp_xy, ZMP_TRAIL_Z)
 
         with viewer.lock():
             scene = viewer.user_scn
@@ -208,9 +201,11 @@ class WBCVisualizer:
             draw_polyline(scene, self.com_trail,
                           COM_TRAIL_WIDTH, COM_TRAIL_RGBA)
             draw_polyline(scene, self.com_des_trail,
-                          COM_TRAIL_WIDTH, COM_DES_RGBA)
+                          COM_DES_TRAIL_WIDTH, COM_DES_RGBA)
             draw_polyline(scene, self.dcm_trail,
                           DCM_TRAIL_WIDTH, DCM_TRAIL_RGBA)
+            draw_polyline(scene, self.zmp_trail,
+                          ZMP_TRAIL_WIDTH, ZMP_TRAIL_RGBA)
 
             # --- 3. Markers ---
             if com_xy is not None:
@@ -225,19 +220,9 @@ class WBCVisualizer:
                 add_sphere(scene,
                            [dcm_xy[0], dcm_xy[1], DCM_MARKER_Z],
                            DCM_MARKER_RADIUS, DCM_RGBA)
-            if cop_xy is not None:
+            if zmp_xy is not None:
                 add_sphere(scene,
-                           [cop_xy[0], cop_xy[1], COP_MARKER_Z],
-                           COP_MARKER_RADIUS, COP_RGBA)
-            if foot_L_pose is not None:
-                p_l, _ = foot_L_pose
-                add_sphere(scene,
-                           [p_l[0], p_l[1], FOOT_MARKER_Z],
-                           FOOT_MARKER_RADIUS, LEFT_TRAIL_RGBA)
-            if foot_R_pose is not None:
-                p_r, _ = foot_R_pose
-                add_sphere(scene,
-                           [p_r[0], p_r[1], FOOT_MARKER_Z],
-                           FOOT_MARKER_RADIUS, RIGHT_TRAIL_RGBA)
+                           [zmp_xy[0], zmp_xy[1], ZMP_MARKER_Z],
+                           ZMP_MARKER_RADIUS, ZMP_RGBA)
 
         viewer.sync()
