@@ -312,7 +312,7 @@ class WholeBodyInverseDynamicsQP:
 
 
     # ========================================================
-    # FRICTION PYRAMID
+    # FRICTION inner approximation CONE
     # ========================================================
 
     def _append_friction_constraints(
@@ -322,6 +322,24 @@ class WholeBodyInverseDynamicsQP:
         upper,
         wrench_start,
     ):
+
+        """
+        Conservative linear inner approximation of the
+        MuJoCo elliptic friction cone.
+
+        MuJoCo contact model:
+
+            sqrt(Fx^2 + Fy^2) <= mu * Fz
+
+        QP approximation:
+
+            |Fx| + |Fy| <= mu * Fz
+
+        Therefore every force accepted by this QP is also
+        inside the circular / elliptic friction cone.
+
+        No CoP constraint is introduced here.
+        """
 
         mu = float(
             self.config.friction_coefficient
@@ -345,9 +363,9 @@ class WholeBodyInverseDynamicsQP:
             2
         )
 
-        # ----------------------------------------------------
+        # ========================================================
         # Fz >= 0
-        # ----------------------------------------------------
+        # ========================================================
 
         row = np.zeros(
             self.nvar,
@@ -370,9 +388,9 @@ class WholeBodyInverseDynamicsQP:
             np.inf
         )
 
-        # ----------------------------------------------------
-        # Fx <= mu Fz
-        # ----------------------------------------------------
+        # ========================================================
+        # Fx + Fy <= mu Fz
+        # ========================================================
 
         row = np.zeros(
             self.nvar,
@@ -382,60 +400,6 @@ class WholeBodyInverseDynamicsQP:
         row[
             fx
         ] = 1.0
-
-        row[
-            fz
-        ] = -mu
-
-        A_rows.append(
-            row
-        )
-
-        lower.append(
-            -np.inf
-        )
-
-        upper.append(
-            0.0
-        )
-
-        # ----------------------------------------------------
-        # -Fx <= mu Fz
-        # ----------------------------------------------------
-
-        row = np.zeros(
-            self.nvar,
-            dtype=float,
-        )
-
-        row[
-            fx
-        ] = -1.0
-
-        row[
-            fz
-        ] = -mu
-
-        A_rows.append(
-            row
-        )
-
-        lower.append(
-            -np.inf
-        )
-
-        upper.append(
-            0.0
-        )
-
-        # ----------------------------------------------------
-        # Fy <= mu Fz
-        # ----------------------------------------------------
-
-        row = np.zeros(
-            self.nvar,
-            dtype=float,
-        )
 
         row[
             fy
@@ -457,14 +421,84 @@ class WholeBodyInverseDynamicsQP:
             0.0
         )
 
-        # ----------------------------------------------------
-        # -Fy <= mu Fz
-        # ----------------------------------------------------
+        # ========================================================
+        # Fx - Fy <= mu Fz
+        # ========================================================
 
         row = np.zeros(
             self.nvar,
             dtype=float,
         )
+
+        row[
+            fx
+        ] = 1.0
+
+        row[
+            fy
+        ] = -1.0
+
+        row[
+            fz
+        ] = -mu
+
+        A_rows.append(
+            row
+        )
+
+        lower.append(
+            -np.inf
+        )
+
+        upper.append(
+            0.0
+        )
+
+        # ========================================================
+        # -Fx + Fy <= mu Fz
+        # ========================================================
+
+        row = np.zeros(
+            self.nvar,
+            dtype=float,
+        )
+
+        row[
+            fx
+        ] = -1.0
+
+        row[
+            fy
+        ] = 1.0
+
+        row[
+            fz
+        ] = -mu
+
+        A_rows.append(
+            row
+        )
+
+        lower.append(
+            -np.inf
+        )
+
+        upper.append(
+            0.0
+        )
+
+        # ========================================================
+        # -Fx - Fy <= mu Fz
+        # ========================================================
+
+        row = np.zeros(
+            self.nvar,
+            dtype=float,
+        )
+
+        row[
+            fx
+        ] = -1.0
 
         row[
             fy
