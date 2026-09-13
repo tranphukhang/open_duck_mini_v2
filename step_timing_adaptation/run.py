@@ -143,7 +143,28 @@ COM_HEIGHT_KD = 16.0
 # Stage currently under validation
 # ------------------------------------------------------------
 
-RUN_STAGE1_PLANNER_ONLY = True
+RUN_STAGE1_PLANNER_ONLY = False
+
+# Stop after Stage-2 standalone validation.
+# MuJoCo / WBC will not run while this is True.
+RUN_STAGE2_PLANNER_ONLY = True
+
+
+# ------------------------------------------------------------
+# Stage-2 QP weights
+#
+# Khadiv et al. simulation values:
+# alpha_1 = 1
+# alpha_2 = 5
+# alpha_3 = 1000
+# ------------------------------------------------------------
+
+STEP_QP_ALPHA_LOCATION = 1.0
+STEP_QP_ALPHA_TIMING = 5.0
+STEP_QP_ALPHA_DCM = 1000.0
+
+# Standalone nominal-consistency test time inside the step.
+STAGE2_TEST_ELAPSED_TIME = 0.10
 
 
 # ------------------------------------------------------------
@@ -2603,6 +2624,290 @@ def run_stage1_planner_validation():
 
 
 # ============================================================
+# STAGE 2 — ADAPTIVE STEP QP VALIDATION
+# ============================================================
+
+def run_stage2_planner_validation(
+    planner,
+    nominal_left_step,
+    nominal_right_step,
+):
+
+    separator()
+
+    print(
+        "STAGE 2 — ADAPTIVE STEP QP"
+    )
+
+    separator()
+
+    print()
+
+    stance_position = np.array(
+        [
+            0.0,
+            0.0,
+        ],
+        dtype=float,
+    )
+
+    elapsed_time = float(
+        STAGE2_TEST_ELAPSED_TIME
+    )
+
+    for nominal_step in (
+        nominal_left_step,
+        nominal_right_step,
+    ):
+
+        uT_nominal = (
+            stance_position
+            +
+            np.array(
+                [
+                    nominal_step.step_displacement_x,
+                    nominal_step.step_displacement_y,
+                ],
+                dtype=float,
+            )
+        )
+
+        b_nominal = np.array(
+            [
+                nominal_step.dcm_offset_x,
+                nominal_step.dcm_offset_y,
+            ],
+            dtype=float,
+        )
+
+        # Synthetic DCM state exactly on the nominal LIPM
+        # trajectory. Rearranged from Eq. (19):
+        #
+        # xi(t) = u0 + (uT - u0 + b) exp[-omega (T - t)]
+        xi_measured = (
+            stance_position
+            +
+            (
+                uT_nominal
+                -
+                stance_position
+                +
+                b_nominal
+            )
+            *
+            np.exp(
+                -planner.omega
+                *
+                (
+                    nominal_step.step_time
+                    -
+                    elapsed_time
+                )
+            )
+        )
+
+        adapted_step = (
+            planner.solve_adaptive_step(
+
+                nominal_step=(
+                    nominal_step
+                ),
+
+                dcm_measured=(
+                    xi_measured
+                ),
+
+                stance_position=(
+                    stance_position
+                ),
+
+                elapsed_time=(
+                    elapsed_time
+                ),
+
+                alpha_location=(
+                    STEP_QP_ALPHA_LOCATION
+                ),
+
+                alpha_timing=(
+                    STEP_QP_ALPHA_TIMING
+                ),
+
+                alpha_dcm=(
+                    STEP_QP_ALPHA_DCM
+                ),
+            )
+        )
+
+        separator()
+
+        print(
+            f"{nominal_step.stance_leg.value.upper()} STANCE"
+        )
+
+        separator()
+
+        print()
+
+        print(
+            f"elapsed time = "
+            f"{elapsed_time:.6f} s"
+        )
+
+        print(
+            f"xi_measured = "
+            f"[{xi_measured[0]:+.6f}, "
+            f"{xi_measured[1]:+.6f}] m"
+        )
+
+        print()
+
+        print(
+            f"nominal uT  = "
+            f"[{uT_nominal[0]:+.6f}, "
+            f"{uT_nominal[1]:+.6f}] m"
+        )
+
+        print(
+            f"adapted uT  = "
+            f"[{adapted_step.step_location_x:+.6f}, "
+            f"{adapted_step.step_location_y:+.6f}] m"
+        )
+
+        print()
+
+        print(
+            f"nominal T   = "
+            f"{nominal_step.step_time:.6f} s"
+        )
+
+        print(
+            f"adapted T   = "
+            f"{adapted_step.step_time:.6f} s"
+        )
+
+        print()
+
+        print(
+            f"nominal tau = "
+            f"{nominal_step.tau:.6f}"
+        )
+
+        print(
+            f"adapted tau = "
+            f"{adapted_step.tau:.6f}"
+        )
+
+        print()
+
+        print(
+            f"nominal b   = "
+            f"[{b_nominal[0]:+.6f}, "
+            f"{b_nominal[1]:+.6f}] m"
+        )
+
+        print(
+            f"adapted b   = "
+            f"[{adapted_step.dcm_offset_x:+.6f}, "
+            f"{adapted_step.dcm_offset_y:+.6f}] m"
+        )
+
+        print()
+
+        print(
+            f"objective   = "
+            f"{adapted_step.objective:.6e}"
+        )
+
+        print(
+            f"eq residual = "
+            f"{adapted_step.max_equality_residual:.6e}"
+        )
+
+        tolerance = 1.0e-7
+
+        if not np.allclose(
+            np.array(
+                [
+                    adapted_step.step_location_x,
+                    adapted_step.step_location_y,
+                ],
+                dtype=float,
+            ),
+            uT_nominal,
+            atol=tolerance,
+        ):
+
+            raise RuntimeError(
+                "Stage-2 failed to recover nominal foot location."
+            )
+
+        if not np.isclose(
+            adapted_step.tau,
+            nominal_step.tau,
+            atol=tolerance,
+        ):
+
+            raise RuntimeError(
+                "Stage-2 failed to recover nominal tau."
+            )
+
+        if not np.isclose(
+            adapted_step.step_time,
+            nominal_step.step_time,
+            atol=tolerance,
+        ):
+
+            raise RuntimeError(
+                "Stage-2 failed to recover nominal step time."
+            )
+
+        if not np.allclose(
+            np.array(
+                [
+                    adapted_step.dcm_offset_x,
+                    adapted_step.dcm_offset_y,
+                ],
+                dtype=float,
+            ),
+            b_nominal,
+            atol=tolerance,
+        ):
+
+            raise RuntimeError(
+                "Stage-2 failed to recover nominal DCM offset."
+            )
+
+        if (
+            adapted_step.max_equality_residual
+            >
+            tolerance
+        ):
+
+            raise RuntimeError(
+                "Stage-2 Eq. (19) residual is too large."
+            )
+
+        print()
+
+        print(
+            "RESULT: PASSED"
+        )
+
+        print()
+
+    separator()
+
+    print(
+        "STAGE 2 VALIDATION: PASSED"
+    )
+
+    separator()
+
+    print()
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -2619,6 +2924,26 @@ def main():
     ) = run_stage1_planner_validation()
 
     if RUN_STAGE1_PLANNER_ONLY:
+
+        return
+
+    # ========================================================
+    # STAGE 2 — ADAPTIVE STEP QP VALIDATION
+    # ========================================================
+
+    run_stage2_planner_validation(
+        planner=(
+            planner
+        ),
+        nominal_left_step=(
+            nominal_left_step
+        ),
+        nominal_right_step=(
+            nominal_right_step
+        ),
+    )
+
+    if RUN_STAGE2_PLANNER_ONLY:
 
         return
 
