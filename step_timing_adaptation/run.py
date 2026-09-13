@@ -53,6 +53,11 @@ if __package__:
         StanceLeg,
     )
 
+    from .swing_trajectory import (
+        OnlineSwingFootTrajectory,
+        VerticalSwingQPParameters,
+    )
+
 else:
 
     from dynamics_model import (
@@ -68,6 +73,11 @@ else:
         AdaptiveStepPlanner,
         StepPlannerParameters,
         StanceLeg,
+    )
+
+    from .swing_trajectory import (
+        OnlineSwingFootTrajectory,
+        VerticalSwingQPParameters,
     )
 
 
@@ -207,6 +217,31 @@ STEP_WIDTH_MAX = +0.03
 
 STEP_TIME_MIN = 0.20
 STEP_TIME_MAX = 0.30
+
+
+# ============================================================
+# SWING FOOT TRAJECTORY
+# ============================================================
+
+# Desired swing-foot clearance.
+SWING_HEIGHT_DESIRED = 0.03
+
+# Hard upper bound for swing-foot height.
+SWING_HEIGHT_MAX = 0.04
+
+# Initial discretization of:
+#
+#     0 <= z(t) <= z_max
+#
+# Continuous extrema are checked and refined automatically.
+SWING_VERTICAL_CONSTRAINT_SAMPLES = 41
+
+# Small numerical regularization only.
+SWING_VERTICAL_COEFFICIENT_REGULARIZATION = 1.0e-8
+
+SWING_VERTICAL_BOUND_TOLERANCE = 1.0e-9
+
+SWING_VERTICAL_MAX_REFINEMENTS = 8
 
 
 # ============================================================
@@ -2410,10 +2445,580 @@ def run_double_support(
 
 
 # ============================================================
+# TEMPORARY — STAGE 3A HORIZONTAL SWING VALIDATION
+# ============================================================
+
+def run_stage3_horizontal_validation():
+
+    separator()
+
+    print(
+        "STAGE 3A — ONLINE HORIZONTAL SWING TRAJECTORY"
+    )
+
+    separator()
+
+    print()
+
+    trajectory = OnlineSwingFootTrajectory()
+
+    # --------------------------------------------------------
+    # Swing starts from the left side of the robot.
+    # --------------------------------------------------------
+
+    trajectory.reset_horizontal(
+        initial_position=np.array(
+            [
+                0.0,
+                +0.08,
+            ],
+            dtype=float,
+        ),
+        initial_velocity=np.zeros(
+            2,
+            dtype=float,
+        ),
+        initial_acceleration=np.zeros(
+            2,
+            dtype=float,
+        ),
+        start_time=0.0,
+    )
+
+    dt = 0.01
+
+    max_boundary_residual = 0.0
+
+    final_sample = None
+
+    print(
+        "Initial planner request:"
+    )
+
+    print(
+        "  uT = (+0.040000, -0.080000) m"
+    )
+
+    print(
+        "  T  = 0.250000 s"
+    )
+
+    print()
+
+    # ========================================================
+    # ONLINE UPDATES
+    # ========================================================
+
+    for index in range(
+        1,
+        23,
+    ):
+
+        t = (
+            index
+            *
+            dt
+        )
+
+        # ----------------------------------------------------
+        # Simulate online adaptation at t = 0.10 s.
+        #
+        # Before:
+        #     uT = [0.04, -0.08]
+        #     T  = 0.25
+        #
+        # After:
+        #     uT = [0.08, -0.10]
+        #     T  = 0.22
+        # ----------------------------------------------------
+
+        if t < 0.10:
+
+            landing_position = np.array(
+                [
+                    +0.04,
+                    -0.08,
+                ],
+                dtype=float,
+            )
+
+            landing_time = 0.25
+
+        else:
+
+            landing_position = np.array(
+                [
+                    +0.08,
+                    -0.10,
+                ],
+                dtype=float,
+            )
+
+            landing_time = 0.22
+
+        sample = (
+            trajectory.update_horizontal(
+                current_time=(
+                    t
+                ),
+                landing_time=(
+                    landing_time
+                ),
+                landing_position=(
+                    landing_position
+                ),
+            )
+        )
+
+        final_sample = sample
+
+        max_boundary_residual = max(
+            max_boundary_residual,
+            sample.max_boundary_residual,
+        )
+
+        # ----------------------------------------------------
+        # Print representative samples.
+        # ----------------------------------------------------
+
+        if index in (
+            1,
+            9,
+            10,
+            15,
+            21,
+            22,
+        ):
+
+            print(
+                f"t={t:.2f} s"
+                f" | p="
+                f"({sample.position[0]:+.6f},"
+                f"{sample.position[1]:+.6f}) m"
+
+                f" | v="
+                f"({sample.velocity[0]:+.6f},"
+                f"{sample.velocity[1]:+.6f}) m/s"
+
+                f" | a="
+                f"({sample.acceleration[0]:+.6f},"
+                f"{sample.acceleration[1]:+.6f}) m/s^2"
+
+                f" | residual="
+                f"{sample.max_boundary_residual:.3e}"
+            )
+
+    # ========================================================
+    # VALIDATION
+    # ========================================================
+
+    if final_sample is None:
+
+        raise RuntimeError(
+            "No Stage-3A samples were generated."
+        )
+
+    expected_landing = np.array(
+        [
+            +0.08,
+            -0.10,
+        ],
+        dtype=float,
+    )
+
+    position_error = float(
+        np.max(
+            np.abs(
+                final_sample.position
+                -
+                expected_landing
+            )
+        )
+    )
+
+    velocity_error = float(
+        np.max(
+            np.abs(
+                final_sample.velocity
+            )
+        )
+    )
+
+    acceleration_error = float(
+        np.max(
+            np.abs(
+                final_sample.acceleration
+            )
+        )
+    )
+
+    print()
+
+    print(
+        "FINAL LANDING CHECK"
+    )
+
+    print(
+        f"  position = "
+        f"{final_sample.position}"
+    )
+
+    print(
+        f"  velocity = "
+        f"{final_sample.velocity}"
+    )
+
+    print(
+        f"  accel    = "
+        f"{final_sample.acceleration}"
+    )
+
+    print(
+        f"  max boundary residual = "
+        f"{max_boundary_residual:.3e}"
+    )
+
+    tolerance = 1.0e-9
+
+    if position_error > tolerance:
+
+        raise RuntimeError(
+            "Stage-3A landing position is incorrect."
+        )
+
+    if velocity_error > tolerance:
+
+        raise RuntimeError(
+            "Stage-3A terminal velocity is not zero."
+        )
+
+    if acceleration_error > tolerance:
+
+        raise RuntimeError(
+            "Stage-3A terminal acceleration is not zero."
+        )
+
+    if max_boundary_residual > 1.0e-10:
+
+        raise RuntimeError(
+            "Stage-3A quintic boundary conditions "
+            "are not satisfied."
+        )
+
+    print()
+
+    separator()
+
+    print(
+        "STAGE 3A HORIZONTAL SWING VALIDATION: PASSED"
+    )
+
+    separator()
+
+    print()
+
+
+# ============================================================
+# TEMPORARY — STAGE 3B VERTICAL SWING VALIDATION
+# ============================================================
+
+def run_stage3_vertical_validation():
+
+    separator()
+
+    print(
+        "STAGE 3B — ONLINE VERTICAL SWING TRAJECTORY"
+    )
+
+    separator()
+
+    print()
+
+    parameters = VerticalSwingQPParameters(
+        desired_height=(
+            SWING_HEIGHT_DESIRED
+        ),
+        maximum_height=(
+            SWING_HEIGHT_MAX
+        ),
+        constraint_samples=(
+            SWING_VERTICAL_CONSTRAINT_SAMPLES
+        ),
+        coefficient_regularization=(
+            SWING_VERTICAL_COEFFICIENT_REGULARIZATION
+        ),
+        bound_tolerance=(
+            SWING_VERTICAL_BOUND_TOLERANCE
+        ),
+        max_refinements=(
+            SWING_VERTICAL_MAX_REFINEMENTS
+        ),
+    )
+
+    trajectory = OnlineSwingFootTrajectory()
+
+    trajectory.reset_vertical()
+
+    dt = 0.01
+
+    max_boundary_residual = 0.0
+
+    global_min_height = +np.inf
+    global_max_height = -np.inf
+
+    final_sample = None
+
+    print(
+        "Initial planner timing:"
+    )
+
+    print(
+        "  T = 0.250000 s"
+    )
+
+    print(
+        f"  z_des = "
+        f"{SWING_HEIGHT_DESIRED:.6f} m"
+    )
+
+    print(
+        f"  z_max = "
+        f"{SWING_HEIGHT_MAX:.6f} m"
+    )
+
+    print()
+
+    # ========================================================
+    # ONLINE REGENERATION
+    # ========================================================
+
+    for index in range(
+        1,
+        23,
+    ):
+
+        t = (
+            index
+            *
+            dt
+        )
+
+        # ----------------------------------------------------
+        # At t = 0.10 s, simulate a planner timing change:
+        #
+        #     T : 0.25 -> 0.22 s
+        #
+        # The vertical trajectory must adapt without breaking
+        # z, z_dot, z_ddot continuity at the previous sample.
+        # ----------------------------------------------------
+
+        if t < 0.10:
+
+            landing_time = 0.25
+
+        else:
+
+            landing_time = 0.22
+
+        sample = trajectory.update_vertical(
+            current_time=(
+                t
+            ),
+            landing_time=(
+                landing_time
+            ),
+            parameters=(
+                parameters
+            ),
+        )
+
+        final_sample = sample
+
+        max_boundary_residual = max(
+            max_boundary_residual,
+            sample.max_boundary_residual,
+        )
+
+        global_min_height = min(
+            global_min_height,
+            sample.continuous_min_height,
+        )
+
+        global_max_height = max(
+            global_max_height,
+            sample.continuous_max_height,
+        )
+
+        if index in (
+            1,
+            9,
+            10,
+            15,
+            21,
+            22,
+        ):
+
+            print(
+                f"t={t:.2f} s"
+
+                f" | z="
+                f"{sample.height:+.6f} m"
+
+                f" | vz="
+                f"{sample.velocity:+.6f} m/s"
+
+                f" | az="
+                f"{sample.acceleration:+.6f} m/s^2"
+
+                f" | z_mid="
+                f"{sample.midpoint_height:+.6f} m"
+
+                f" | range="
+                f"[{sample.continuous_min_height:+.6f}, "
+                f"{sample.continuous_max_height:+.6f}] m"
+
+                f" | residual="
+                f"{sample.max_boundary_residual:.3e}"
+            )
+
+    # ========================================================
+    # FINAL VALIDATION
+    # ========================================================
+
+    if final_sample is None:
+
+        raise RuntimeError(
+            "No Stage-3B samples were generated."
+        )
+
+    print()
+
+    print(
+        "FINAL TOUCHDOWN CHECK"
+    )
+
+    print(
+        f"  z       = "
+        f"{final_sample.height:+.12f} m"
+    )
+
+    print(
+        f"  vz      = "
+        f"{final_sample.velocity:+.12f} m/s"
+    )
+
+    print(
+        f"  az      = "
+        f"{final_sample.acceleration:+.12f} m/s^2"
+    )
+
+    print(
+        f"  minimum = "
+        f"{global_min_height:+.12e} m"
+    )
+
+    print(
+        f"  maximum = "
+        f"{global_max_height:+.12f} m"
+    )
+
+    print(
+        f"  max boundary residual = "
+        f"{max_boundary_residual:.3e}"
+    )
+
+    terminal_tolerance = 1.0e-9
+
+    if (
+        abs(
+            final_sample.height
+        )
+        >
+        terminal_tolerance
+    ):
+
+        raise RuntimeError(
+            "Vertical touchdown height is not zero."
+        )
+
+    if (
+        abs(
+            final_sample.velocity
+        )
+        >
+        terminal_tolerance
+    ):
+
+        raise RuntimeError(
+            "Vertical touchdown velocity is not zero."
+        )
+
+    if (
+        abs(
+            final_sample.acceleration
+        )
+        >
+        terminal_tolerance
+    ):
+
+        raise RuntimeError(
+            "Vertical touchdown acceleration is not zero."
+        )
+
+    if (
+        global_min_height
+        <
+        -SWING_VERTICAL_BOUND_TOLERANCE
+    ):
+
+        raise RuntimeError(
+            "Vertical trajectory went below ground."
+        )
+
+    if (
+        global_max_height
+        >
+        SWING_HEIGHT_MAX
+        +
+        SWING_VERTICAL_BOUND_TOLERANCE
+    ):
+
+        raise RuntimeError(
+            "Vertical trajectory exceeded z_max."
+        )
+
+    if (
+        max_boundary_residual
+        >
+        1.0e-8
+    ):
+
+        raise RuntimeError(
+            "Vertical trajectory boundary conditions "
+            "are not satisfied."
+        )
+
+    print()
+
+    separator()
+
+    print(
+        "STAGE 3B VERTICAL SWING VALIDATION: PASSED"
+    )
+
+    separator()
+
+    print()
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
+    run_stage3_vertical_validation()
+
+    return
     # ========================================================
     # ADAPTIVE STEP PLANNER
     # ========================================================
