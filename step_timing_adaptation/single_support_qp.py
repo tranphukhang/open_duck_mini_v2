@@ -307,75 +307,26 @@ class SingleSupportHierarchicalInverseDynamics:
         number_constraints,
     ):
 
-        key = (
-            str(name),
-            int(number_variables),
-            int(number_constraints),
-            (
-                "qpoases"
-                if
-                (
-                    name == "single_rank3"
-                    and
-                    ca.has_conic(
-                        "qpoases"
-                    )
-                )
-                else
-                self.config.solver_name
-            ),
-        )
-
-        if key in self._solver_cache:
-
-            return self._solver_cache[
-                key
-            ]
-
-        qp_structure = {
-            "h": ca.Sparsity.dense(
-                number_variables,
-                number_variables,
-            ),
-
-            "a": ca.Sparsity.dense(
-                number_constraints,
-                number_variables,
-            ),
-        }
-
-        options = {
-            "print_header": False,
-            "print_iter": False,
-            "print_info": False,
-
-            "error_on_fail": False,
-
-            "constr_viol_tol": 1.0e-9,
-            "dual_inf_tol": 1.0e-9,
-
-            "max_iter": 1000,
-        }
-
         # ====================================================
         # SOLVER SELECTION
         #
-        # QRQP works well for the current Rank-2 problem, but
-        # it can cycle on the Rank-3 active set even when the
-        # convex QP is feasible.
+        # Rank 3 uses qpOASES explicitly.
         #
-        # Therefore use qpOASES specifically for Rank 3.
+        # QRQP has already been observed to cycle on the
+        # feasible Rank-3 QP. Therefore Rank 3 must NOT
+        # silently fall back to QRQP.
         # ====================================================
 
-        if (
-            name
-            ==
-            "single_rank3"
-            and
-            ca.has_conic(
+        if name == "single_rank3":
+
+            if not ca.has_conic(
                 "qpoases"
-            )
-        ):
+            ):
+
+                raise RuntimeError(
+                    "CasADi qpOASES plugin is not available. "
+                    "Rank 3 must not fall back to QRQP."
+                )
 
             solver_plugin = (
                 "qpoases"
@@ -404,6 +355,31 @@ class SingleSupportHierarchicalInverseDynamics:
 
                 "max_iter": 1000,
             }
+
+        key = (
+            str(name),
+            int(number_variables),
+            int(number_constraints),
+            str(solver_plugin),
+        )
+
+        if key in self._solver_cache:
+
+            return self._solver_cache[
+                key
+            ]
+
+        qp_structure = {
+            "h": ca.Sparsity.dense(
+                number_variables,
+                number_variables,
+            ),
+
+            "a": ca.Sparsity.dense(
+                number_constraints,
+                number_variables,
+            ),
+        }
 
         solver = ca.conic(
             (
