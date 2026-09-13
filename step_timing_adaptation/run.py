@@ -152,7 +152,16 @@ STEP_QP_ALPHA_LOCATION = 1.0
 STEP_QP_ALPHA_TIMING = 5.0
 STEP_QP_ALPHA_DCM = 1000.0
 STEP_QP_ALPHA_VIABILITY = 1.0e6
-STEP_TIMING_GAP = 0.02
+
+
+# ------------------------------------------------------------
+# Temporary observer-mode phase time.
+#
+# The robot is still standing in double support, therefore
+# this is not yet a real gait phase timer.
+# ------------------------------------------------------------
+
+PLANNER_OBSERVER_ELAPSED_TIME = 0.10
 
 
 # ------------------------------------------------------------
@@ -1167,6 +1176,40 @@ def run_double_support(
         .copy()
     )
 
+
+    # ========================================================
+    # NOMINAL STEP REFERENCES FOR PLANNER OBSERVER
+    # ========================================================
+
+    nominal_left_step = (
+        planner.compute_nominal_step(
+            desired_velocity_x=(
+                DESIRED_VELOCITY_X
+            ),
+            desired_velocity_y=(
+                DESIRED_VELOCITY_Y
+            ),
+            stance_leg=(
+                StanceLeg.LEFT
+            ),
+        )
+    )
+
+    nominal_right_step = (
+        planner.compute_nominal_step(
+            desired_velocity_x=(
+                DESIRED_VELOCITY_X
+            ),
+            desired_velocity_y=(
+                DESIRED_VELOCITY_Y
+            ),
+            stance_leg=(
+                StanceLeg.RIGHT
+            ),
+        )
+    )
+
+
     # ========================================================
     # INITIAL CONTROL
     # ========================================================
@@ -1842,6 +1885,7 @@ def run_double_support(
                         right_contact_height,
                     )
                 )
+                
 
             print(
                 f"t={current_time:5.2f} s"
@@ -1906,6 +1950,56 @@ def run_double_support(
                 f" | DCM="
                 f"({dcm_xy[0]:+.6f},"
                 f"{dcm_xy[1]:+.6f}) m"
+            )
+
+            print(
+                f"  LEFT-stance planner"
+                f" | uT="
+                f"({left_planner_result.step_location_x:+.6f},"
+                f"{left_planner_result.step_location_y:+.6f}) m"
+
+                f" | dU="
+                f"({left_planner_result.step_displacement_x:+.6f},"
+                f"{left_planner_result.step_displacement_y:+.6f}) m"
+
+                f" | T="
+                f"{left_planner_result.step_time:.6f} s"
+
+                f" | b="
+                f"({left_planner_result.dcm_offset_x:+.6f},"
+                f"{left_planner_result.dcm_offset_y:+.6f}) m"
+
+                f" | slack="
+                f"({left_planner_result.viability_slack_x:.3e},"
+                f"{left_planner_result.viability_slack_y:.3e})"
+
+                f" | res="
+                f"{left_planner_result.max_equality_residual:.2e}"
+            )
+
+            print(
+                f"  RIGHT-stance planner"
+                f" | uT="
+                f"({right_planner_result.step_location_x:+.6f},"
+                f"{right_planner_result.step_location_y:+.6f}) m"
+
+                f" | dU="
+                f"({right_planner_result.step_displacement_x:+.6f},"
+                f"{right_planner_result.step_displacement_y:+.6f}) m"
+
+                f" | T="
+                f"{right_planner_result.step_time:.6f} s"
+
+                f" | b="
+                f"({right_planner_result.dcm_offset_x:+.6f},"
+                f"{right_planner_result.dcm_offset_y:+.6f}) m"
+
+                f" | slack="
+                f"({right_planner_result.viability_slack_x:.3e},"
+                f"{right_planner_result.viability_slack_y:.3e})"
+
+                f" | res="
+                f"{right_planner_result.max_equality_residual:.2e}"
             )
 
             next_print_time += (
