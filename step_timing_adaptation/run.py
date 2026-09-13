@@ -2151,63 +2151,52 @@ def run_double_support(
 # ============================================================
 
 def main():
-
     # ========================================================
-    # STAGE 1 — ADAPTIVE STEP PLANNER VALIDATION
-    # ========================================================
-
-    (
-        planner,
-        nominal_left_step,
-        nominal_right_step,
-    ) = run_stage1_planner_validation()
-
-    if RUN_STAGE1_PLANNER_ONLY:
-
-        return
-
-    # ========================================================
-    # STAGE 2 — ADAPTIVE STEP QP VALIDATION
+    # ADAPTIVE STEP PLANNER
     # ========================================================
 
-    run_stage2_planner_validation(
-        planner=(
-            planner
+    planner_parameters = StepPlannerParameters(
+
+        gravity=(
+            GRAVITY
         ),
-        nominal_left_step=(
-            nominal_left_step
-        ),
-        nominal_right_step=(
-            nominal_right_step
-        ),
-    )
 
-    # ========================================================
-    # STAGE 2 — DCM DISTURBANCE VALIDATION
-    # ========================================================
+        com_height=(
+            COM_HEIGHT_REFERENCE
+        ),
 
-    run_stage2_disturbance_validation(
-        planner=(
-            planner
+        default_step_width=(
+            DEFAULT_STEP_WIDTH
         ),
-        nominal_left_step=(
-            nominal_left_step
+
+        step_length_min=(
+            STEP_LENGTH_MIN
         ),
-        nominal_right_step=(
-            nominal_right_step
+
+        step_length_max=(
+            STEP_LENGTH_MAX
+        ),
+
+        step_width_min=(
+            STEP_WIDTH_MIN
+        ),
+
+        step_width_max=(
+            STEP_WIDTH_MAX
+        ),
+
+        step_time_min=(
+            STEP_TIME_MIN
+        ),
+
+        step_time_max=(
+            STEP_TIME_MAX
         ),
     )
 
-    run_stage2_direction_validation(
-        planner=planner,
-        nominal_left_step=nominal_left_step,
-        nominal_right_step=nominal_right_step,
+    planner = AdaptiveStepPlanner(
+        planner_parameters
     )
-
-    if RUN_STAGE2_PLANNER_ONLY:
-
-        return
-
 
     separator()
 
