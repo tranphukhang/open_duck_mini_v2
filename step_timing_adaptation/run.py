@@ -151,6 +151,8 @@ COM_HEIGHT_KD = 16.0
 STEP_QP_ALPHA_LOCATION = 1.0
 STEP_QP_ALPHA_TIMING = 5.0
 STEP_QP_ALPHA_DCM = 1000.0
+STEP_QP_ALPHA_VIABILITY = 1.0e6
+STEP_TIMING_GAP = 0.02
 
 
 # ------------------------------------------------------------
