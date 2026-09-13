@@ -311,6 +311,19 @@ class SingleSupportHierarchicalInverseDynamics:
             str(name),
             int(number_variables),
             int(number_constraints),
+            (
+                "qpoases"
+                if
+                (
+                    name == "single_rank3"
+                    and
+                    ca.has_conic(
+                        "qpoases"
+                    )
+                )
+                else
+                self.config.solver_name
+            ),
         )
 
         if key in self._solver_cache:
@@ -344,13 +357,62 @@ class SingleSupportHierarchicalInverseDynamics:
             "max_iter": 1000,
         }
 
+        # ====================================================
+        # SOLVER SELECTION
+        #
+        # QRQP works well for the current Rank-2 problem, but
+        # it can cycle on the Rank-3 active set even when the
+        # convex QP is feasible.
+        #
+        # Therefore use qpOASES specifically for Rank 3.
+        # ====================================================
+
+        if (
+            name
+            ==
+            "single_rank3"
+            and
+            ca.has_conic(
+                "qpoases"
+            )
+        ):
+
+            solver_plugin = (
+                "qpoases"
+            )
+
+            options = {
+                "error_on_fail": False,
+                "print_time": False,
+            }
+
+        else:
+
+            solver_plugin = (
+                self.config.solver_name
+            )
+
+            options = {
+                "print_header": False,
+                "print_iter": False,
+                "print_info": False,
+
+                "error_on_fail": False,
+
+                "constr_viol_tol": 1.0e-9,
+                "dual_inf_tol": 1.0e-9,
+
+                "max_iter": 1000,
+            }
+
         solver = ca.conic(
             (
                 f"{name}_"
+                f"{solver_plugin}_"
                 f"{number_variables}_"
                 f"{number_constraints}"
             ),
-            self.config.solver_name,
+            solver_plugin,
             qp_structure,
             options,
         )
@@ -390,6 +452,20 @@ class SingleSupportHierarchicalInverseDynamics:
             dtype=float,
         )
 
+        # ========================================================
+        # REDUCED TASK
+        #
+        #     y = y_base + Z u
+        #
+        # Therefore:
+        #
+        #     B y - desired
+        #
+        #       =
+        #
+        #     B Z u - (desired - B y_base)
+        # ========================================================
+
         C = (
             B
             @
@@ -408,6 +484,33 @@ class SingleSupportHierarchicalInverseDynamics:
             self.config.numerical_regularization
         )
 
+        number_variables = int(
+            Z.shape[
+                1
+            ]
+        )
+
+        # ========================================================
+        # OBJECTIVE
+        #
+        #   || C u - error_target ||^2
+        #
+        #       +
+        #
+        #   epsilon ||u||^2
+        #
+        # IMPORTANT:
+        #
+        # Regularize the NULL-SPACE STEP u, not the complete
+        # solution:
+        #
+        #     ||y_base + Z u||^2
+        #
+        # Otherwise the regularizer creates an artificial
+        # incentive to move away from the valid higher-priority
+        # solution y_base.
+        # ========================================================
+
         H = (
             2.0
             *
@@ -418,10 +521,9 @@ class SingleSupportHierarchicalInverseDynamics:
                 +
                 epsilon
                 *
-                (
-                    Z.T
-                    @
-                    Z
+                np.eye(
+                    number_variables,
+                    dtype=float,
                 )
             )
         )
@@ -432,15 +534,9 @@ class SingleSupportHierarchicalInverseDynamics:
             C.T
             @
             error_target
-            +
-            2.0
-            *
-            epsilon
-            *
-            Z.T
-            @
-            y_base
         )
+
+        # Numerical symmetry.
 
         H = (
             0.5
@@ -456,7 +552,6 @@ class SingleSupportHierarchicalInverseDynamics:
             H,
             g,
         )
-
 
     def _reduce_constraints(
         self,
