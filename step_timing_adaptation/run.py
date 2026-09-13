@@ -936,6 +936,7 @@ def run_double_support(
     data,
     dynamics,
     controller,
+    planner,
 
     actuated_qpos_indices,
     posture_reference,
@@ -1030,6 +1031,11 @@ def run_double_support(
     print(
         f"HQP frequency        = "
         f"{CONTROL_FREQUENCY:.1f} Hz"
+    )
+
+    print(
+        f"LIPM omega0          = "
+        f"{planner.omega:.6f} 1/s"
     )
 
     print(
@@ -1292,6 +1298,47 @@ def run_double_support(
                 RIGHT_FOOT_SITE,
             )
         )
+
+        # ====================================================
+        # LIPM / DCM STATE OBSERVER
+        #
+        # xi = c + c_dot / omega_0
+        #
+        # Horizontal coordinates only.
+        # No feedback to the robot yet.
+        # ====================================================
+
+        com_position_xy = np.asarray(
+            com.position[
+                0:2
+            ],
+            dtype=float,
+        )
+
+        com_velocity_xy = np.asarray(
+            com.velocity[
+                0:2
+            ],
+            dtype=float,
+        )
+
+        dcm_xy = (
+            com_position_xy
+            +
+            com_velocity_xy
+            /
+            planner.omega
+        )
+
+        if not np.all(
+            np.isfinite(
+                dcm_xy
+            )
+        ):
+
+            raise RuntimeError(
+                "Non-finite DCM state detected."
+            )
 
         tilt = (
             get_base_tilt_deg(
@@ -1844,6 +1891,21 @@ def run_double_support(
 
                 f" | HQP="
                 f"{hqp_ms:6.3f} ms"
+            )
+
+            print(
+                f"  planner-state"
+                f" | CoMxy="
+                f"({com_position_xy[0]:+.6f},"
+                f"{com_position_xy[1]:+.6f}) m"
+
+                f" | Vcomxy="
+                f"({com_velocity_xy[0]:+.6f},"
+                f"{com_velocity_xy[1]:+.6f}) m/s"
+
+                f" | DCM="
+                f"({dcm_xy[0]:+.6f},"
+                f"{dcm_xy[1]:+.6f}) m"
             )
 
             next_print_time += (
@@ -2718,6 +2780,8 @@ def main():
 
                 controller=controller,
 
+                planner=planner,
+
                 actuated_qpos_indices=(
                     actuated_qpos_indices
                 ),
@@ -2762,6 +2826,8 @@ def main():
             dynamics=dynamics,
 
             controller=controller,
+
+            planner=planner,
 
             actuated_qpos_indices=(
                 actuated_qpos_indices
