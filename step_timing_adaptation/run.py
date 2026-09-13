@@ -47,6 +47,12 @@ if __package__:
         WholeBodyHierarchicalInverseDynamics,
     )
 
+    from .adaptive_step_planner import (
+        AdaptiveStepPlanner,
+        StepPlannerParameters,
+        StanceLeg,
+    )
+
 else:
 
     from dynamics_model import (
@@ -56,6 +62,12 @@ else:
     from whole_body_qp import (
         DoubleSupportHQPConfig,
         WholeBodyHierarchicalInverseDynamics,
+    )
+
+    from adaptive_step_planner import (
+        AdaptiveStepPlanner,
+        StepPlannerParameters,
+        StanceLeg,
     )
 
 
@@ -121,6 +133,62 @@ COM_HEIGHT_REFERENCE = 0.2044
 
 COM_HEIGHT_KP = 80.0
 COM_HEIGHT_KD = 16.0
+
+
+# ============================================================
+# ADAPTIVE STEP PLANNER
+# ============================================================
+
+# ------------------------------------------------------------
+# Stage currently under validation
+# ------------------------------------------------------------
+
+RUN_STAGE1_PLANNER_ONLY = True
+
+
+# ------------------------------------------------------------
+# Desired walking velocity
+# ------------------------------------------------------------
+
+DESIRED_VELOCITY_X = 0.15
+DESIRED_VELOCITY_Y = 0.0
+
+
+# ------------------------------------------------------------
+# LIPM
+# ------------------------------------------------------------
+
+GRAVITY = 9.81
+
+
+# ------------------------------------------------------------
+# Nominal lateral foot spacing l_p
+# ------------------------------------------------------------
+
+DEFAULT_STEP_WIDTH = 0.16
+
+
+# ------------------------------------------------------------
+# Step location bounds
+#
+# These values are currently used for Stage-1 validation.
+# They can later be replaced by the identified physical
+# limits of the Open Duck Mini.
+# ------------------------------------------------------------
+
+STEP_LENGTH_MIN = -0.10
+STEP_LENGTH_MAX = +0.10
+
+STEP_WIDTH_MIN = -0.03
+STEP_WIDTH_MAX = +0.03
+
+
+# ------------------------------------------------------------
+# Step timing bounds
+# ------------------------------------------------------------
+
+STEP_TIME_MIN = 0.20
+STEP_TIME_MAX = 0.30
 
 
 # ============================================================
@@ -2072,10 +2140,488 @@ def run_double_support(
 
 
 # ============================================================
+# STAGE 1 — NOMINAL STEP PLANNER VALIDATION
+# ============================================================
+
+def run_stage1_planner_validation():
+
+    # ========================================================
+    # CREATE PLANNER PARAMETERS
+    # ========================================================
+
+    planner_parameters = StepPlannerParameters(
+
+        gravity=(
+            GRAVITY
+        ),
+
+        com_height=(
+            COM_HEIGHT_REFERENCE
+        ),
+
+        default_step_width=(
+            DEFAULT_STEP_WIDTH
+        ),
+
+        step_length_min=(
+            STEP_LENGTH_MIN
+        ),
+
+        step_length_max=(
+            STEP_LENGTH_MAX
+        ),
+
+        step_width_min=(
+            STEP_WIDTH_MIN
+        ),
+
+        step_width_max=(
+            STEP_WIDTH_MAX
+        ),
+
+        step_time_min=(
+            STEP_TIME_MIN
+        ),
+
+        step_time_max=(
+            STEP_TIME_MAX
+        ),
+    )
+
+    # ========================================================
+    # CREATE PLANNER
+    # ========================================================
+
+    planner = AdaptiveStepPlanner(
+        planner_parameters
+    )
+
+    # ========================================================
+    # COMPUTE NOMINAL STEP — LEFT STANCE
+    # ========================================================
+
+    left_step = planner.compute_nominal_step(
+
+        desired_velocity_x=(
+            DESIRED_VELOCITY_X
+        ),
+
+        desired_velocity_y=(
+            DESIRED_VELOCITY_Y
+        ),
+
+        stance_leg=(
+            StanceLeg.LEFT
+        ),
+    )
+
+    # ========================================================
+    # COMPUTE NOMINAL STEP — RIGHT STANCE
+    # ========================================================
+
+    right_step = planner.compute_nominal_step(
+
+        desired_velocity_x=(
+            DESIRED_VELOCITY_X
+        ),
+
+        desired_velocity_y=(
+            DESIRED_VELOCITY_Y
+        ),
+
+        stance_leg=(
+            StanceLeg.RIGHT
+        ),
+    )
+
+    # ========================================================
+    # PRINT CONFIGURATION
+    # ========================================================
+
+    separator()
+
+    print(
+        "STAGE 1 — NOMINAL STEP PLANNER"
+    )
+
+    separator()
+
+    print()
+
+    print(
+        f"desired vx        = "
+        f"{DESIRED_VELOCITY_X:+.6f} m/s"
+    )
+
+    print(
+        f"desired vy        = "
+        f"{DESIRED_VELOCITY_Y:+.6f} m/s"
+    )
+
+    print(
+        f"CoM height        = "
+        f"{COM_HEIGHT_REFERENCE:.6f} m"
+    )
+
+    print(
+        f"omega0            = "
+        f"{planner.omega:.6f} 1/s"
+    )
+
+    print(
+        f"default step width = "
+        f"{DEFAULT_STEP_WIDTH:.6f} m"
+    )
+
+    print()
+
+    print(
+        f"L bounds = "
+        f"[{STEP_LENGTH_MIN:+.4f}, "
+        f"{STEP_LENGTH_MAX:+.4f}] m"
+    )
+
+    print(
+        f"W bounds = "
+        f"[{STEP_WIDTH_MIN:+.4f}, "
+        f"{STEP_WIDTH_MAX:+.4f}] m"
+    )
+
+    print(
+        f"T bounds = "
+        f"[{STEP_TIME_MIN:.4f}, "
+        f"{STEP_TIME_MAX:.4f}] s"
+    )
+
+    # ========================================================
+    # LEFT STANCE
+    # ========================================================
+
+    print()
+
+    separator()
+
+    print(
+        "CASE 1: LEFT STANCE"
+    )
+
+    separator()
+
+    print()
+
+    print(
+        f"B_l       = "
+        f"{left_step.lower_time_bound:.6f} s"
+    )
+
+    print(
+        f"B_u       = "
+        f"{left_step.upper_time_bound:.6f} s"
+    )
+
+    print(
+        f"T_nom     = "
+        f"{left_step.step_time:.6f} s"
+    )
+
+    print(
+        f"L_nom     = "
+        f"{left_step.step_length:+.6f} m"
+    )
+
+    print(
+        f"W_nom     = "
+        f"{left_step.step_width_deviation:+.6f} m"
+    )
+
+    print(
+        f"dx_nom    = "
+        f"{left_step.step_displacement_x:+.6f} m"
+    )
+
+    print(
+        f"dy_nom    = "
+        f"{left_step.step_displacement_y:+.6f} m"
+    )
+
+    print(
+        f"tau_nom   = "
+        f"{left_step.tau:.6f}"
+    )
+
+    print(
+        f"bx_nom    = "
+        f"{left_step.dcm_offset_x:+.6f} m"
+    )
+
+    print(
+        f"by_nom    = "
+        f"{left_step.dcm_offset_y:+.6f} m"
+    )
+
+    # ========================================================
+    # RIGHT STANCE
+    # ========================================================
+
+    print()
+
+    separator()
+
+    print(
+        "CASE 2: RIGHT STANCE"
+    )
+
+    separator()
+
+    print()
+
+    print(
+        f"B_l       = "
+        f"{right_step.lower_time_bound:.6f} s"
+    )
+
+    print(
+        f"B_u       = "
+        f"{right_step.upper_time_bound:.6f} s"
+    )
+
+    print(
+        f"T_nom     = "
+        f"{right_step.step_time:.6f} s"
+    )
+
+    print(
+        f"L_nom     = "
+        f"{right_step.step_length:+.6f} m"
+    )
+
+    print(
+        f"W_nom     = "
+        f"{right_step.step_width_deviation:+.6f} m"
+    )
+
+    print(
+        f"dx_nom    = "
+        f"{right_step.step_displacement_x:+.6f} m"
+    )
+
+    print(
+        f"dy_nom    = "
+        f"{right_step.step_displacement_y:+.6f} m"
+    )
+
+    print(
+        f"tau_nom   = "
+        f"{right_step.tau:.6f}"
+    )
+
+    print(
+        f"bx_nom    = "
+        f"{right_step.dcm_offset_x:+.6f} m"
+    )
+
+    print(
+        f"by_nom    = "
+        f"{right_step.dcm_offset_y:+.6f} m"
+    )
+
+    # ========================================================
+    # SANITY CHECKS
+    # ========================================================
+
+    tolerance = 1.0e-9
+
+    # --------------------------------------------------------
+    # Straight walking:
+    #
+    # vy = 0 -> W_nom = 0
+    # --------------------------------------------------------
+
+    if abs(
+        DESIRED_VELOCITY_Y
+    ) < tolerance:
+
+        if not np.isclose(
+            left_step.step_width_deviation,
+            0.0,
+            atol=tolerance,
+        ):
+
+            raise RuntimeError(
+                "LEFT stance: "
+                "W_nom must be zero for vy = 0."
+            )
+
+        if not np.isclose(
+            right_step.step_width_deviation,
+            0.0,
+            atol=tolerance,
+        ):
+
+            raise RuntimeError(
+                "RIGHT stance: "
+                "W_nom must be zero for vy = 0."
+            )
+
+    # --------------------------------------------------------
+    # L_nom = vx * T_nom
+    # --------------------------------------------------------
+
+    if not np.isclose(
+
+        left_step.step_length,
+
+        DESIRED_VELOCITY_X
+        *
+        left_step.step_time,
+
+        atol=tolerance,
+    ):
+
+        raise RuntimeError(
+            "LEFT stance: L_nom != vx * T_nom."
+        )
+
+    if not np.isclose(
+
+        right_step.step_length,
+
+        DESIRED_VELOCITY_X
+        *
+        right_step.step_time,
+
+        atol=tolerance,
+    ):
+
+        raise RuntimeError(
+            "RIGHT stance: L_nom != vx * T_nom."
+        )
+
+    # --------------------------------------------------------
+    # For vy = 0:
+    #
+    # left stance  -> right foot -> delta_y = -l_p
+    # right stance -> left foot  -> delta_y = +l_p
+    # --------------------------------------------------------
+
+    if abs(
+        DESIRED_VELOCITY_Y
+    ) < tolerance:
+
+        if not np.isclose(
+            left_step.step_displacement_y,
+            -DEFAULT_STEP_WIDTH,
+            atol=tolerance,
+        ):
+
+            raise RuntimeError(
+                "LEFT stance lateral displacement "
+                "has incorrect sign."
+            )
+
+        if not np.isclose(
+            right_step.step_displacement_y,
+            +DEFAULT_STEP_WIDTH,
+            atol=tolerance,
+        ):
+
+            raise RuntimeError(
+                "RIGHT stance lateral displacement "
+                "has incorrect sign."
+            )
+
+        # ----------------------------------------------------
+        # Lateral DCM offset must be antisymmetric
+        # ----------------------------------------------------
+
+        if not np.isclose(
+            left_step.dcm_offset_y,
+            -right_step.dcm_offset_y,
+            atol=tolerance,
+        ):
+
+            raise RuntimeError(
+                "Lateral nominal DCM offsets "
+                "are not symmetric."
+            )
+
+    # --------------------------------------------------------
+    # Sagittal terms must be identical for the two stance legs
+    # --------------------------------------------------------
+
+    if not np.isclose(
+        left_step.step_time,
+        right_step.step_time,
+        atol=tolerance,
+    ):
+
+        raise RuntimeError(
+            "LEFT/RIGHT T_nom mismatch."
+        )
+
+    if not np.isclose(
+        left_step.step_length,
+        right_step.step_length,
+        atol=tolerance,
+    ):
+
+        raise RuntimeError(
+            "LEFT/RIGHT L_nom mismatch."
+        )
+
+    if not np.isclose(
+        left_step.dcm_offset_x,
+        right_step.dcm_offset_x,
+        atol=tolerance,
+    ):
+
+        raise RuntimeError(
+            "LEFT/RIGHT bx_nom mismatch."
+        )
+
+    # ========================================================
+    # RESULT
+    # ========================================================
+
+    print()
+
+    separator()
+
+    print(
+        "STAGE 1 VALIDATION: PASSED"
+    )
+
+    separator()
+
+    print()
+
+    return (
+        planner,
+        left_step,
+        right_step,
+    )
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
+
+    # ========================================================
+    # STAGE 1 — ADAPTIVE STEP PLANNER VALIDATION
+    # ========================================================
+
+    (
+        planner,
+        nominal_left_step,
+        nominal_right_step,
+    ) = run_stage1_planner_validation()
+
+    if RUN_STAGE1_PLANNER_ONLY:
+
+        return
+
 
     separator()
 

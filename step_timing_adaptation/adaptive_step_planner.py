@@ -7,6 +7,7 @@ from enum import Enum
 import math
 
 import numpy as np
+import casadi as ca
 
 
 # ============================================================
@@ -109,6 +110,32 @@ class NominalStep:
 
 
 # ============================================================
+# ADAPTED STEP
+# ============================================================
+
+@dataclass(frozen=True)
+class AdaptedStep:
+
+    stance_leg: StanceLeg
+
+    step_location_x: float
+    step_location_y: float
+
+    step_displacement_x: float
+    step_displacement_y: float
+
+    tau: float
+    step_time: float
+
+    dcm_offset_x: float
+    dcm_offset_y: float
+
+    objective: float
+
+    max_equality_residual: float
+
+
+# ============================================================
 # PLANNER
 # ============================================================
 
@@ -147,6 +174,7 @@ class AdaptiveStepPlanner:
             self._compute_viability_bounds()
         )
 
+        
 
     # ========================================================
     # PARAMETER VALIDATION
