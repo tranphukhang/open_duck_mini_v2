@@ -35,15 +35,13 @@ class StepPlannerParameters:
         y : left
         z : upward
 
-    W is the lateral deviation from the default step width l_p,
-    following the convention used in the current implementation.
+    W is the lateral deviation from the default step width l_p.
 
     Therefore W = 0 means straight walking with nominal
     left-right foot spacing l_p.
     """
 
     gravity: float
-
     com_height: float
 
     default_step_width: float
@@ -132,6 +130,15 @@ class AdaptedStep:
     dcm_offset_x: float
     dcm_offset_y: float
 
+    # Soft viability slack.
+    viability_slack_x: float
+    viability_slack_y: float
+
+    # Effective lower bound imposed on total step time:
+    #
+    # T >= max(T_min, elapsed_time + timing_gap)
+    timing_lower_bound: float
+
     objective: float
     max_equality_residual: float
 
@@ -155,12 +162,13 @@ class AdaptiveStepPlanner:
 
         Stage 2
             - timing change of variable tau = exp(omega*T)
-            - linear DCM equality
-            - online step location / timing QP
-              Eq. (18), Eq. (19), Eq. (20)
+            - linear DCM equality, Eq. (19)
+            - online step location / timing QP, Eq. (20)
+            - soft viability constraints
+            - online timing causality:
+                  T >= max(T_min, t + T_gap)
 
-    All numerical walking parameters and test settings are
-    intentionally supplied from run.py.
+    All numerical walking parameters are supplied from run.py.
     """
 
     def __init__(
@@ -303,6 +311,10 @@ class AdaptiveStepPlanner:
             p.step_time_max
         )
 
+        # ----------------------------------------------------
+        # Sagittal viability
+        # ----------------------------------------------------
+
         denominator_x = (
             tau_min
             -
@@ -320,6 +332,11 @@ class AdaptiveStepPlanner:
             /
             denominator_x
         )
+
+        # ----------------------------------------------------
+        # Lateral viability
+        # Appendix B, Eq. (32a)-(32b)
+        # ----------------------------------------------------
 
         denominator_y = (
             1.0
@@ -620,6 +637,7 @@ class AdaptiveStepPlanner:
 
         if stance_leg is StanceLeg.LEFT:
 
+            # Left stance -> right swing foot.
             delta_y_nom = (
                 -p.default_step_width
                 +
@@ -630,6 +648,7 @@ class AdaptiveStepPlanner:
 
         elif stance_leg is StanceLeg.RIGHT:
 
+            # Right stance -> left swing foot.
             delta_y_nom = (
                 +p.default_step_width
                 +
@@ -794,10 +813,30 @@ class AdaptiveStepPlanner:
 
         # Decision vector:
         #
-        # z = [u_Tx, u_Ty, tau, b_x, b_y]
+        # z = [
+        #     u_Tx,
+        #     u_Ty,
+        #     tau,
+        #     b_x,
+        #     b_y,
+        #     s_x,
+        #     s_y,
+        # ]
+        #
+        # s_x, s_y >= 0 are soft-viability slack variables.
 
-        number_variables = 5
-        number_equalities = 2
+        number_variables = 7
+
+        # Constraints:
+        #
+        # 0: Eq. (19), x
+        # 1: Eq. (19), y
+        # 2: b_x + s_x >= b_x,min
+        # 3: b_x - s_x <= b_x,max
+        # 4: b_y + s_y >= b_y,min
+        # 5: b_y - s_y <= b_y,max
+
+        number_constraints = 6
 
         qp_structure = {
             "h": ca.Sparsity.dense(
@@ -805,7 +844,7 @@ class AdaptiveStepPlanner:
                 number_variables,
             ),
             "a": ca.Sparsity.dense(
-                number_equalities,
+                number_constraints,
                 number_variables,
             ),
         }
@@ -906,8 +945,8 @@ class AdaptiveStepPlanner:
 
         if stance_leg is StanceLeg.LEFT:
 
-            # Current convention gives positive b_y for
-            # straight walking during left stance.
+            # Current convention gives positive b_y during
+            # left stance.
 
             lower = positive_lower
             upper = positive_upper
@@ -944,30 +983,50 @@ class AdaptiveStepPlanner:
         alpha_location: float,
         alpha_timing: float,
         alpha_dcm: float,
+        alpha_viability: float,
+        timing_gap: float,
     ) -> AdaptedStep:
         """
         Solve the Stage-2 QP.
 
         Decision vector:
 
-            z = [u_Tx, u_Ty, tau, b_x, b_y]
+            z = [u_Tx, u_Ty, tau, b_x, b_y, s_x, s_y]
 
         with:
 
             tau = exp(omega*T)
 
-        and the linear DCM equality:
+        DCM equality, Eq. (19):
 
             u_T
             - (xi_mea - u_0) exp(-omega*t) tau
             + b
             = u_0
 
-        This first implementation uses hard viability bounds.
-        The high-penalty soft viability formulation described
-        by the paper can be introduced after the basic QP has
-        been validated independently.
+        Hard constraints:
+            - landing position bounds
+            - total step-time bounds
+            - online timing causality
+            - Eq. (19)
+
+        Soft constraints:
+            - sagittal viability bound on b_x
+            - lateral viability bound on b_y
+
+        Online timing causality:
+
+            T >= max(T_min, elapsed_time + timing_gap)
+
+        If elapsed_time + timing_gap exceeds T_max, the timing
+        adaptation window is considered closed. The caller
+        should freeze the current landing target instead of
+        solving a new adaptation.
         """
+
+        # ====================================================
+        # INPUTS
+        # ====================================================
 
         xi = np.asarray(
             dcm_measured,
@@ -1025,10 +1084,13 @@ class AdaptiveStepPlanner:
                 "elapsed_time must be finite and >= 0."
             )
 
+        p = self.parameters
+        vb = self.viability_bounds
+
         if (
             t
             >
-            self.parameters.step_time_max
+            p.step_time_max
             +
             1.0e-12
         ):
@@ -1036,6 +1098,10 @@ class AdaptiveStepPlanner:
             raise ValueError(
                 "elapsed_time exceeds step_time_max."
             )
+
+        # ====================================================
+        # QP WEIGHTS / ONLINE TIMING GAP
+        # ====================================================
 
         alpha_location = float(
             alpha_location
@@ -1049,10 +1115,19 @@ class AdaptiveStepPlanner:
             alpha_dcm
         )
 
+        alpha_viability = float(
+            alpha_viability
+        )
+
+        timing_gap = float(
+            timing_gap
+        )
+
         for name, value in (
             ("alpha_location", alpha_location),
             ("alpha_timing", alpha_timing),
             ("alpha_dcm", alpha_dcm),
+            ("alpha_viability", alpha_viability),
         ):
 
             if (
@@ -1064,6 +1139,52 @@ class AdaptiveStepPlanner:
                 raise ValueError(
                     f"{name} must be finite and positive."
                 )
+
+        if (
+            not math.isfinite(timing_gap)
+            or
+            timing_gap < 0.0
+        ):
+
+            raise ValueError(
+                "timing_gap must be finite and >= 0."
+            )
+
+        # ====================================================
+        # ONLINE TIMING CAUSALITY
+        # ====================================================
+
+        timing_lower_bound = max(
+            p.step_time_min,
+            t
+            +
+            timing_gap,
+        )
+
+        if (
+            timing_lower_bound
+            >
+            p.step_time_max
+            +
+            1.0e-12
+        ):
+
+            raise RuntimeError(
+                "Stage-2 timing adaptation window is closed. "
+                "The current landing target should be frozen."
+            )
+
+        # Remove tiny floating-point overshoot at T_max.
+        timing_lower_bound = min(
+            timing_lower_bound,
+            p.step_time_max,
+        )
+
+        tau_lower = math.exp(
+            self.omega
+            *
+            timing_lower_bound
+        )
 
         # ====================================================
         # NOMINAL REFERENCES
@@ -1086,24 +1207,34 @@ class AdaptiveStepPlanner:
             [
                 uT_nom[0],
                 uT_nom[1],
+
                 nominal_step.tau,
+
                 nominal_step.dcm_offset_x,
                 nominal_step.dcm_offset_y,
+
+                0.0,
+                0.0,
             ],
             dtype=float,
         )
 
         # ====================================================
-        # OBJECTIVE — EQ. (20)
+        # OBJECTIVE — EQ. (20) + SOFT-VIABILITY PENALTY
         # ====================================================
 
         weights = np.array(
             [
                 alpha_location,
                 alpha_location,
+
                 alpha_timing,
+
                 alpha_dcm,
                 alpha_dcm,
+
+                alpha_viability,
+                alpha_viability,
             ],
             dtype=float,
         )
@@ -1112,7 +1243,16 @@ class AdaptiveStepPlanner:
         #
         #     0.5 z^T H z + g^T z
         #
-        # The constant part of ||z-z_ref||_W^2 is omitted.
+        # Therefore, for
+        #
+        #     sum_i w_i (z_i - z_ref_i)^2,
+        #
+        # use:
+        #
+        #     H = 2 diag(w)
+        #     g = -2 w .* z_ref
+        #
+        # The constant term is irrelevant to optimization.
 
         H = (
             2.0
@@ -1148,36 +1288,9 @@ class AdaptiveStepPlanner:
             )
         )
 
-        Aeq = np.array(
-            [
-                [
-                    1.0,
-                    0.0,
-                    -dcm_factor[0],
-                    1.0,
-                    0.0,
-                ],
-                [
-                    0.0,
-                    1.0,
-                    -dcm_factor[1],
-                    0.0,
-                    1.0,
-                ],
-            ],
-            dtype=float,
-        )
-
-        beq = (
-            u0.copy()
-        )
-
         # ====================================================
-        # VARIABLE BOUNDS
+        # LATERAL BOUNDS
         # ====================================================
-
-        p = self.parameters
-        vb = self.viability_bounds
 
         lateral_step_lower, lateral_step_upper = (
             self._get_lateral_step_displacement_bounds(
@@ -1191,40 +1304,218 @@ class AdaptiveStepPlanner:
             )
         )
 
+        # ====================================================
+        # FULL LINEAR CONSTRAINT MATRIX
+        # ====================================================
+
+        A = np.array(
+            [
+                # --------------------------------------------
+                # Eq. (19), x
+                #
+                # u_Tx - dcm_factor_x*tau + b_x = u_0x
+                # --------------------------------------------
+                [
+                    1.0,
+                    0.0,
+                    -dcm_factor[0],
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+
+                # --------------------------------------------
+                # Eq. (19), y
+                # --------------------------------------------
+                [
+                    0.0,
+                    1.0,
+                    -dcm_factor[1],
+                    0.0,
+                    1.0,
+                    0.0,
+                    0.0,
+                ],
+
+                # --------------------------------------------
+                # Soft sagittal lower viability:
+                #
+                # b_x + s_x >= b_x,min
+                # --------------------------------------------
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                ],
+
+                # --------------------------------------------
+                # Soft sagittal upper viability:
+                #
+                # b_x - s_x <= b_x,max
+                # --------------------------------------------
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                    -1.0,
+                    0.0,
+                ],
+
+                # --------------------------------------------
+                # Soft lateral lower viability:
+                #
+                # b_y + s_y >= b_y,min
+                # --------------------------------------------
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                    1.0,
+                ],
+
+                # --------------------------------------------
+                # Soft lateral upper viability:
+                #
+                # b_y - s_y <= b_y,max
+                # --------------------------------------------
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.0,
+                    -1.0,
+                ],
+            ],
+            dtype=float,
+        )
+
+        constraint_lower = np.array(
+            [
+                # Eq. (19), x
+                u0[0],
+
+                # Eq. (19), y
+                u0[1],
+
+                # b_x + s_x >= b_x,min
+                vb.bx_min,
+
+                # b_x - s_x <= b_x,max
+                -np.inf,
+
+                # b_y + s_y >= b_y,min
+                by_lower,
+
+                # b_y - s_y <= b_y,max
+                -np.inf,
+            ],
+            dtype=float,
+        )
+
+        constraint_upper = np.array(
+            [
+                # Eq. (19), x
+                u0[0],
+
+                # Eq. (19), y
+                u0[1],
+
+                # b_x + s_x >= b_x,min
+                +np.inf,
+
+                # b_x - s_x <= b_x,max
+                vb.bx_max,
+
+                # b_y + s_y >= b_y,min
+                +np.inf,
+
+                # b_y - s_y <= b_y,max
+                by_upper,
+            ],
+            dtype=float,
+        )
+
+        # ====================================================
+        # VARIABLE BOUNDS
+        # ====================================================
+        #
+        # Hard:
+        #   landing position
+        #   timing
+        #   non-negative slack
+        #
+        # Soft:
+        #   b_x, b_y viability
+        # ====================================================
+
         lower_bounds = np.array(
             [
+                # u_Tx
                 u0[0]
                 +
                 p.step_length_min,
 
+                # u_Ty
                 u0[1]
                 +
                 lateral_step_lower,
 
-                vb.tau_min,
+                # tau
+                tau_lower,
 
-                vb.bx_min,
+                # b_x
+                -np.inf,
 
-                by_lower,
+                # b_y
+                -np.inf,
+
+                # s_x
+                0.0,
+
+                # s_y
+                0.0,
             ],
             dtype=float,
         )
 
         upper_bounds = np.array(
             [
+                # u_Tx
                 u0[0]
                 +
                 p.step_length_max,
 
+                # u_Ty
                 u0[1]
                 +
                 lateral_step_upper,
 
+                # tau
                 vb.tau_max,
 
-                vb.bx_max,
+                # b_x
+                +np.inf,
 
-                by_upper,
+                # b_y
+                +np.inf,
+
+                # s_x
+                +np.inf,
+
+                # s_y
+                +np.inf,
             ],
             dtype=float,
         )
@@ -1251,13 +1542,13 @@ class AdaptiveStepPlanner:
                 g
             ),
             a=ca.DM(
-                Aeq
+                A
             ),
             lba=ca.DM(
-                beq
+                constraint_lower
             ),
             uba=ca.DM(
-                beq
+                constraint_upper
             ),
             lbx=ca.DM(
                 lower_bounds
@@ -1284,13 +1575,17 @@ class AdaptiveStepPlanner:
                 f"{stats.get('return_status', 'unknown')}"
             )
 
+        # ====================================================
+        # EXTRACT SOLUTION
+        # ====================================================
+
         solution = np.asarray(
             result[
                 "x"
             ],
             dtype=float,
         ).reshape(
-            5
+            7
         )
 
         uTx = float(
@@ -1313,6 +1608,14 @@ class AdaptiveStepPlanner:
             solution[4]
         )
 
+        slack_x = float(
+            solution[5]
+        )
+
+        slack_y = float(
+            solution[6]
+        )
+
         if tau <= 0.0:
 
             raise RuntimeError(
@@ -1331,12 +1634,16 @@ class AdaptiveStepPlanner:
         # DIAGNOSTICS
         # ====================================================
 
+        # Only the first two rows are equality constraints.
         equality_residual = (
-            Aeq
+            A[
+                0:2,
+                :
+            ]
             @
             solution
             -
-            beq
+            u0
         )
 
         max_equality_residual = float(
@@ -1354,47 +1661,60 @@ class AdaptiveStepPlanner:
         )
 
         objective = float(
-            alpha_location
-            *
-            (
-                error[0]**2
-                +
-                error[1]**2
+            np.sum(
+                weights
+                *
+                error**2
             )
-            +
-            alpha_timing
-            *
-            error[2]**2
-            +
-            alpha_dcm
-            *
-            (
-                error[3]**2
-                +
-                error[4]**2
-            )
+        )
+
+        # Small numerical negative slack should not be exposed.
+        slack_x = max(
+            0.0,
+            slack_x,
+        )
+
+        slack_y = max(
+            0.0,
+            slack_y,
         )
 
         return AdaptedStep(
             stance_leg=nominal_step.stance_leg,
+
             step_location_x=uTx,
             step_location_y=uTy,
+
             step_displacement_x=float(
                 uTx
                 -
                 u0[0]
             ),
+
             step_displacement_y=float(
                 uTy
                 -
                 u0[1]
             ),
+
             tau=tau,
             step_time=float(
                 T
             ),
+
             dcm_offset_x=bx,
             dcm_offset_y=by,
+
+            viability_slack_x=slack_x,
+            viability_slack_y=slack_y,
+
+            timing_lower_bound=float(
+                timing_lower_bound
+            ),
+
             objective=objective,
-            max_equality_residual=max_equality_residual,
+
+            max_equality_residual=(
+                max_equality_residual
+            ),
         )

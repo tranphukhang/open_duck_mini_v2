@@ -178,7 +178,9 @@ DEFAULT_STEP_WIDTH = 0.16
 # ------------------------------------------------------------
 # Step location bounds
 #
-# These values are currently used for Stage-1 validation.
+# Temporary planner bounds.
+# Replace later with identified physical limits
+# of the Open Duck Mini.
 # They can later be replaced by the identified physical
 # limits of the Open Duck Mini.
 # ------------------------------------------------------------
