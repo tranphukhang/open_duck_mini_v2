@@ -75,7 +75,7 @@ else:
         StanceLeg,
     )
 
-    from .swing_trajectory import (
+    from swing_trajectory import (
         OnlineSwingFootTrajectory,
         VerticalSwingQPParameters,
     )
