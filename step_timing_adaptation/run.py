@@ -152,7 +152,7 @@ STEP_QP_ALPHA_LOCATION = 1.0
 STEP_QP_ALPHA_TIMING = 5.0
 STEP_QP_ALPHA_DCM = 1000.0
 STEP_QP_ALPHA_VIABILITY = 1.0e6
-
+STEP_TIMING_GAP = 0.02
 
 # ------------------------------------------------------------
 # Temporary observer-mode phase time.
@@ -192,8 +192,6 @@ DEFAULT_STEP_WIDTH = 0.16
 # Temporary planner bounds.
 # Replace later with identified physical limits
 # of the Open Duck Mini.
-# They can later be replaced by the identified physical
-# limits of the Open Duck Mini.
 # ------------------------------------------------------------
 
 STEP_LENGTH_MIN = -0.10
@@ -1886,6 +1884,111 @@ def run_double_support(
                     )
                 )
                 
+                        # =================================================
+            
+            # ADAPTIVE STEP PLANNER — OBSERVER MODE
+            #
+            # Planner output is only observed here.
+            # It is NOT sent to the WBC yet.
+            # =================================================
+
+            planner_elapsed_time = float(
+                PLANNER_OBSERVER_ELAPSED_TIME
+            )
+
+            left_stance_position = np.asarray(
+                left.position[
+                    0:2
+                ],
+                dtype=float,
+            )
+
+            right_stance_position = np.asarray(
+                right.position[
+                    0:2
+                ],
+                dtype=float,
+            )
+
+            left_planner_result = (
+                planner.solve_adaptive_step(
+                    nominal_step=(
+                        nominal_left_step
+                    ),
+
+                    dcm_measured=(
+                        dcm_xy
+                    ),
+
+                    stance_position=(
+                        left_stance_position
+                    ),
+
+                    elapsed_time=(
+                        planner_elapsed_time
+                    ),
+
+                    alpha_location=(
+                        STEP_QP_ALPHA_LOCATION
+                    ),
+
+                    alpha_timing=(
+                        STEP_QP_ALPHA_TIMING
+                    ),
+
+                    alpha_dcm=(
+                        STEP_QP_ALPHA_DCM
+                    ),
+
+                    alpha_viability=(
+                        STEP_QP_ALPHA_VIABILITY
+                    ),
+
+                    timing_gap=(
+                        STEP_TIMING_GAP
+                    ),
+                )
+            )
+
+            right_planner_result = (
+                planner.solve_adaptive_step(
+                    nominal_step=(
+                        nominal_right_step
+                    ),
+
+                    dcm_measured=(
+                        dcm_xy
+                    ),
+
+                    stance_position=(
+                        right_stance_position
+                    ),
+
+                    elapsed_time=(
+                        planner_elapsed_time
+                    ),
+
+                    alpha_location=(
+                        STEP_QP_ALPHA_LOCATION
+                    ),
+
+                    alpha_timing=(
+                        STEP_QP_ALPHA_TIMING
+                    ),
+
+                    alpha_dcm=(
+                        STEP_QP_ALPHA_DCM
+                    ),
+
+                    alpha_viability=(
+                        STEP_QP_ALPHA_VIABILITY
+                    ),
+
+                    timing_gap=(
+                        STEP_TIMING_GAP
+                    ),
+                )
+            )
 
             print(
                 f"t={current_time:5.2f} s"
