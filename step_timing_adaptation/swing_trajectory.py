@@ -106,6 +106,40 @@ class VerticalSwingSample:
     refinement_iterations: int
 
 
+
+# ============================================================
+# COMBINED 3D SWING SAMPLE
+# ============================================================
+
+@dataclass(frozen=True)
+class SwingFootSample:
+    """
+    Combined desired swing-foot state in world coordinates.
+
+    Horizontal x/y come from the online quintic trajectory.
+    Vertical z is obtained by adding the relative clearance
+    trajectory to the lift-off/touchdown site-height reference
+    stored when reset_3d() is called.
+
+    The current implementation therefore targets flat terrain:
+    lift-off and touchdown use the same world-z reference.
+    """
+
+    time: float
+
+    position: np.ndarray
+    velocity: np.ndarray
+    acceleration: np.ndarray
+
+    landing_time: float
+    landing_position: np.ndarray
+
+    horizontal: HorizontalSwingSample
+    vertical: VerticalSwingSample
+
+    max_boundary_residual: float
+
+
 # ============================================================
 # ONLINE SWING TRAJECTORY
 # ============================================================
@@ -177,6 +211,17 @@ class OnlineSwingFootTrajectory:
 
         self._vertical_solver_counter = 0
 
+        # ----------------------------------------------------
+        # Combined 3D trajectory state.
+        #
+        # Stage-3B models z as clearance relative to the
+        # touchdown level. For the current flat-terrain test,
+        # that level is the swing-foot site world-z at lift-off.
+        # ----------------------------------------------------
+
+        self._vertical_reference_height = 0.0
+        self._combined_initialized = False
+
 
     # ========================================================
     # STATE
@@ -237,6 +282,199 @@ class OnlineSwingFootTrajectory:
 
         return (
             self._acceleration.copy()
+        )
+
+
+    # ========================================================
+    # COMBINED 3D SWING — RESET
+    # ========================================================
+
+    def reset_3d(
+        self,
+        initial_position,
+        initial_velocity=None,
+        initial_acceleration=None,
+        start_time: float = 0.0,
+    ) -> None:
+        """
+        Initialize one complete swing-foot trajectory.
+
+        The input position is the current swing-foot site
+        position in world coordinates.
+
+        For the current flat-terrain implementation, its world-z
+        value is stored as the common lift-off/touchdown height.
+        The ninth-order vertical polynomial then generates only
+        the clearance above that reference.
+        """
+
+        position = self._as_vector3(
+            initial_position,
+            "initial_position",
+        )
+
+        if initial_velocity is None:
+            velocity = np.zeros(3, dtype=float)
+        else:
+            velocity = self._as_vector3(
+                initial_velocity,
+                "initial_velocity",
+            )
+
+        if initial_acceleration is None:
+            acceleration = np.zeros(3, dtype=float)
+        else:
+            acceleration = self._as_vector3(
+                initial_acceleration,
+                "initial_acceleration",
+            )
+
+        t0 = float(start_time)
+
+        if (
+            not math.isfinite(t0)
+            or
+            abs(t0) > 1.0e-12
+        ):
+            raise ValueError(
+                "reset_3d currently requires start_time = 0."
+            )
+
+        if abs(velocity[2]) > 1.0e-10:
+            raise ValueError(
+                "reset_3d requires zero initial vertical velocity."
+            )
+
+        if abs(acceleration[2]) > 1.0e-10:
+            raise ValueError(
+                "reset_3d requires zero initial vertical acceleration."
+            )
+
+        self._vertical_reference_height = float(
+            position[2]
+        )
+
+        self.reset_horizontal(
+            initial_position=position[0:2],
+            initial_velocity=velocity[0:2],
+            initial_acceleration=acceleration[0:2],
+            start_time=0.0,
+        )
+
+        self.reset_vertical()
+
+        self._combined_initialized = True
+
+
+    # ========================================================
+    # COMBINED 3D SWING — ONLINE UPDATE
+    # ========================================================
+
+    def update_3d(
+        self,
+        current_time: float,
+        landing_time: float,
+        landing_position_xy,
+        vertical_parameters: VerticalSwingQPParameters,
+    ) -> SwingFootSample:
+        """
+        Regenerate the complete 3D swing-foot state.
+
+        The planner supplies the horizontal landing location and
+        total landing time. The vertical touchdown level is the
+        flat-terrain reference stored by reset_3d().
+        """
+
+        if not self._combined_initialized:
+            raise RuntimeError(
+                "3D swing trajectory has not been initialized. "
+                "Call reset_3d() first."
+            )
+
+        landing_xy = self._as_vector2(
+            landing_position_xy,
+            "landing_position_xy",
+        )
+
+        horizontal = self.update_horizontal(
+            current_time=current_time,
+            landing_time=landing_time,
+            landing_position=landing_xy,
+        )
+
+        vertical = self.update_vertical(
+            current_time=current_time,
+            landing_time=landing_time,
+            parameters=vertical_parameters,
+        )
+
+        position = np.array(
+            [
+                horizontal.position[0],
+                horizontal.position[1],
+                self._vertical_reference_height
+                + vertical.height,
+            ],
+            dtype=float,
+        )
+
+        velocity = np.array(
+            [
+                horizontal.velocity[0],
+                horizontal.velocity[1],
+                vertical.velocity,
+            ],
+            dtype=float,
+        )
+
+        acceleration = np.array(
+            [
+                horizontal.acceleration[0],
+                horizontal.acceleration[1],
+                vertical.acceleration,
+            ],
+            dtype=float,
+        )
+
+        landing_position = np.array(
+            [
+                landing_xy[0],
+                landing_xy[1],
+                self._vertical_reference_height,
+            ],
+            dtype=float,
+        )
+
+        if not np.all(np.isfinite(position)):
+            raise RuntimeError(
+                "Non-finite combined swing position generated."
+            )
+
+        if not np.all(np.isfinite(velocity)):
+            raise RuntimeError(
+                "Non-finite combined swing velocity generated."
+            )
+
+        if not np.all(np.isfinite(acceleration)):
+            raise RuntimeError(
+                "Non-finite combined swing acceleration generated."
+            )
+
+        return SwingFootSample(
+            time=float(current_time),
+            position=position,
+            velocity=velocity,
+            acceleration=acceleration,
+            landing_time=float(landing_time),
+            landing_position=landing_position,
+            horizontal=horizontal,
+            vertical=vertical,
+            max_boundary_residual=float(
+                max(
+                    horizontal.max_boundary_residual,
+                    vertical.max_boundary_residual,
+                )
+            ),
         )
 
 
@@ -2507,6 +2745,30 @@ class OnlineSwingFootTrajectory:
                 "Swing trajectory has not been initialized. "
                 "Call reset_horizontal() first."
             )
+
+
+    @staticmethod
+    def _as_vector3(
+        value,
+        name: str,
+    ) -> np.ndarray:
+
+        vector = np.asarray(
+            value,
+            dtype=float,
+        ).reshape(-1)
+
+        if vector.shape != (3,):
+            raise ValueError(
+                f"{name} must contain exactly 3 values."
+            )
+
+        if not np.all(np.isfinite(vector)):
+            raise ValueError(
+                f"{name} must be finite."
+            )
+
+        return vector
 
 
     @staticmethod

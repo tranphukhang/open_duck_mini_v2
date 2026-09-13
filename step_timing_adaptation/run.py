@@ -3012,11 +3012,363 @@ def run_stage3_vertical_validation():
 
 
 # ============================================================
+# TEMPORARY — STAGE 3C COMBINED 3D SWING VALIDATION
+# ============================================================
+
+def run_stage3_combined_validation():
+
+    separator()
+
+    print(
+        "STAGE 3C — COMBINED 3D SWING TRAJECTORY"
+    )
+
+    separator()
+
+    print()
+
+    vertical_parameters = VerticalSwingQPParameters(
+        desired_height=(
+            SWING_HEIGHT_DESIRED
+        ),
+        maximum_height=(
+            SWING_HEIGHT_MAX
+        ),
+        constraint_samples=(
+            SWING_VERTICAL_CONSTRAINT_SAMPLES
+        ),
+        coefficient_regularization=(
+            SWING_VERTICAL_COEFFICIENT_REGULARIZATION
+        ),
+        bound_tolerance=(
+            SWING_VERTICAL_BOUND_TOLERANCE
+        ),
+        max_refinements=(
+            SWING_VERTICAL_MAX_REFINEMENTS
+        ),
+    )
+
+    trajectory = OnlineSwingFootTrajectory()
+
+    # --------------------------------------------------------
+    # Example MuJoCo swing-foot site position at lift-off.
+    #
+    # Note:
+    # z is NOT zero because the site origin is above the
+    # physical ground-contact surface.
+    # --------------------------------------------------------
+
+    initial_position = np.array(
+        [
+            0.0,
+            +0.08,
+            0.0025,
+        ],
+        dtype=float,
+    )
+
+    trajectory.reset_3d(
+        initial_position=(
+            initial_position
+        ),
+        initial_velocity=np.zeros(
+            3,
+            dtype=float,
+        ),
+        initial_acceleration=np.zeros(
+            3,
+            dtype=float,
+        ),
+        start_time=0.0,
+    )
+
+    dt = 0.01
+
+    final_sample = None
+
+    max_boundary_residual = 0.0
+
+    min_clearance = +np.inf
+    max_clearance = -np.inf
+
+    print(
+        "Initial swing-foot site:"
+    )
+
+    print(
+        f"  p0 = {initial_position}"
+    )
+
+    print()
+
+    print(
+        "Initial planner request:"
+    )
+
+    print(
+        "  uT_xy = (+0.040000, -0.080000) m"
+    )
+
+    print(
+        "  T     = 0.250000 s"
+    )
+
+    print()
+
+    # ========================================================
+    # ONLINE REGENERATION
+    # ========================================================
+
+    for index in range(
+        1,
+        23,
+    ):
+
+        t = (
+            index
+            *
+            dt
+        )
+
+        # ----------------------------------------------------
+        # Simulate online planner adaptation at t = 0.10 s.
+        # ----------------------------------------------------
+
+        if t < 0.10:
+
+            landing_position_xy = np.array(
+                [
+                    +0.04,
+                    -0.08,
+                ],
+                dtype=float,
+            )
+
+            landing_time = 0.25
+
+        else:
+
+            landing_position_xy = np.array(
+                [
+                    +0.08,
+                    -0.10,
+                ],
+                dtype=float,
+            )
+
+            landing_time = 0.22
+
+        sample = trajectory.update_3d(
+            current_time=(
+                t
+            ),
+            landing_time=(
+                landing_time
+            ),
+            landing_position_xy=(
+                landing_position_xy
+            ),
+            vertical_parameters=(
+                vertical_parameters
+            ),
+        )
+
+        final_sample = sample
+
+        max_boundary_residual = max(
+            max_boundary_residual,
+            sample.max_boundary_residual,
+        )
+
+        min_clearance = min(
+            min_clearance,
+            sample.vertical.continuous_min_height,
+        )
+
+        max_clearance = max(
+            max_clearance,
+            sample.vertical.continuous_max_height,
+        )
+
+        if index in (
+            1,
+            9,
+            10,
+            15,
+            21,
+            22,
+        ):
+
+            print(
+                f"t={t:.2f} s"
+
+                f" | p="
+                f"({sample.position[0]:+.6f},"
+                f"{sample.position[1]:+.6f},"
+                f"{sample.position[2]:+.6f}) m"
+
+                f" | v="
+                f"({sample.velocity[0]:+.6f},"
+                f"{sample.velocity[1]:+.6f},"
+                f"{sample.velocity[2]:+.6f}) m/s"
+
+                f" | a="
+                f"({sample.acceleration[0]:+.6f},"
+                f"{sample.acceleration[1]:+.6f},"
+                f"{sample.acceleration[2]:+.6f}) m/s^2"
+
+                f" | res="
+                f"{sample.max_boundary_residual:.3e}"
+            )
+
+    # ========================================================
+    # FINAL VALIDATION
+    # ========================================================
+
+    if final_sample is None:
+
+        raise RuntimeError(
+            "No Stage-3C samples were generated."
+        )
+
+    expected_final_position = np.array(
+        [
+            +0.08,
+            -0.10,
+            initial_position[2],
+        ],
+        dtype=float,
+    )
+
+    position_error = float(
+        np.max(
+            np.abs(
+                final_sample.position
+                -
+                expected_final_position
+            )
+        )
+    )
+
+    velocity_error = float(
+        np.max(
+            np.abs(
+                final_sample.velocity
+            )
+        )
+    )
+
+    acceleration_error = float(
+        np.max(
+            np.abs(
+                final_sample.acceleration
+            )
+        )
+    )
+
+    print()
+
+    print(
+        "FINAL 3D TOUCHDOWN CHECK"
+    )
+
+    print(
+        f"  position = "
+        f"{final_sample.position}"
+    )
+
+    print(
+        f"  velocity = "
+        f"{final_sample.velocity}"
+    )
+
+    print(
+        f"  accel    = "
+        f"{final_sample.acceleration}"
+    )
+
+    print(
+        f"  clearance min = "
+        f"{min_clearance:+.12e} m"
+    )
+
+    print(
+        f"  clearance max = "
+        f"{max_clearance:+.12f} m"
+    )
+
+    print(
+        f"  max boundary residual = "
+        f"{max_boundary_residual:.3e}"
+    )
+
+    tolerance = 1.0e-9
+
+    if position_error > tolerance:
+
+        raise RuntimeError(
+            "Stage-3C final position is incorrect."
+        )
+
+    if velocity_error > tolerance:
+
+        raise RuntimeError(
+            "Stage-3C terminal velocity is not zero."
+        )
+
+    if acceleration_error > tolerance:
+
+        raise RuntimeError(
+            "Stage-3C terminal acceleration is not zero."
+        )
+
+    if (
+        min_clearance
+        <
+        -SWING_VERTICAL_BOUND_TOLERANCE
+    ):
+
+        raise RuntimeError(
+            "Stage-3C vertical clearance went below zero."
+        )
+
+    if (
+        max_clearance
+        >
+        SWING_HEIGHT_MAX
+        +
+        SWING_VERTICAL_BOUND_TOLERANCE
+    ):
+
+        raise RuntimeError(
+            "Stage-3C vertical clearance exceeded z_max."
+        )
+
+    if max_boundary_residual > 1.0e-8:
+
+        raise RuntimeError(
+            "Stage-3C boundary conditions failed."
+        )
+
+    print()
+
+    separator()
+
+    print(
+        "STAGE 3C COMBINED 3D SWING VALIDATION: PASSED"
+    )
+
+    separator()
+
+    print()
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
-    run_stage3_vertical_validation()
+    run_stage3_combined_validation()
 
     return
     # ========================================================
