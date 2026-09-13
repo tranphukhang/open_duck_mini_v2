@@ -99,8 +99,6 @@ FLOOR_GEOM = "floor"
 # SIMULATION
 # ============================================================
 
-SIMULATION_DURATION = 5.0
-
 CONTROL_FREQUENCY = 1000.0
 
 SHOW_VIEWER = True
@@ -109,7 +107,7 @@ REALTIME_FACTOR = 1.0
 
 VIEWER_REFRESH_FREQUENCY = 60.0
 
-STATUS_PRINT_PERIOD = 0.5
+STATUS_PRINT_PERIOD = 0.05
 
 
 # ============================================================
@@ -247,7 +245,7 @@ SWING_TRACKING_KD = 30.0
 TOUCHDOWN_CONTACT_WINDOW = 0.02
 
 # Keep final landing target for a short settling interval.
-TOUCHDOWN_SETTLE_TIME = 0.03
+TOUCHDOWN_SETTLE_TIME = 0.0
 
 
 # ============================================================
@@ -1307,8 +1305,9 @@ def run_single_support_step_validation(
         initial_position=(
             swing_initial_position
         ),
-        initial_velocity=(
-            swing.linear_velocity
+        initial_velocity=np.zeros(
+            3,
+            dtype=float,
         ),
         initial_acceleration=np.zeros(
             3,
@@ -2950,17 +2949,6 @@ def main():
 
     print(
         "  stance-wrench regularization"
-    )
-
-    separator()
-
-    print(
-        "  wrench regularization"
-    )
-
-    print(
-        "  fallback to Rank 4 if Rank 5 "
-        "is numerically singular"
     )
 
     print()

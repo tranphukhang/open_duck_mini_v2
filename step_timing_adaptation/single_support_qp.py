@@ -518,7 +518,15 @@ class SingleSupportHierarchicalInverseDynamics:
 
         keep_rows = []
 
-        zero_row_tolerance = 1.0e-12
+        # --------------------------------------------------------
+        # Rows smaller than this have essentially no remaining
+        # effect inside the current null space.
+        #
+        # 1e-12 was too aggressive and allowed nearly-zero rows
+        # into QRQP, creating badly scaled active-set constraints.
+        # --------------------------------------------------------
+
+        zero_row_tolerance = 1.0e-9
 
         for row_index in range(
             A_reduced.shape[0]
@@ -533,13 +541,24 @@ class SingleSupportHierarchicalInverseDynamics:
                 )
             )
 
-            if row_norm > zero_row_tolerance:
+            if (
+                row_norm
+                >
+                zero_row_tolerance
+            ):
 
                 keep_rows.append(
                     row_index
                 )
 
                 continue
+
+            # ----------------------------------------------------
+            # This physical inequality has no remaining direction
+            # in the current hierarchy null space.
+            #
+            # Therefore y_base itself must already satisfy it.
+            # ----------------------------------------------------
 
             lower_value = (
                 lower_reduced[
@@ -558,10 +577,8 @@ class SingleSupportHierarchicalInverseDynamics:
                     lower_value
                 )
                 and
-                0.0
-                <
                 lower_value
-                -
+                >
                 self.config.constraint_tolerance
             ):
 
@@ -575,17 +592,19 @@ class SingleSupportHierarchicalInverseDynamics:
                     upper_value
                 )
                 and
-                0.0
-                >
                 upper_value
-                +
-                self.config.constraint_tolerance
+                <
+                -self.config.constraint_tolerance
             ):
 
                 raise RuntimeError(
                     "Locked higher-priority solution "
                     "violates a physical upper bound."
                 )
+
+        # ========================================================
+        # KEEP ACTIVE-DIRECTION ROWS
+        # ========================================================
 
         if keep_rows:
 
@@ -610,6 +629,78 @@ class SingleSupportHierarchicalInverseDynamics:
             upper_reduced = (
                 upper_reduced[
                     indices
+                ]
+            )
+
+            # ====================================================
+            # ROW NORMALIZATION
+            #
+            # Each inequality:
+            #
+            #     l <= a^T u <= h
+            #
+            # is divided by ||a||:
+            #
+            #     l/||a|| <= (a/||a||)^T u <= h/||a||
+            #
+            # This does NOT change the feasible set.
+            #
+            # It only improves numerical conditioning.
+            # ====================================================
+
+            row_norms = np.linalg.norm(
+                A_reduced,
+                axis=1,
+            )
+
+            if np.any(
+                row_norms
+                <=
+                zero_row_tolerance
+            ):
+
+                raise RuntimeError(
+                    "Unexpected near-zero reduced constraint row."
+                )
+
+            A_reduced = (
+                A_reduced
+                /
+                row_norms[
+                    :,
+                    None
+                ]
+            )
+
+            finite_lower = np.isfinite(
+                lower_reduced
+            )
+
+            finite_upper = np.isfinite(
+                upper_reduced
+            )
+
+            lower_reduced[
+                finite_lower
+            ] = (
+                lower_reduced[
+                    finite_lower
+                ]
+                /
+                row_norms[
+                    finite_lower
+                ]
+            )
+
+            upper_reduced[
+                finite_upper
+            ] = (
+                upper_reduced[
+                    finite_upper
+                ]
+                /
+                row_norms[
+                    finite_upper
                 ]
             )
 
@@ -638,7 +729,6 @@ class SingleSupportHierarchicalInverseDynamics:
             lower_reduced,
             upper_reduced,
         )
-
 
     def _solve_reduced_qp(
         self,
@@ -708,6 +798,61 @@ class SingleSupportHierarchicalInverseDynamics:
                 dtype=float,
             )
 
+        # ========================================================
+        # DIAGNOSTIC — u = 0 FEASIBILITY
+        #
+        # Since y_base comes from the previous hierarchy level,
+        # u = 0 should normally remain physically feasible.
+        # ========================================================
+
+        zero_u = np.zeros(
+            number_variables,
+            dtype=float,
+        )
+
+        zero_values = (
+            A_reduced
+            @
+            zero_u
+        )
+
+        zero_lower_violation = np.where(
+            np.isfinite(
+                lower_reduced
+            ),
+            np.maximum(
+                lower_reduced
+                -
+                zero_values,
+                0.0,
+            ),
+            0.0,
+        )
+
+        zero_upper_violation = np.where(
+            np.isfinite(
+                upper_reduced
+            ),
+            np.maximum(
+                zero_values
+                -
+                upper_reduced,
+                0.0,
+            ),
+            0.0,
+        )
+
+        zero_feasibility_violation = float(
+            max(
+                np.max(
+                    zero_lower_violation
+                ),
+                np.max(
+                    zero_upper_violation
+                ),
+            )
+        )
+
         solver = self._get_solver(
             name=name,
             number_variables=(
@@ -767,10 +912,36 @@ class SingleSupportHierarchicalInverseDynamics:
 
         if not success:
 
+            h_eigenvalues = np.linalg.eigvalsh(
+                0.5
+                *
+                (
+                    H
+                    +
+                    H.T
+                )
+            )
+
             raise RuntimeError(
                 f"{name} solver failed.\n"
                 f"status = "
-                f"{stats.get('return_status', 'unknown')}"
+                f"{stats.get('return_status', 'unknown')}\n"
+
+                f"reduced variables = "
+                f"{number_variables}\n"
+
+                f"reduced constraints = "
+                f"{A_reduced.shape[0]}\n"
+
+                f"u=0 feasibility violation = "
+                f"{zero_feasibility_violation:.6e}\n"
+
+                f"H eig min/max = "
+                f"{np.min(h_eigenvalues):.6e} / "
+                f"{np.max(h_eigenvalues):.6e}\n"
+
+                f"||A_reduced||inf = "
+                f"{np.linalg.norm(A_reduced, ord=np.inf):.6e}"
             )
 
         u = np.asarray(
@@ -1955,7 +2126,19 @@ class SingleSupportHierarchicalInverseDynamics:
         )
 
         # ====================================================
-        # RANK 4
+        # RANK 4 — POSTURE
+        #
+        # Rank 4 is only a lower-priority posture objective.
+        #
+        # If the higher-priority solution:
+        #
+        #     Rank 1 = rigid-body dynamics / feasibility
+        #     Rank 2 = stance + CoM-z
+        #     Rank 3 = swing-foot tracking
+        #
+        # leaves no numerically feasible direction for posture,
+        # keep the Rank-3 solution instead of sacrificing the
+        # planner execution task.
         # ====================================================
 
         B4, d4 = (
@@ -1964,26 +2147,67 @@ class SingleSupportHierarchicalInverseDynamics:
             )
         )
 
+        rank4_used = False
+
         start = (
             time.perf_counter()
         )
 
-        y4, violation4 = (
-            self._solve_reduced_qp(
-                name="single_rank4",
-                y_base=y3,
-                Z=Z3,
-                B=B4,
-                desired=d4,
-                A_ineq=A_ineq,
-                lower_ineq=(
-                    lower_ineq
-                ),
-                upper_ineq=(
-                    upper_ineq
-                ),
+        if Z3.shape[1] > 0:
+
+            try:
+
+                y4, violation4 = (
+                    self._solve_reduced_qp(
+                        name="single_rank4",
+
+                        y_base=y3,
+
+                        Z=Z3,
+
+                        B=B4,
+
+                        desired=d4,
+
+                        A_ineq=A_ineq,
+
+                        lower_ineq=(
+                            lower_ineq
+                        ),
+
+                        upper_ineq=(
+                            upper_ineq
+                        ),
+                    )
+                )
+
+                rank4_used = True
+
+            except RuntimeError:
+
+                # --------------------------------------------
+                # Posture is only an auxiliary task.
+                #
+                # Preserve the valid Rank-3 solution.
+                # --------------------------------------------
+
+                y4 = (
+                    y3.copy()
+                )
+
+                violation4 = (
+                    violation3
+                )
+
+        else:
+
+            y4 = (
+                y3.copy()
             )
-        )
+
+            violation4 = (
+                violation3
+            )
 
         solve_time_rank4 = (
             time.perf_counter()
@@ -2001,20 +2225,35 @@ class SingleSupportHierarchicalInverseDynamics:
             )
         )
 
-        B1234 = np.vstack(
-            (
-                B1,
-                B2,
-                B3,
-                B4,
-            )
-        )
+        # ----------------------------------------------------
+        # Only lock Rank 4 if it was actually solved.
+        #
+        # If Rank 4 fell back, there is no achieved posture
+        # objective to preserve.
+        # ----------------------------------------------------
 
-        Z4 = (
-            self._nullspace(
-                B1234
+        if rank4_used:
+
+            B1234 = np.vstack(
+                (
+                    B1,
+                    B2,
+                    B3,
+                    B4,
+                )
             )
-        )
+
+            Z4 = (
+                self._nullspace(
+                    B1234
+                )
+            )
+
+        else:
+
+            Z4 = (
+                Z3.copy()
+            )
 
         # ====================================================
         # RANK 5
@@ -2028,7 +2267,7 @@ class SingleSupportHierarchicalInverseDynamics:
 
         rank5_used = False
 
-        if Z4.shape[1] > 0:
+        if (rank4_used and Z4.shape[1] > 0):
 
             start = (
                 time.perf_counter()
