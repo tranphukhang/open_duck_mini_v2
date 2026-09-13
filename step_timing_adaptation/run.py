@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-
 import time
 
 import casadi as ca
@@ -44,8 +43,8 @@ if __package__:
     )
 
     from .whole_body_qp import (
-        DoubleSupportQPConfig,
-        WholeBodyInverseDynamicsQP,
+        DoubleSupportHQPConfig,
+        WholeBodyHierarchicalInverseDynamics,
     )
 
 else:
@@ -55,43 +54,31 @@ else:
     )
 
     from whole_body_qp import (
-        DoubleSupportQPConfig,
-        WholeBodyInverseDynamicsQP,
+        DoubleSupportHQPConfig,
+        WholeBodyHierarchicalInverseDynamics,
     )
 
 
 # ============================================================
-# MODEL OBJECT NAMES
+# MODEL NAMES
 # ============================================================
 
 ROBOT_ROOT_BODY = "base"
 
 LEFT_FOOT_SITE = "left_foot"
-
 RIGHT_FOOT_SITE = "right_foot"
 
 LEFT_FOOT_GEOM = "left_foot_bottom_tpu"
-
 RIGHT_FOOT_GEOM = "right_foot_bottom_tpu"
 
 FLOOR_GEOM = "floor"
 
 
 # ============================================================
-# SIMULATION PARAMETERS
+# SIMULATION
 # ============================================================
 
 SIMULATION_DURATION = 5.0
-
-# MuJoCo:
-#
-# dt = 0.0005 s
-# simulation frequency = 2000 Hz
-#
-# WBC:
-#
-# solve QP at 1000 Hz
-# hold torque for 2 MuJoCo simulation steps.
 
 CONTROL_FREQUENCY = 1000.0
 
@@ -105,86 +92,59 @@ STATUS_PRINT_PERIOD = 0.5
 
 
 # ============================================================
-# CONTACT PARAMETERS
+# HOME BOOTSTRAP
+# ============================================================
+
+HOME_TORQUE_BOOTSTRAP_TIME = (
+    1.0
+    /
+    CONTROL_FREQUENCY
+)
+
+
+# ============================================================
+# CONTACT
 # ============================================================
 
 FRICTION_COEFFICIENT = 0.6
 
-
-# ============================================================
-# COM HEIGHT TASK
-# ============================================================
-
-COM_HEIGHT_KP = 200.0
-
-COM_HEIGHT_KD = 25.0
+# Shrink support rectangle inward.
+SUPPORT_POLYGON_MARGIN = 0.002
+# 2 mm
 
 
 # ============================================================
-# POSTURE TASK
+# COM HEIGHT
 # ============================================================
 
-POSTURE_KP = 100.0
+COM_HEIGHT_REFERENCE = 0.2044
 
-POSTURE_KD = 20.0
-
-
-# ============================================================
-# QP WEIGHTS
-# ============================================================
-
-POSTURE_WEIGHT = 1.0e4
-
-FORCE_REGULARIZATION_WEIGHT = 1.0
-
-MOMENT_REGULARIZATION_WEIGHT = 10.0
-
-QACC_REGULARIZATION_WEIGHT = 1.0e-6
-
-TORQUE_REGULARIZATION_WEIGHT = 1.0e-8
-
-GLOBAL_REGULARIZATION_WEIGHT = 1.0e-10
+COM_HEIGHT_KP = 80.0
+COM_HEIGHT_KD = 16.0
 
 
 # ============================================================
-# COM Jdot * v NUMERICAL DERIVATIVE
+# POSTURE — LOWER PRIORITY
+# ============================================================
+
+POSTURE_KP = 50.0
+POSTURE_KD = 14.0
+
+
+# ============================================================
+# NUMERICAL
 # ============================================================
 
 COM_JDOT_EPSILON = 1.0e-6
 
 
 # ============================================================
-# PASS / FAIL CRITERIA
+# EMERGENCY
 # ============================================================
-
-MAX_ALLOWED_COM_HEIGHT_ERROR = 0.010
-# 10 mm
-
-MAX_ALLOWED_BASE_TILT_DEG = 15.0
-
-MAX_ALLOWED_FOOT_SLIP = 0.005
-# 5 mm
-
-MIN_BOTH_CONTACT_RATIO = 0.95
-
-MAX_ALLOWED_TORQUE_UTILIZATION = 1.001
-
-
-# ============================================================
-# EMERGENCY ABORT
-# ============================================================
-
-EMERGENCY_COM_DROP = 0.050
-# 50 mm
 
 EMERGENCY_BASE_TILT_DEG = 45.0
 
-
-# ============================================================
-# NUMERICAL TOLERANCE
-# ============================================================
-
-TORQUE_BOUND_TOL = 1.0e-7
+EMERGENCY_COM_DROP = 0.050
 
 
 # ============================================================
@@ -205,7 +165,7 @@ def separator():
 
 
 # ============================================================
-# MUJOCO OBJECT LOOKUP
+# OBJECT LOOKUP
 # ============================================================
 
 def require_object_id(
@@ -214,12 +174,10 @@ def require_object_id(
     object_name,
 ):
 
-    object_id = (
-        mujoco.mj_name2id(
-            model,
-            object_type,
-            object_name,
-        )
+    object_id = mujoco.mj_name2id(
+        model,
+        object_type,
+        object_name,
     )
 
     if object_id < 0:
@@ -235,22 +193,12 @@ def require_object_id(
 
 
 # ============================================================
-# ACTUATED QPOS INDICES
+# ACTUATED QPOS
 # ============================================================
 
 def build_actuated_qpos_indices(
     model,
 ):
-
-    """
-    Map each direct motor actuator to the qpos index
-    of its hinge joint.
-
-    Current robot:
-
-        14 motor actuators
-        14 hinge joints
-    """
 
     indices = []
 
@@ -269,7 +217,7 @@ def build_actuated_qpos_indices(
 
             raise RuntimeError(
                 f"Actuator {actuator_id} "
-                "does not target a valid joint."
+                "does not target a joint."
             )
 
         joint_type = int(
@@ -287,8 +235,8 @@ def build_actuated_qpos_indices(
         ):
 
             raise RuntimeError(
-                "Dynamic standing currently assumes "
-                "all actuators drive hinge joints."
+                "Controller currently assumes "
+                "direct hinge-joint actuators."
             )
 
         qpos_index = int(
@@ -316,13 +264,6 @@ def get_base_tilt_deg(
     base_body_id,
 ):
 
-    """
-    Angle between the base local +Z axis and world +Z.
-
-    This gives one scalar measure of total roll/pitch tilt
-    without depending on a particular Euler convention.
-    """
-
     rotation = (
         data.xmat[
             base_body_id
@@ -346,25 +287,21 @@ def get_base_tilt_deg(
                 2
             ],
             -1.0,
-            +1.0,
-        )
-    )
-
-    tilt_rad = (
-        np.arccos(
-            cos_tilt
+            1.0,
         )
     )
 
     return float(
         np.degrees(
-            tilt_rad
+            np.arccos(
+                cos_tilt
+            )
         )
     )
 
 
 # ============================================================
-# ACTUAL MUJOCO CONTACT
+# CONTACT CHECK
 # ============================================================
 
 def has_geom_contact(
@@ -372,17 +309,6 @@ def has_geom_contact(
     geom_a,
     geom_b,
 ):
-
-    """
-    Check whether MuJoCo currently reports at least one
-    collision contact between two geoms.
-
-    IMPORTANT:
-
-    This must be called after mj_step1(), because collision
-    detection belongs to the current position-dependent
-    pipeline.
-    """
 
     for contact_id in range(
         data.ncon
@@ -422,7 +348,367 @@ def has_geom_contact(
 
 
 # ============================================================
-# COM Jdot * v
+# SUPPORT RECTANGLE FROM COLLISION GEOM
+# ============================================================
+
+def get_support_rectangle_from_geom_aabb(
+    model,
+    data,
+    geom_name,
+    site_name,
+    safety_margin,
+):
+    """
+    Build a conservative rectangular support region from the
+    collision geom's MuJoCo AABB.
+
+    Result:
+
+        [xmin, xmax, ymin, ymax]
+
+    where x/y are WORLD-horizontal offsets measured from the
+    corresponding foot-site origin.
+
+    This is evaluated at the HOME configuration.
+
+    Since the stance-foot task later constrains the foot pose
+    in 6D, this rectangle remains the nominal contact support
+    region during the standing test.
+    """
+
+    geom_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        geom_name,
+    )
+
+    site_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_SITE,
+        site_name,
+    )
+
+    aabb = np.asarray(
+        model.geom_aabb[
+            geom_id
+        ],
+        dtype=float,
+    ).reshape(
+        2,
+        3,
+    )
+
+    center_local = (
+        aabb[
+            0,
+            :
+        ]
+    )
+
+    half_size_local = (
+        aabb[
+            1,
+            :
+        ]
+    )
+
+    geom_position_world = (
+        data.geom_xpos[
+            geom_id
+        ]
+        .copy()
+    )
+
+    geom_rotation_world = (
+        data.geom_xmat[
+            geom_id
+        ]
+        .reshape(
+            3,
+            3,
+        )
+        .copy()
+    )
+
+    site_position_world = (
+        data.site_xpos[
+            site_id
+        ]
+        .copy()
+    )
+
+    corners_world = []
+
+    for sx in (
+        -1.0,
+        +1.0,
+    ):
+
+        for sy in (
+            -1.0,
+            +1.0,
+        ):
+
+            for sz in (
+                -1.0,
+                +1.0,
+            ):
+
+                corner_local = (
+                    center_local
+                    +
+                    np.array(
+                        [
+                            sx
+                            *
+                            half_size_local[
+                                0
+                            ],
+
+                            sy
+                            *
+                            half_size_local[
+                                1
+                            ],
+
+                            sz
+                            *
+                            half_size_local[
+                                2
+                            ],
+                        ],
+                        dtype=float,
+                    )
+                )
+
+                corner_world = (
+                    geom_position_world
+                    +
+                    geom_rotation_world
+                    @
+                    corner_local
+                )
+
+                corners_world.append(
+                    corner_world
+                )
+
+    corners_world = np.asarray(
+        corners_world,
+        dtype=float,
+    )
+
+    # Horizontal offsets from wrench-reference site.
+
+    relative_xy = (
+        corners_world[
+            :,
+            0:2
+        ]
+        -
+        site_position_world[
+            0:2
+        ]
+    )
+
+    xmin = float(
+        np.min(
+            relative_xy[
+                :,
+                0
+            ]
+        )
+    )
+
+    xmax = float(
+        np.max(
+            relative_xy[
+                :,
+                0
+            ]
+        )
+    )
+
+    ymin = float(
+        np.min(
+            relative_xy[
+                :,
+                1
+            ]
+        )
+    )
+
+    ymax = float(
+        np.max(
+            relative_xy[
+                :,
+                1
+            ]
+        )
+    )
+
+    margin = float(
+        safety_margin
+    )
+
+    xmin += margin
+    xmax -= margin
+
+    ymin += margin
+    ymax -= margin
+
+    if xmin >= xmax:
+
+        raise RuntimeError(
+            f"Invalid support x-range "
+            f"for {geom_name}."
+        )
+
+    if ymin >= ymax:
+
+        raise RuntimeError(
+            f"Invalid support y-range "
+            f"for {geom_name}."
+        )
+
+    # Basic sanity check.
+    #
+    # Open Duck feet are nowhere near 0.5 m long/wide.
+
+    if (
+        xmax
+        -
+        xmin
+        >
+        0.5
+    ):
+
+        raise RuntimeError(
+            f"Suspicious support x-size "
+            f"for {geom_name}."
+        )
+
+    if (
+        ymax
+        -
+        ymin
+        >
+        0.5
+    ):
+
+        raise RuntimeError(
+            f"Suspicious support y-size "
+            f"for {geom_name}."
+        )
+
+    return np.array(
+        [
+            xmin,
+            xmax,
+            ymin,
+            ymax,
+        ],
+        dtype=float,
+    )
+
+
+# ============================================================
+# COP FROM OPTIMIZED WRENCH
+# ============================================================
+
+def compute_cop_from_wrench(
+    wrench,
+    contact_height,
+):
+
+    wrench = np.asarray(
+        wrench,
+        dtype=float,
+    )
+
+    fx = float(
+        wrench[
+            0
+        ]
+    )
+
+    fy = float(
+        wrench[
+            1
+        ]
+    )
+
+    fz = float(
+        wrench[
+            2
+        ]
+    )
+
+    mx = float(
+        wrench[
+            3
+        ]
+    )
+
+    my = float(
+        wrench[
+            4
+        ]
+    )
+
+    if (
+        fz
+        <=
+        1.0e-6
+    ):
+
+        return np.array(
+            [
+                np.nan,
+                np.nan,
+            ],
+            dtype=float,
+        )
+
+    h = float(
+        contact_height
+    )
+
+    x_cop = (
+        -(
+            my
+            +
+            h
+            *
+            fx
+        )
+        /
+        fz
+    )
+
+    y_cop = (
+        (
+            mx
+            -
+            h
+            *
+            fy
+        )
+        /
+        fz
+    )
+
+    return np.array(
+        [
+            x_cop,
+            y_cop,
+        ],
+        dtype=float,
+    )
+
+
+# ============================================================
+# COM Jdot*v
 # ============================================================
 
 def compute_com_jdot_v(
@@ -433,33 +719,6 @@ def compute_com_jdot_v(
     scratch_minus,
     epsilon,
 ):
-
-    """
-    Compute:
-
-        Jdot_com(q, v) * v
-
-    using a central directional finite difference.
-
-    Since:
-
-        Jdot = dJ/dq * qdot,
-
-    evaluate the CoM Jacobian at:
-
-        q_plus  = q (+) epsilon * v
-
-        q_minus = q (+) (-epsilon) * v
-
-    where (+) is MuJoCo's manifold-aware integration.
-
-    This is important because the floating base contains a
-    quaternion and therefore nq != nv.
-
-    The scratch MjData objects are completely separate from
-    the real simulation MjData, so this computation cannot
-    corrupt the current simulation pipeline.
-    """
 
     qvel = (
         data.qvel.copy()
@@ -479,7 +738,7 @@ def compute_com_jdot_v(
         )
 
     # ========================================================
-    # PLUS CONFIGURATION
+    # PLUS
     # ========================================================
 
     q_plus = (
@@ -502,15 +761,8 @@ def compute_com_jdot_v(
     )
 
     scratch_plus.ctrl[:] = (
-        0.0
+        data.ctrl
     )
-
-    # Scratch state only.
-    #
-    # mj_forward does NOT integrate.
-    #
-    # It makes all derived quantities in scratch_plus
-    # consistent with q_plus and qvel.
 
     mujoco.mj_forward(
         model,
@@ -533,7 +785,7 @@ def compute_com_jdot_v(
     )
 
     # ========================================================
-    # MINUS CONFIGURATION
+    # MINUS
     # ========================================================
 
     q_minus = (
@@ -556,7 +808,7 @@ def compute_com_jdot_v(
     )
 
     scratch_minus.ctrl[:] = (
-        0.0
+        data.ctrl
     )
 
     mujoco.mj_forward(
@@ -579,10 +831,6 @@ def compute_com_jdot_v(
         root_body_id,
     )
 
-    # ========================================================
-    # CENTRAL DIRECTIONAL DERIVATIVE
-    # ========================================================
-
     Jdot = (
         J_plus
         -
@@ -601,21 +849,26 @@ def compute_com_jdot_v(
 
 
 # ============================================================
-# DYNAMIC STANDING LOOP
+# DYNAMIC DOUBLE-SUPPORT TEST
 # ============================================================
 
-def run_dynamic_standing(
+def run_double_support(
     model,
     data,
     dynamics,
     controller,
+
     actuated_qpos_indices,
     posture_reference,
-    com_height_reference,
-    left_foot_reference,
-    right_foot_reference,
+
+    home_torque,
+
     torque_lower,
     torque_upper,
+
+    left_support_bounds,
+    right_support_bounds,
+
     viewer=None,
 ):
 
@@ -633,7 +886,7 @@ def run_dynamic_standing(
         dt
     )
 
-    control_period = (
+    requested_control_period = (
         1.0
         /
         CONTROL_FREQUENCY
@@ -641,7 +894,7 @@ def run_dynamic_standing(
 
     control_decimation = int(
         round(
-            control_period
+            requested_control_period
             /
             dt
         )
@@ -650,8 +903,8 @@ def run_dynamic_standing(
     if control_decimation < 1:
 
         raise RuntimeError(
-            "Requested control frequency is greater than "
-            "the MuJoCo simulation frequency."
+            "WBC frequency is greater "
+            "than MuJoCo frequency."
         )
 
     actual_control_period = (
@@ -660,27 +913,33 @@ def run_dynamic_standing(
         dt
     )
 
-    actual_control_frequency = (
-        1.0
-        /
-        actual_control_period
-    )
-
-    timing_error = abs(
-        actual_control_period
-        -
-        control_period
-    )
-
-    if timing_error > 1.0e-12:
+    if (
+        abs(
+            actual_control_period
+            -
+            requested_control_period
+        )
+        >
+        1.0e-12
+    ):
 
         raise RuntimeError(
-            "The requested WBC frequency is not an integer "
-            "decimation of the MuJoCo simulation frequency.\n"
-            f"simulation dt       = {dt}\n"
-            f"requested WBC dt    = {control_period}\n"
-            f"realizable WBC dt   = {actual_control_period}"
+            "CONTROL_FREQUENCY is not an integer "
+            "decimation of simulation frequency."
         )
+
+    bootstrap_steps = int(
+        round(
+            HOME_TORQUE_BOOTSTRAP_TIME
+            /
+            dt
+        )
+    )
+
+    bootstrap_steps = max(
+        bootstrap_steps,
+        1,
+    )
 
     print()
 
@@ -690,93 +949,81 @@ def run_dynamic_standing(
     )
 
     print(
-        f"requested WBC        = "
+        f"HQP frequency        = "
         f"{CONTROL_FREQUENCY:.1f} Hz"
     )
 
     print(
-        f"actual WBC           = "
-        f"{actual_control_frequency:.1f} Hz"
-    )
-
-    print(
-        f"QP every             = "
+        f"HQP every            = "
         f"{control_decimation} MuJoCo steps"
     )
 
+    print(
+        f"HOME bootstrap       = "
+        f"{1000.0 * bootstrap_steps * dt:.3f} ms"
+    )
+
     # ========================================================
-    # OBJECT IDS
+    # IDS
     # ========================================================
 
-    base_body_id = (
-        require_object_id(
-            model,
-            mujoco.mjtObj.mjOBJ_BODY,
-            ROBOT_ROOT_BODY,
-        )
+    base_body_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_BODY,
+        ROBOT_ROOT_BODY,
     )
 
-    left_site_id = (
-        require_object_id(
-            model,
-            mujoco.mjtObj.mjOBJ_SITE,
-            LEFT_FOOT_SITE,
-        )
+    left_site_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_SITE,
+        LEFT_FOOT_SITE,
     )
 
-    right_site_id = (
-        require_object_id(
-            model,
-            mujoco.mjtObj.mjOBJ_SITE,
-            RIGHT_FOOT_SITE,
-        )
+    right_site_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_SITE,
+        RIGHT_FOOT_SITE,
     )
 
-    left_geom_id = (
-        require_object_id(
-            model,
-            mujoco.mjtObj.mjOBJ_GEOM,
-            LEFT_FOOT_GEOM,
-        )
+    left_geom_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        LEFT_FOOT_GEOM,
     )
 
-    right_geom_id = (
-        require_object_id(
-            model,
-            mujoco.mjtObj.mjOBJ_GEOM,
-            RIGHT_FOOT_GEOM,
-        )
+    right_geom_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        RIGHT_FOOT_GEOM,
     )
 
-    floor_geom_id = (
-        require_object_id(
-            model,
-            mujoco.mjtObj.mjOBJ_GEOM,
-            FLOOR_GEOM,
-        )
+    floor_geom_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        FLOOR_GEOM,
+    )
+
+    floor_plane_z = float(
+        data.geom_xpos[
+            floor_geom_id,
+            2
+        ]
     )
 
     # ========================================================
     # SCRATCH DATA
-    #
-    # Used only for numerical Jdot_com * v.
-    # They never participate in the actual simulation.
     # ========================================================
 
-    scratch_plus = (
-        mujoco.MjData(
-            model
-        )
+    scratch_plus = mujoco.MjData(
+        model
     )
 
-    scratch_minus = (
-        mujoco.MjData(
-            model
-        )
+    scratch_minus = mujoco.MjData(
+        model
     )
 
     # ========================================================
-    # LOW-PRIORITY CONTACT-WRENCH REFERENCES
+    # CONTACT WRENCH REFERENCE
     # ========================================================
 
     initial_com = (
@@ -794,7 +1041,7 @@ def run_dynamic_standing(
         )
     )
 
-    nominal_vertical_force = (
+    half_weight = (
         0.5
         *
         robot_weight
@@ -804,7 +1051,8 @@ def run_dynamic_standing(
         [
             0.0,
             0.0,
-            nominal_vertical_force,
+            half_weight,
+
             0.0,
             0.0,
             0.0,
@@ -817,42 +1065,61 @@ def run_dynamic_standing(
     )
 
     # ========================================================
-    # METRICS
+    # INITIAL FOOT POSITIONS
     # ========================================================
 
-    max_com_height_error = 0.0
+    left_foot_initial = (
+        data.site_xpos[
+            left_site_id
+        ]
+        .copy()
+    )
 
-    max_base_tilt_deg = 0.0
-
-    max_left_slip = 0.0
-
-    max_right_slip = 0.0
-
-    max_torque_utilization = 0.0
-
-    qp_solve_times = []
-
-    qp_solutions = 0
-
-    fresh_state_samples = 0
-
-    both_contact_samples = 0
+    right_foot_initial = (
+        data.site_xpos[
+            right_site_id
+        ]
+        .copy()
+    )
 
     # ========================================================
-    # HELD CONTROL
+    # INITIAL CONTROL
     # ========================================================
 
-    last_tau = np.zeros(
-        model.nu,
-        dtype=float,
+    last_tau = (
+        home_torque.copy()
     )
 
     data.ctrl[:] = (
         last_tau
     )
 
+    last_solution = None
+
     # ========================================================
-    # STATUS / VIEWER
+    # METRICS
+    # ========================================================
+
+    max_z_error = 0.0
+
+    max_tilt = 0.0
+
+    max_left_slip = 0.0
+
+    max_right_slip = 0.0
+
+    max_tau_utilization = 0.0
+
+    both_contact_samples = 0
+
+    total_samples = 0
+
+    total_hqp_times = []
+
+    rank5_fallback_count = 0
+
+    # ========================================================
+    # TIME
     # ========================================================
 
     simulation_start_time = float(
@@ -865,7 +1132,7 @@ def run_dynamic_standing(
         SIMULATION_DURATION
     )
 
-    next_status_time = (
+    next_print_time = (
         simulation_start_time
         +
         STATUS_PRINT_PERIOD
@@ -888,35 +1155,7 @@ def run_dynamic_standing(
     step_index = 0
 
     # ========================================================
-    # MAIN LOOP
-    # ========================================================
-    #
-    # CRITICAL MUJOCO PIPELINE:
-    #
-    #      state k
-    #         |
-    #         v
-    #     mj_step1()
-    #         |
-    #         | fresh position/velocity-dependent quantities
-    #         |
-    #         +--> monitoring
-    #         |
-    #         +--> WBC / QP
-    #         |
-    #         v
-    #     data.ctrl = tau
-    #         |
-    #         v
-    #     mj_step2()
-    #         |
-    #         v
-    #      state k+1
-    #
-    #
-    # No derived quantities are read after mj_step2().
-    # They are refreshed by mj_step1() at the start of
-    # the next iteration.
+    # LOOP
     # ========================================================
 
     while (
@@ -938,26 +1177,7 @@ def run_dynamic_standing(
             break
 
         # ====================================================
-        # MUJOCO STEP 1
-        # ====================================================
-        #
-        # Updates quantities depending on the CURRENT:
-        #
-        #   qpos
-        #   qvel
-        #
-        # including:
-        #
-        #   kinematics
-        #   body/site poses
-        #   subtree CoM
-        #   inertia
-        #   collisions/contact geometry
-        #   velocity-dependent quantities
-        #   qfrc_bias
-        #   qfrc_passive
-        #
-        # It does NOT integrate the state.
+        # STEP 1
         # ====================================================
 
         mujoco.mj_step1(
@@ -970,32 +1190,31 @@ def run_dynamic_standing(
         )
 
         # ====================================================
-        # EVERYTHING READ BELOW BELONGS TO THE SAME
-        # FRESH CURRENT STATE.
+        # GROUND-TRUTH STATE
         # ====================================================
 
-        com_position = (
-            data.subtree_com[
-                base_body_id
-            ]
-            .copy()
+        com = (
+            dynamics.get_com_kinematics(
+                data,
+                ROBOT_ROOT_BODY,
+            )
         )
 
-        left_position = (
-            data.site_xpos[
-                left_site_id
-            ]
-            .copy()
+        left = (
+            dynamics.get_site_kinematics(
+                data,
+                LEFT_FOOT_SITE,
+            )
         )
 
-        right_position = (
-            data.site_xpos[
-                right_site_id
-            ]
-            .copy()
+        right = (
+            dynamics.get_site_kinematics(
+                data,
+                RIGHT_FOOT_SITE,
+            )
         )
 
-        base_tilt_deg = (
+        tilt = (
             get_base_tilt_deg(
                 data,
                 base_body_id,
@@ -1018,27 +1237,13 @@ def run_dynamic_standing(
             )
         )
 
-        # ====================================================
-        # CURRENT-STATE MONITORING
-        # ====================================================
-
-        com_height_error_abs = abs(
-            float(
-                com_position[
-                    2
-                ]
-            )
-            -
-            com_height_reference
-        )
-
         left_slip = float(
             np.linalg.norm(
-                left_position[
+                left.position[
                     0:2
                 ]
                 -
-                left_foot_reference[
+                left_foot_initial[
                     0:2
                 ]
             )
@@ -1046,15 +1251,349 @@ def run_dynamic_standing(
 
         right_slip = float(
             np.linalg.norm(
-                right_position[
+                right.position[
                     0:2
                 ]
                 -
-                right_foot_reference[
+                right_foot_initial[
                     0:2
                 ]
             )
         )
+
+        z_error = float(
+            COM_HEIGHT_REFERENCE
+            -
+            com.position[
+                2
+            ]
+        )
+
+        left_contact_height = float(
+            left.position[
+                2
+            ]
+            -
+            floor_plane_z
+        )
+
+        right_contact_height = float(
+            right.position[
+                2
+            ]
+            -
+            floor_plane_z
+        )
+
+        # ====================================================
+        # METRICS
+        # ====================================================
+
+        max_z_error = max(
+            max_z_error,
+            abs(
+                z_error
+            ),
+        )
+
+        max_tilt = max(
+            max_tilt,
+            tilt,
+        )
+
+        max_left_slip = max(
+            max_left_slip,
+            left_slip,
+        )
+
+        max_right_slip = max(
+            max_right_slip,
+            right_slip,
+        )
+
+        total_samples += 1
+
+        if (
+            left_contact
+            and
+            right_contact
+        ):
+
+            both_contact_samples += 1
+
+        # ====================================================
+        # EMERGENCY
+        # ====================================================
+
+        if (
+            tilt
+            >
+            EMERGENCY_BASE_TILT_DEG
+        ):
+
+            raise RuntimeError(
+                "Emergency base tilt at "
+                f"t={current_time:.6f} s."
+            )
+
+        if (
+            com.position[
+                2
+            ]
+            <
+            COM_HEIGHT_REFERENCE
+            -
+            EMERGENCY_COM_DROP
+        ):
+
+            raise RuntimeError(
+                "Emergency CoM drop at "
+                f"t={current_time:.6f} s."
+            )
+
+        # ====================================================
+        # HOME TORQUE BOOTSTRAP
+        # ====================================================
+
+        if (
+            step_index
+            <
+            bootstrap_steps
+        ):
+
+            last_tau = (
+                home_torque.copy()
+            )
+
+        # ====================================================
+        # HQP UPDATE
+        # ====================================================
+
+        elif (
+            (
+                step_index
+                -
+                bootstrap_steps
+            )
+            %
+            control_decimation
+            ==
+            0
+        ):
+
+            terms = (
+                dynamics.compute(
+                    data,
+                    forward=False,
+                )
+            )
+
+            # ------------------------------------------------
+            # CoM Jdot*v
+            # ------------------------------------------------
+
+            com_jdot_v = (
+                compute_com_jdot_v(
+                    model=model,
+
+                    data=data,
+
+                    root_body_id=(
+                        base_body_id
+                    ),
+
+                    scratch_plus=(
+                        scratch_plus
+                    ),
+
+                    scratch_minus=(
+                        scratch_minus
+                    ),
+
+                    epsilon=(
+                        COM_JDOT_EPSILON
+                    ),
+                )
+            )
+
+            # ------------------------------------------------
+            # Rank 2:
+            # CoM height acceleration
+            # ------------------------------------------------
+
+            desired_com_acceleration_z = (
+                COM_HEIGHT_KP
+                *
+                (
+                    COM_HEIGHT_REFERENCE
+                    -
+                    com.position[
+                        2
+                    ]
+                )
+                -
+                COM_HEIGHT_KD
+                *
+                com.velocity[
+                    2
+                ]
+            )
+
+            # ------------------------------------------------
+            # Rank 4:
+            # posture acceleration
+            # ------------------------------------------------
+
+            q_actuated = (
+                data.qpos[
+                    actuated_qpos_indices
+                ]
+            )
+
+            v_actuated = (
+                data.qvel[
+                    dynamics.actuated_dof_indices
+                ]
+            )
+
+            desired_posture_acceleration = (
+                POSTURE_KP
+                *
+                (
+                    posture_reference
+                    -
+                    q_actuated
+                )
+                -
+                POSTURE_KD
+                *
+                v_actuated
+            )
+
+            # ------------------------------------------------
+            # Solve HQP
+            # ------------------------------------------------
+
+            hqp_start = (
+                time.perf_counter()
+            )
+
+            solution = (
+                controller.solve_double_support(
+
+                    mass_matrix=(
+                        terms.mass_matrix
+                    ),
+
+                    effective_bias=(
+                        terms.effective_bias
+                    ),
+
+                    selection_matrix=(
+                        terms.selection_matrix
+                    ),
+
+                    left_jacobian=(
+                        left.jacobian
+                    ),
+
+                    left_jdot_v=(
+                        left.jacobian_dot_velocity
+                    ),
+
+                    right_jacobian=(
+                        right.jacobian
+                    ),
+
+                    right_jdot_v=(
+                        right.jacobian_dot_velocity
+                    ),
+
+                    com_jacobian=(
+                        com.jacobian
+                    ),
+
+                    com_jdot_v_z=(
+                        com_jdot_v[
+                            2
+                        ]
+                    ),
+
+                    desired_com_acceleration_z=(
+                        desired_com_acceleration_z
+                    ),
+
+                    desired_posture_acceleration=(
+                        desired_posture_acceleration
+                    ),
+
+                    left_wrench_reference=(
+                        left_wrench_reference
+                    ),
+
+                    right_wrench_reference=(
+                        right_wrench_reference
+                    ),
+
+                    left_support_bounds=(
+                        left_support_bounds
+                    ),
+
+                    right_support_bounds=(
+                        right_support_bounds
+                    ),
+
+                    left_contact_height=(
+                        left_contact_height
+                    ),
+
+                    right_contact_height=(
+                        right_contact_height
+                    ),
+
+                    torque_lower=(
+                        torque_lower
+                    ),
+
+                    torque_upper=(
+                        torque_upper
+                    ),
+                )
+            )
+
+            hqp_elapsed = (
+                time.perf_counter()
+                -
+                hqp_start
+            )
+
+            total_hqp_times.append(
+                hqp_elapsed
+            )
+
+            if not solution.rank5_used:
+
+                rank5_fallback_count += 1
+
+            last_solution = (
+                solution
+            )
+
+            last_tau = (
+                solution.torque.copy()
+            )
+
+        # ====================================================
+        # APPLY TORQUE
+        # ====================================================
+
+        data.ctrl[:] = (
+            last_tau
+        )
+
+        # ====================================================
+        # TORQUE UTILIZATION
+        # ====================================================
 
         torque_limit_abs = np.maximum(
             np.abs(
@@ -1075,488 +1614,165 @@ def run_dynamic_standing(
             )
         )
 
-        max_com_height_error = max(
-            max_com_height_error,
-            com_height_error_abs,
-        )
-
-        max_base_tilt_deg = max(
-            max_base_tilt_deg,
-            base_tilt_deg,
-        )
-
-        max_left_slip = max(
-            max_left_slip,
-            left_slip,
-        )
-
-        max_right_slip = max(
-            max_right_slip,
-            right_slip,
-        )
-
-        max_torque_utilization = max(
-            max_torque_utilization,
+        max_tau_utilization = max(
+            max_tau_utilization,
             torque_utilization,
         )
 
-        fresh_state_samples += 1
-
-        if (
-            left_contact
-            and
-            right_contact
-        ):
-
-            both_contact_samples += 1
-
         # ====================================================
-        # EMERGENCY CHECK
-        # ====================================================
-
-        if (
-            com_position[
-                2
-            ]
-            <
-            com_height_reference
-            -
-            EMERGENCY_COM_DROP
-        ):
-
-            raise RuntimeError(
-                "\nEmergency stop:\n"
-                f"  t = {current_time:.6f} s\n"
-                "  CoM dropped more than "
-                f"{1000.0 * EMERGENCY_COM_DROP:.1f} mm."
-            )
-
-        if (
-            base_tilt_deg
-            >
-            EMERGENCY_BASE_TILT_DEG
-        ):
-
-            raise RuntimeError(
-                "\nEmergency stop:\n"
-                f"  t = {current_time:.6f} s\n"
-                f"  base tilt = "
-                f"{base_tilt_deg:.3f} deg."
-            )
-
-        if not np.all(
-            np.isfinite(
-                data.qpos
-            )
-        ):
-
-            raise RuntimeError(
-                f"NaN/Inf in qpos at "
-                f"t={current_time:.6f} s."
-            )
-
-        if not np.all(
-            np.isfinite(
-                data.qvel
-            )
-        ):
-
-            raise RuntimeError(
-                f"NaN/Inf in qvel at "
-                f"t={current_time:.6f} s."
-            )
-
-        # ====================================================
-        # 1 kHz WBC UPDATE
-        # ====================================================
-
-        if (
-            step_index
-            %
-            control_decimation
-            ==
-            0
-        ):
-
-            # =================================================
-            # DYNAMICS FROM CURRENT mj_step1 STATE
-            # =================================================
-            #
-            # IMPORTANT:
-            #
-            # forward=False.
-            #
-            # Do NOT call mj_forward() here because mj_step1()
-            # has already produced the current position- and
-            # velocity-dependent dynamics quantities.
-            # =================================================
-
-            terms = (
-                dynamics.compute(
-                    data,
-                    forward=False,
-                )
-            )
-
-            left = (
-                dynamics.get_site_kinematics(
-                    data,
-                    LEFT_FOOT_SITE,
-                )
-            )
-
-            right = (
-                dynamics.get_site_kinematics(
-                    data,
-                    RIGHT_FOOT_SITE,
-                )
-            )
-
-            com = (
-                dynamics.get_com_kinematics(
-                    data,
-                    ROBOT_ROOT_BODY,
-                )
-            )
-
-            # =================================================
-            # COM Jdot * v
-            # =================================================
-
-            com_jdot_v = (
-                compute_com_jdot_v(
-                    model=(
-                        model
-                    ),
-
-                    data=(
-                        data
-                    ),
-
-                    root_body_id=(
-                        base_body_id
-                    ),
-
-                    scratch_plus=(
-                        scratch_plus
-                    ),
-
-                    scratch_minus=(
-                        scratch_minus
-                    ),
-
-                    epsilon=(
-                        COM_JDOT_EPSILON
-                    ),
-                )
-            )
-
-            # =================================================
-            # RANK 2:
-            # CONSTANT COM HEIGHT
-            # =================================================
-
-            com_height_error = (
-                com_height_reference
-                -
-                com.position[
-                    2
-                ]
-            )
-
-            com_vertical_velocity = (
-                com.velocity[
-                    2
-                ]
-            )
-
-            desired_com_acceleration_z = (
-                COM_HEIGHT_KP
-                *
-                com_height_error
-                -
-                COM_HEIGHT_KD
-                *
-                com_vertical_velocity
-            )
-
-            # =================================================
-            # RANK 4:
-            # POSTURE
-            # =================================================
-
-            q_actuated = (
-                data.qpos[
-                    actuated_qpos_indices
-                ]
-            )
-
-            v_actuated = (
-                data.qvel[
-                    dynamics.actuated_dof_indices
-                ]
-            )
-
-            posture_error = (
-                posture_reference
-                -
-                q_actuated
-            )
-
-            desired_posture_acceleration = (
-                POSTURE_KP
-                *
-                posture_error
-                -
-                POSTURE_KD
-                *
-                v_actuated
-            )
-
-            # =================================================
-            # SOLVE INVERSE-DYNAMICS QP
-            # =================================================
-
-            qp_start = (
-                time.perf_counter()
-            )
-
-            try:
-
-                solution = (
-                    controller.solve_double_support(
-                        mass_matrix=(
-                            terms.mass_matrix
-                        ),
-
-                        effective_bias=(
-                            terms.effective_bias
-                        ),
-
-                        selection_matrix=(
-                            terms.selection_matrix
-                        ),
-
-                        left_jacobian=(
-                            left.jacobian
-                        ),
-
-                        left_jdot_v=(
-                            left.jacobian_dot_velocity
-                        ),
-
-                        right_jacobian=(
-                            right.jacobian
-                        ),
-
-                        right_jdot_v=(
-                            right.jacobian_dot_velocity
-                        ),
-
-                        com_jacobian=(
-                            com.jacobian
-                        ),
-
-                        com_jdot_v_z=(
-                            com_jdot_v[
-                                2
-                            ]
-                        ),
-
-                        desired_com_acceleration_z=(
-                            desired_com_acceleration_z
-                        ),
-
-                        desired_posture_acceleration=(
-                            desired_posture_acceleration
-                        ),
-
-                        left_wrench_reference=(
-                            left_wrench_reference
-                        ),
-
-                        right_wrench_reference=(
-                            right_wrench_reference
-                        ),
-
-                        torque_lower=(
-                            torque_lower
-                        ),
-
-                        torque_upper=(
-                            torque_upper
-                        ),
-                    )
-                )
-
-            except Exception:
-
-                print()
-
-                separator()
-
-                print(
-                    "QP FAILURE"
-                )
-
-                separator()
-
-                print()
-
-                print(
-                    f"time = "
-                    f"{current_time:.6f} s"
-                )
-
-                print(
-                    f"CoM height error = "
-                    f"{1000.0 * com_height_error:.3f} mm"
-                )
-
-                print(
-                    f"base tilt = "
-                    f"{base_tilt_deg:.3f} deg"
-                )
-
-                print(
-                    f"left contact  = "
-                    f"{left_contact}"
-                )
-
-                print(
-                    f"right contact = "
-                    f"{right_contact}"
-                )
-
-                print()
-
-                raise
-
-            qp_elapsed = (
-                time.perf_counter()
-                -
-                qp_start
-            )
-
-            qp_solve_times.append(
-                qp_elapsed
-            )
-
-            qp_solutions += 1
-
-            # =================================================
-            # TORQUE
-            # =================================================
-
-            tau = (
-                solution.torque.copy()
-            )
-
-            if np.any(
-                tau
-                <
-                torque_lower
-                -
-                TORQUE_BOUND_TOL
-            ):
-
-                raise RuntimeError(
-                    f"QP violated lower torque bound "
-                    f"at t={current_time:.6f} s."
-                )
-
-            if np.any(
-                tau
-                >
-                torque_upper
-                +
-                TORQUE_BOUND_TOL
-            ):
-
-                raise RuntimeError(
-                    f"QP violated upper torque bound "
-                    f"at t={current_time:.6f} s."
-                )
-
-            # Numerical guard only.
-            #
-            # Hard bounds are already inside the QP.
-
-            last_tau = np.clip(
-                tau,
-                torque_lower,
-                torque_upper,
-            )
-
-            # =================================================
-            # CONTROL FOR CURRENT STATE
-            # =================================================
-
-            data.ctrl[:] = (
-                last_tau
-            )
-
-        # ====================================================
-        # STATUS PRINT
+        # PRINT STATUS
         # ====================================================
 
         if (
             current_time
             >=
-            next_status_time
+            next_print_time
             -
             0.5
             *
             dt
         ):
 
-            if qp_solve_times:
+            if last_solution is None:
 
-                latest_qp_ms = (
-                    1000.0
-                    *
-                    qp_solve_times[
-                        -1
+                fz_left = 0.0
+                fz_right = 0.0
+
+                rank2 = 0.0
+                rank4 = 0.0
+                rank5 = 0.0
+
+                rank5_mode = "HOME"
+
+                hqp_ms = 0.0
+
+                cop_left = np.array(
+                    [
+                        np.nan,
+                        np.nan,
                     ]
+                )
+
+                cop_right = (
+                    cop_left.copy()
                 )
 
             else:
 
-                latest_qp_ms = (
-                    0.0
+                fz_left = float(
+                    last_solution.left_wrench[
+                        2
+                    ]
+                )
+
+                fz_right = float(
+                    last_solution.right_wrench[
+                        2
+                    ]
+                )
+
+                rank2 = (
+                    last_solution.rank2_residual
+                )
+
+                rank4 = (
+                    last_solution.rank4_residual
+                )
+
+                rank5 = (
+                    last_solution.rank5_residual
+                )
+
+                rank5_mode = (
+                    "ON"
+                    if
+                    last_solution.rank5_used
+                    else
+                    "FALLBACK"
+                )
+
+                hqp_ms = (
+                    1000.0
+                    *
+                    (
+                        last_solution.solve_time_rank2
+                        +
+                        last_solution.solve_time_rank4
+                        +
+                        last_solution.solve_time_rank5
+                    )
+                )
+
+                cop_left = (
+                    compute_cop_from_wrench(
+                        last_solution.left_wrench,
+                        left_contact_height,
+                    )
+                )
+
+                cop_right = (
+                    compute_cop_from_wrench(
+                        last_solution.right_wrench,
+                        right_contact_height,
+                    )
                 )
 
             print(
                 f"t={current_time:5.2f} s"
-                f" | z_err="
-                f"{1000.0 * com_height_error_abs:7.3f} mm"
+
+                f" | zerr="
+                f"{1000.0 * abs(z_error):7.3f} mm"
+
                 f" | tilt="
-                f"{base_tilt_deg:6.3f} deg"
+                f"{tilt:6.3f} deg"
+
                 f" | slipL="
                 f"{1000.0 * left_slip:7.3f} mm"
+
                 f" | slipR="
                 f"{1000.0 * right_slip:7.3f} mm"
-                f" | contact="
-                f"{int(left_contact)}/{int(right_contact)}"
+
+                f" | c="
+                f"{int(left_contact)}/"
+                f"{int(right_contact)}"
+
                 f" | tau="
                 f"{100.0 * torque_utilization:6.2f}%"
-                f" | QP="
-                f"{latest_qp_ms:7.3f} ms"
+
+                f" | Fz="
+                f"{fz_left:6.2f}/"
+                f"{fz_right:6.2f}"
+
+                f" | CoPL="
+                f"({1000.0 * cop_left[0]:6.1f},"
+                f"{1000.0 * cop_left[1]:6.1f})mm"
+
+                f" | CoPR="
+                f"({1000.0 * cop_right[0]:6.1f},"
+                f"{1000.0 * cop_right[1]:6.1f})mm"
+
+                f" | R2="
+                f"{rank2:.2e}"
+
+                f" | R4="
+                f"{rank4:.2e}"
+
+                f" | R5="
+                f"{rank5:.2e}"
+
+                f" | L5="
+                f"{rank5_mode}"
+
+                f" | HQP="
+                f"{hqp_ms:6.3f} ms"
             )
 
-            next_status_time += (
+            next_print_time += (
                 STATUS_PRINT_PERIOD
             )
 
         # ====================================================
         # VIEWER
-        # ====================================================
-        #
-        # viewer.sync() is intentionally performed BEFORE
-        # mj_step2().
-        #
-        # Therefore body/site transforms are still synchronized
-        # with current qpos/qvel.
         # ====================================================
 
         if (
@@ -1577,10 +1793,6 @@ def run_dynamic_standing(
                 viewer_period
             )
 
-            # -----------------------------------------------
-            # Optional real-time pacing
-            # -----------------------------------------------
-
             simulation_elapsed = (
                 current_time
                 -
@@ -1593,7 +1805,7 @@ def run_dynamic_standing(
                 REALTIME_FACTOR
             )
 
-            actual_wall_elapsed = (
+            current_wall_elapsed = (
                 time.perf_counter()
                 -
                 wall_start
@@ -1602,7 +1814,7 @@ def run_dynamic_standing(
             sleep_time = (
                 target_wall_elapsed
                 -
-                actual_wall_elapsed
+                current_wall_elapsed
             )
 
             if sleep_time > 0.0:
@@ -1612,38 +1824,7 @@ def run_dynamic_standing(
                 )
 
         # ====================================================
-        # MUJOCO STEP 2
-        # ====================================================
-        #
-        # Uses current:
-        #
-        #     qpos_k
-        #     qvel_k
-        #     ctrl_k
-        #
-        # then computes:
-        #
-        #     actuation
-        #     acceleration
-        #     constraints
-        #
-        # and integrates:
-        #
-        #     state k -> state k+1
-        #
-        # CRITICAL:
-        #
-        # DO NOT read:
-        #
-        #     site_xpos
-        #     xmat
-        #     subtree_com
-        #     contact
-        #
-        # after this call.
-        #
-        # They will be refreshed by mj_step1() at the beginning
-        # of the next loop iteration.
+        # STEP 2
         # ====================================================
 
         mujoco.mj_step2(
@@ -1654,16 +1835,7 @@ def run_dynamic_standing(
         step_index += 1
 
     # ========================================================
-    # FINAL STATE REFRESH
-    # ========================================================
-    #
-    # The final call to mj_step2() has integrated qpos/qvel
-    # to the final state.
-    #
-    # Refresh position/velocity-dependent derived quantities
-    # once before inspecting the final state.
-    #
-    # This does NOT advance simulation time.
+    # FINAL FRESH STATE
     # ========================================================
 
     mujoco.mj_step1(
@@ -1671,32 +1843,28 @@ def run_dynamic_standing(
         data,
     )
 
-    final_time = float(
-        data.time
+    final_com = (
+        dynamics.get_com_kinematics(
+            data,
+            ROBOT_ROOT_BODY,
+        )
     )
 
-    final_com_position = (
-        data.subtree_com[
-            base_body_id
-        ]
-        .copy()
+    final_left = (
+        dynamics.get_site_kinematics(
+            data,
+            LEFT_FOOT_SITE,
+        )
     )
 
-    final_left_position = (
-        data.site_xpos[
-            left_site_id
-        ]
-        .copy()
+    final_right = (
+        dynamics.get_site_kinematics(
+            data,
+            RIGHT_FOOT_SITE,
+        )
     )
 
-    final_right_position = (
-        data.site_xpos[
-            right_site_id
-        ]
-        .copy()
-    )
-
-    final_base_tilt_deg = (
+    final_tilt = (
         get_base_tilt_deg(
             data,
             base_body_id,
@@ -1719,183 +1887,188 @@ def run_dynamic_standing(
         )
     )
 
-    final_com_height_error = abs(
-        float(
-            final_com_position[
-                2
-            ]
-        )
-        -
-        com_height_reference
-    )
-
-    final_left_slip = float(
-        np.linalg.norm(
-            final_left_position[
-                0:2
-            ]
-            -
-            left_foot_reference[
-                0:2
-            ]
-        )
-    )
-
-    final_right_slip = float(
-        np.linalg.norm(
-            final_right_position[
-                0:2
-            ]
-            -
-            right_foot_reference[
-                0:2
-            ]
-        )
-    )
-
-    # Include final state in extrema.
-
-    max_com_height_error = max(
-        max_com_height_error,
-        final_com_height_error,
-    )
-
-    max_base_tilt_deg = max(
-        max_base_tilt_deg,
-        final_base_tilt_deg,
-    )
-
-    max_left_slip = max(
-        max_left_slip,
-        final_left_slip,
-    )
-
-    max_right_slip = max(
-        max_right_slip,
-        final_right_slip,
-    )
-
-    # ========================================================
-    # RESULTS
-    # ========================================================
-
-    both_contact_ratio = (
+    double_contact_ratio = (
         both_contact_samples
         /
         max(
-            fresh_state_samples,
+            total_samples,
             1,
         )
     )
 
-    if qp_solve_times:
+    if total_hqp_times:
 
-        qp_times = np.asarray(
-            qp_solve_times,
+        total_hqp_times = np.asarray(
+            total_hqp_times,
             dtype=float,
         )
 
-        average_qp_ms = (
+        mean_hqp_ms = (
             1000.0
             *
             float(
                 np.mean(
-                    qp_times
+                    total_hqp_times
                 )
             )
         )
 
-        max_qp_ms = (
+        max_hqp_ms = (
             1000.0
             *
             float(
                 np.max(
-                    qp_times
+                    total_hqp_times
                 )
             )
         )
 
     else:
 
-        average_qp_ms = (
-            0.0
+        mean_hqp_ms = 0.0
+        max_hqp_ms = 0.0
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
+    print()
+
+    separator()
+
+    print(
+        "DOUBLE-SUPPORT HQP RESULT"
+    )
+
+    separator()
+
+    print()
+
+    print(
+        f"max CoM-height error   = "
+        f"{1000.0 * max_z_error:.3f} mm"
+    )
+
+    print(
+        f"max base tilt          = "
+        f"{max_tilt:.3f} deg"
+    )
+
+    print(
+        f"max left-foot slip     = "
+        f"{1000.0 * max_left_slip:.3f} mm"
+    )
+
+    print(
+        f"max right-foot slip    = "
+        f"{1000.0 * max_right_slip:.3f} mm"
+    )
+
+    print(
+        f"double-contact ratio   = "
+        f"{100.0 * double_contact_ratio:.2f}%"
+    )
+
+    print(
+        f"max torque utilization = "
+        f"{100.0 * max_tau_utilization:.2f}%"
+    )
+
+    print()
+
+    print(
+        f"mean total HQP time    = "
+        f"{mean_hqp_ms:.3f} ms"
+    )
+
+    print(
+        f"max total HQP time     = "
+        f"{max_hqp_ms:.3f} ms"
+    )
+
+    print(
+        f"Rank-5 fallbacks       = "
+        f"{rank5_fallback_count}"
+    )
+
+    print()
+
+    print(
+        f"final CoM height       = "
+        f"{final_com.position[2]:.8f} m"
+    )
+
+    print(
+        f"final base tilt        = "
+        f"{final_tilt:.3f} deg"
+    )
+
+    print(
+        f"final left contact     = "
+        f"{final_left_contact}"
+    )
+
+    print(
+        f"final right contact    = "
+        f"{final_right_contact}"
+    )
+
+    print(
+        f"final left foot        = "
+        f"{final_left.position}"
+    )
+
+    print(
+        f"final right foot       = "
+        f"{final_right.position}"
+    )
+
+    if last_solution is not None:
+
+        print()
+
+        print(
+            "Final left wrench:"
         )
 
-        max_qp_ms = (
-            0.0
+        print(
+            last_solution.left_wrench
         )
 
-    return {
-        "simulation_time": (
-            final_time
-            -
-            simulation_start_time
-        ),
+        print(
+            "Final right wrench:"
+        )
 
-        "qp_solutions": (
-            qp_solutions
-        ),
+        print(
+            last_solution.right_wrench
+        )
 
-        "fresh_state_samples": (
-            fresh_state_samples
-        ),
+        print()
 
-        "max_com_height_error": (
-            max_com_height_error
-        ),
+        print(
+            f"Rank-2 residual = "
+            f"{last_solution.rank2_residual:.6e}"
+        )
 
-        "max_base_tilt_deg": (
-            max_base_tilt_deg
-        ),
+        print(
+            f"Rank-4 residual = "
+            f"{last_solution.rank4_residual:.6e}"
+        )
 
-        "max_left_slip": (
-            max_left_slip
-        ),
+        print(
+            f"Rank-5 residual = "
+            f"{last_solution.rank5_residual:.6e}"
+        )
 
-        "max_right_slip": (
-            max_right_slip
-        ),
+        print(
+            f"Rank-5 used     = "
+            f"{last_solution.rank5_used}"
+        )
 
-        "both_contact_ratio": (
-            both_contact_ratio
-        ),
-
-        "max_torque_utilization": (
-            max_torque_utilization
-        ),
-
-        "average_qp_ms": (
-            average_qp_ms
-        ),
-
-        "max_qp_ms": (
-            max_qp_ms
-        ),
-
-        "final_com_height_error": (
-            final_com_height_error
-        ),
-
-        "final_base_tilt_deg": (
-            final_base_tilt_deg
-        ),
-
-        "final_left_slip": (
-            final_left_slip
-        ),
-
-        "final_right_slip": (
-            final_right_slip
-        ),
-
-        "final_left_contact": (
-            final_left_contact
-        ),
-
-        "final_right_contact": (
-            final_right_contact
-        ),
-    }
+        print(
+            f"max HQP constraint violation = "
+            f"{last_solution.max_constraint_violation:.6e}"
+        )
 
 
 # ============================================================
@@ -1911,7 +2084,11 @@ def main():
     )
 
     print(
-        "STEP 3B - DYNAMIC DOUBLE-SUPPORT STANDING"
+        "HIERARCHICAL INVERSE DYNAMICS"
+    )
+
+    print(
+        "DOUBLE-SUPPORT TEST"
     )
 
     separator()
@@ -1919,77 +2096,58 @@ def main():
     print()
 
     print(
-        f"MuJoCo version = "
+        f"MuJoCo = "
         f"{mujoco.__version__}"
     )
 
     print(
-        f"CasADi version  = "
+        f"CasADi = "
         f"{ca.__version__}"
     )
 
     # ========================================================
-    # LOAD MODEL
+    # MODEL
     # ========================================================
 
     if not SCENE_XML.exists():
 
         raise FileNotFoundError(
-            f"Torque scene not found:\n"
+            f"Scene not found:\n"
             f"{SCENE_XML}"
         )
 
-    model = (
-        mujoco.MjModel.from_xml_path(
-            str(
-                SCENE_XML
-            )
+    model = mujoco.MjModel.from_xml_path(
+        str(
+            SCENE_XML
         )
     )
 
-    data = (
-        mujoco.MjData(
-            model
-        )
+    data = mujoco.MjData(
+        model
     )
 
     print()
 
     print(
-        "Model:"
+        f"nq = {model.nq}"
     )
 
     print(
-        f"  nq = {model.nq}"
+        f"nv = {model.nv}"
     )
 
     print(
-        f"  nv = {model.nv}"
+        f"nu = {model.nu}"
     )
 
     print(
-        f"  nu = {model.nu}"
+        f"dt = {model.opt.timestep}"
     )
 
     print(
-        f"  dt = "
-        f"{model.opt.timestep:.6f} s"
-    )
-
-    print(
-        f"  integrator = "
+        f"integrator = "
         f"{mujoco.mjtIntegrator(model.opt.integrator).name}"
     )
-
-    # ========================================================
-    # INTEGRATOR CHECK
-    # ========================================================
-    #
-    # mj_step1 / mj_step2 is intended for single-step
-    # integrators.
-    #
-    # Our torque XML uses implicitfast.
-    # ========================================================
 
     if (
         model.opt.integrator
@@ -1998,20 +2156,18 @@ def main():
     ):
 
         raise RuntimeError(
-            "mj_step1/mj_step2 must not be used here "
-            "with RK4. Use Euler/implicit/implicitfast."
+            "This split-step controller "
+            "must not use RK4."
         )
 
     # ========================================================
-    # LOAD HOME
+    # HOME
     # ========================================================
 
-    home_id = (
-        require_object_id(
-            model,
-            mujoco.mjtObj.mjOBJ_KEY,
-            "home",
-        )
+    home_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_KEY,
+        "home",
     )
 
     mujoco.mj_resetDataKeyframe(
@@ -2020,28 +2176,15 @@ def main():
         home_id,
     )
 
-    # --------------------------------------------------------
-    # HOME keyframe contains ctrl values.
-    #
-    # Dynamic WBC must generate torque itself.
-    # --------------------------------------------------------
+    # Preserve HOME ctrl.
 
-    data.ctrl[:] = (
-        0.0
+    home_torque = (
+        data.ctrl.copy()
     )
 
-    data.qvel[:] = (
-        0.0
-    )
+    # Initial generalized velocity.
 
-    # --------------------------------------------------------
-    # Initial one-time initialization.
-    #
-    # This does NOT integrate.
-    #
-    # It is only used to establish initial references before
-    # the dynamic loop begins.
-    # --------------------------------------------------------
+    data.qvel[:] = 0.0
 
     mujoco.mj_forward(
         model,
@@ -2052,54 +2195,12 @@ def main():
     # DYNAMICS BACKEND
     # ========================================================
 
-    dynamics = (
-        WholeBodyDynamicsModel(
-            model
-        )
+    dynamics = WholeBodyDynamicsModel(
+        model
     )
 
     # ========================================================
-    # REQUIRED OBJECTS
-    # ========================================================
-
-    require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_BODY,
-        ROBOT_ROOT_BODY,
-    )
-
-    require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_SITE,
-        LEFT_FOOT_SITE,
-    )
-
-    require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_SITE,
-        RIGHT_FOOT_SITE,
-    )
-
-    require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        LEFT_FOOT_GEOM,
-    )
-
-    require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        RIGHT_FOOT_GEOM,
-    )
-
-    require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        FLOOR_GEOM,
-    )
-
-    # ========================================================
-    # ACTUATED POSITION MAPPING
+    # ACTUATED QPOS
     # ========================================================
 
     actuated_qpos_indices = (
@@ -2108,18 +2209,6 @@ def main():
         )
     )
 
-    if actuated_qpos_indices.shape != (
-        model.nu,
-    ):
-
-        raise RuntimeError(
-            "Unexpected actuated qpos mapping."
-        )
-
-    # ========================================================
-    # INITIAL REFERENCES
-    # ========================================================
-
     posture_reference = (
         data.qpos[
             actuated_qpos_indices
@@ -2127,17 +2216,81 @@ def main():
         .copy()
     )
 
+    # ========================================================
+    # TORQUE LIMITS
+    # ========================================================
+
+    torque_lower = (
+        model.actuator_ctrlrange[
+            :,
+            0
+        ]
+        .copy()
+    )
+
+    torque_upper = (
+        model.actuator_ctrlrange[
+            :,
+            1
+        ]
+        .copy()
+    )
+
+    # ========================================================
+    # SUPPORT POLYGONS
+    # ========================================================
+
+    left_support_bounds = (
+        get_support_rectangle_from_geom_aabb(
+
+            model=model,
+
+            data=data,
+
+            geom_name=(
+                LEFT_FOOT_GEOM
+            ),
+
+            site_name=(
+                LEFT_FOOT_SITE
+            ),
+
+            safety_margin=(
+                SUPPORT_POLYGON_MARGIN
+            ),
+        )
+    )
+
+    right_support_bounds = (
+        get_support_rectangle_from_geom_aabb(
+
+            model=model,
+
+            data=data,
+
+            geom_name=(
+                RIGHT_FOOT_GEOM
+            ),
+
+            site_name=(
+                RIGHT_FOOT_SITE
+            ),
+
+            safety_margin=(
+                SUPPORT_POLYGON_MARGIN
+            ),
+        )
+    )
+
+    # ========================================================
+    # INITIAL STATE
+    # ========================================================
+
     initial_com = (
         dynamics.get_com_kinematics(
             data,
             ROBOT_ROOT_BODY,
         )
-    )
-
-    com_height_reference = float(
-        initial_com.position[
-            2
-        ]
     )
 
     initial_left = (
@@ -2154,76 +2307,253 @@ def main():
         )
     )
 
-    left_foot_reference = (
-        initial_left.position.copy()
+    floor_geom_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        FLOOR_GEOM,
     )
 
-    right_foot_reference = (
-        initial_right.position.copy()
-    )
-
-    # ========================================================
-    # TORQUE LIMITS
-    # ========================================================
-
-    torque_lower = (
-        model.actuator_ctrlrange[
-            :,
-            0,
+    floor_z = float(
+        data.geom_xpos[
+            floor_geom_id,
+            2
         ]
-        .copy()
     )
 
-    torque_upper = (
-        model.actuator_ctrlrange[
-            :,
-            1,
+    initial_left_height = float(
+        initial_left.position[
+            2
         ]
-        .copy()
+        -
+        floor_z
+    )
+
+    initial_right_height = float(
+        initial_right.position[
+            2
+        ]
+        -
+        floor_z
     )
 
     # ========================================================
-    # QP CONFIG
+    # PRINT ARCHITECTURE
     # ========================================================
 
-    qp_config = (
-        DoubleSupportQPConfig(
-            friction_coefficient=(
-                FRICTION_COEFFICIENT
-            ),
+    separator()
 
-            posture_weight=(
-                POSTURE_WEIGHT
-            ),
+    print(
+        "HQP ARCHITECTURE"
+    )
 
-            force_regularization_weight=(
-                FORCE_REGULARIZATION_WEIGHT
-            ),
+    separator()
 
-            moment_regularization_weight=(
-                MOMENT_REGULARIZATION_WEIGHT
-            ),
+    print()
 
-            qacc_regularization_weight=(
-                QACC_REGULARIZATION_WEIGHT
-            ),
+    print(
+        "Decision vector:"
+    )
 
-            torque_regularization_weight=(
-                TORQUE_REGULARIZATION_WEIGHT
-            ),
+    print(
+        "  y = [qddot(20), "
+        "lambda_L(6), lambda_R(6)]"
+    )
 
-            global_regularization_weight=(
-                GLOBAL_REGULARIZATION_WEIGHT
-            ),
+    print(
+        "  total = 32 variables"
+    )
 
-            solver_name=(
-                "qrqp"
-            ),
-        )
+    print()
+
+    print(
+        "Rank 1:"
+    )
+
+    print(
+        "  floating-base Newton-Euler"
+    )
+
+    print(
+        "  torque limits"
+    )
+
+    print(
+        "  unilateral contact"
+    )
+
+    print(
+        "  friction feasibility"
+    )
+
+    print(
+        "  CoP inside foot support polygon"
+    )
+
+    print()
+
+    print(
+        "Rank 2:"
+    )
+
+    print(
+        "  left stance 6D"
+    )
+
+    print(
+        "  right stance 6D"
+    )
+
+    print(
+        "  CoM height only"
+    )
+
+    print()
+
+    print(
+        "Rank 3:"
+    )
+
+    print(
+        "  none in double support"
+    )
+
+    print()
+
+    print(
+        "Rank 4:"
+    )
+
+    print(
+        "  posture"
+    )
+
+    print()
+
+    print(
+        "Rank 5:"
+    )
+
+    print(
+        "  wrench regularization"
+    )
+
+    print(
+        "  fallback to Rank 4 if Rank 5 "
+        "is numerically singular"
+    )
+
+    print()
+
+    print(
+        "No horizontal CoM control."
+    )
+
+    print(
+        "No CoP tracking."
+    )
+
+    print(
+        "No ZMP tracking."
+    )
+
+    print()
+
+    print(
+        f"Initial CoM height = "
+        f"{initial_com.position[2]:.8f} m"
+    )
+
+    print(
+        f"Desired CoM height = "
+        f"{COM_HEIGHT_REFERENCE:.8f} m"
+    )
+
+    print()
+
+    print(
+        "Left support bounds "
+        "[xmin xmax ymin ymax] [m]:"
+    )
+
+    print(
+        left_support_bounds
+    )
+
+    print(
+        "Right support bounds "
+        "[xmin xmax ymin ymax] [m]:"
+    )
+
+    print(
+        right_support_bounds
+    )
+
+    print()
+
+    print(
+        f"Initial left site height above ground  = "
+        f"{initial_left_height:.6f} m"
+    )
+
+    print(
+        f"Initial right site height above ground = "
+        f"{initial_right_height:.6f} m"
+    )
+
+    print()
+
+    print(
+        "HOME torque:"
+    )
+
+    print(
+        home_torque
+    )
+
+    print()
+
+    print(
+        f"CoM PD: "
+        f"Kp={COM_HEIGHT_KP}, "
+        f"Kd={COM_HEIGHT_KD}"
+    )
+
+    print(
+        f"Posture PD: "
+        f"Kp={POSTURE_KP}, "
+        f"Kd={POSTURE_KD}"
+    )
+
+    separator()
+
+    # ========================================================
+    # CONTROLLER
+    # ========================================================
+
+    config = DoubleSupportHQPConfig(
+
+        friction_coefficient=(
+            FRICTION_COEFFICIENT
+        ),
+
+        numerical_regularization=(
+            1.0e-4
+        ),
+
+        svd_tolerance=(
+            1.0e-9
+        ),
+
+        constraint_tolerance=(
+            1.0e-6
+        ),
+
+        solver_name="qrqp",
     )
 
     controller = (
-        WholeBodyInverseDynamicsQP(
+        WholeBodyHierarchicalInverseDynamics(
+
             nv=(
                 model.nv
             ),
@@ -2237,113 +2567,10 @@ def main():
             ),
 
             config=(
-                qp_config
+                config
             ),
         )
     )
-
-    # ========================================================
-    # INFORMATION
-    # ========================================================
-
-    separator()
-
-    print(
-        "INITIAL REFERENCES"
-    )
-
-    separator()
-
-    print()
-
-    print(
-        f"CoM height reference = "
-        f"{com_height_reference:.8f} m"
-    )
-
-    print(
-        "left foot reference  =",
-        left_foot_reference,
-    )
-
-    print(
-        "right foot reference =",
-        right_foot_reference,
-    )
-
-    print()
-
-    print(
-        f"CoM-height PD:"
-        f" Kp={COM_HEIGHT_KP:.1f},"
-        f" Kd={COM_HEIGHT_KD:.1f}"
-    )
-
-    print(
-        f"Posture PD:"
-        f" Kp={POSTURE_KP:.1f},"
-        f" Kd={POSTURE_KD:.1f}"
-    )
-
-    print()
-
-    print(
-        "MuJoCo dynamic loop:"
-    )
-
-    print()
-
-    print(
-        "  mj_step1()"
-    )
-
-    print(
-        "      -> fresh q, v, kinematics, contact, M, h, J"
-    )
-
-    print(
-        "      -> inverse-dynamics QP"
-    )
-
-    print(
-        "      -> data.ctrl = tau"
-    )
-
-    print(
-        "  mj_step2()"
-    )
-
-    print(
-        "      -> acceleration / constraint solve"
-    )
-
-    print(
-        "      -> integrate to next state"
-    )
-
-    print()
-
-    print(
-        "No qpos overwrite."
-    )
-
-    print(
-        "No qvel overwrite inside loop."
-    )
-
-    print(
-        "No CoP control."
-    )
-
-    print(
-        "No ZMP control."
-    )
-
-    print(
-        "No horizontal CoM tracking."
-    )
-
-    separator()
 
     # ========================================================
     # RUN
@@ -2356,77 +2583,15 @@ def main():
             data,
         ) as viewer:
 
-            result = (
-                run_dynamic_standing(
-                    model=(
-                        model
-                    ),
+            run_double_support(
 
-                    data=(
-                        data
-                    ),
+                model=model,
 
-                    dynamics=(
-                        dynamics
-                    ),
+                data=data,
 
-                    controller=(
-                        controller
-                    ),
+                dynamics=dynamics,
 
-                    actuated_qpos_indices=(
-                        actuated_qpos_indices
-                    ),
-
-                    posture_reference=(
-                        posture_reference
-                    ),
-
-                    com_height_reference=(
-                        com_height_reference
-                    ),
-
-                    left_foot_reference=(
-                        left_foot_reference
-                    ),
-
-                    right_foot_reference=(
-                        right_foot_reference
-                    ),
-
-                    torque_lower=(
-                        torque_lower
-                    ),
-
-                    torque_upper=(
-                        torque_upper
-                    ),
-
-                    viewer=(
-                        viewer
-                    ),
-                )
-            )
-
-    else:
-
-        result = (
-            run_dynamic_standing(
-                model=(
-                    model
-                ),
-
-                data=(
-                    data
-                ),
-
-                dynamics=(
-                    dynamics
-                ),
-
-                controller=(
-                    controller
-                ),
+                controller=controller,
 
                 actuated_qpos_indices=(
                     actuated_qpos_indices
@@ -2436,16 +2601,8 @@ def main():
                     posture_reference
                 ),
 
-                com_height_reference=(
-                    com_height_reference
-                ),
-
-                left_foot_reference=(
-                    left_foot_reference
-                ),
-
-                right_foot_reference=(
-                    right_foot_reference
+                home_torque=(
+                    home_torque
                 ),
 
                 torque_lower=(
@@ -2456,285 +2613,65 @@ def main():
                     torque_upper
                 ),
 
-                viewer=None,
-            )
-        )
+                left_support_bounds=(
+                    left_support_bounds
+                ),
 
-    # ========================================================
-    # SUMMARY
-    # ========================================================
+                right_support_bounds=(
+                    right_support_bounds
+                ),
 
-    separator()
-
-    print(
-        "DYNAMIC STANDING RESULT"
-    )
-
-    separator()
-
-    print()
-
-    print(
-        f"simulation time        = "
-        f"{result['simulation_time']:.3f} s"
-    )
-
-    print(
-        f"fresh state samples    = "
-        f"{result['fresh_state_samples']}"
-    )
-
-    print(
-        f"QP solutions           = "
-        f"{result['qp_solutions']}"
-    )
-
-    print()
-
-    print(
-        f"max CoM-height error   = "
-        f"{1000.0 * result['max_com_height_error']:.3f} mm"
-    )
-
-    print(
-        f"max base tilt          = "
-        f"{result['max_base_tilt_deg']:.3f} deg"
-    )
-
-    print(
-        f"max left-foot slip     = "
-        f"{1000.0 * result['max_left_slip']:.3f} mm"
-    )
-
-    print(
-        f"max right-foot slip    = "
-        f"{1000.0 * result['max_right_slip']:.3f} mm"
-    )
-
-    print(
-        f"double-contact ratio   = "
-        f"{100.0 * result['both_contact_ratio']:.2f}%"
-    )
-
-    print(
-        f"max torque utilization = "
-        f"{100.0 * result['max_torque_utilization']:.2f}%"
-    )
-
-    print()
-
-    print(
-        f"mean QP solve time     = "
-        f"{result['average_qp_ms']:.3f} ms"
-    )
-
-    print(
-        f"max QP solve time      = "
-        f"{result['max_qp_ms']:.3f} ms"
-    )
-
-    print()
-
-    print(
-        "Final fresh state:"
-    )
-
-    print(
-        f"  CoM-height error = "
-        f"{1000.0 * result['final_com_height_error']:.3f} mm"
-    )
-
-    print(
-        f"  base tilt        = "
-        f"{result['final_base_tilt_deg']:.3f} deg"
-    )
-
-    print(
-        f"  left slip        = "
-        f"{1000.0 * result['final_left_slip']:.3f} mm"
-    )
-
-    print(
-        f"  right slip       = "
-        f"{1000.0 * result['final_right_slip']:.3f} mm"
-    )
-
-    print(
-        f"  left contact     = "
-        f"{result['final_left_contact']}"
-    )
-
-    print(
-        f"  right contact    = "
-        f"{result['final_right_contact']}"
-    )
-
-    # ========================================================
-    # PASS / FAIL
-    # ========================================================
-
-    failures = []
-
-    if (
-        result[
-            "max_com_height_error"
-        ]
-        >
-        MAX_ALLOWED_COM_HEIGHT_ERROR
-    ):
-
-        failures.append(
-            "CoM-height error > 10 mm"
-        )
-
-    if (
-        result[
-            "max_base_tilt_deg"
-        ]
-        >
-        MAX_ALLOWED_BASE_TILT_DEG
-    ):
-
-        failures.append(
-            "base tilt > 15 deg"
-        )
-
-    if (
-        result[
-            "max_left_slip"
-        ]
-        >
-        MAX_ALLOWED_FOOT_SLIP
-    ):
-
-        failures.append(
-            "left-foot slip > 5 mm"
-        )
-
-    if (
-        result[
-            "max_right_slip"
-        ]
-        >
-        MAX_ALLOWED_FOOT_SLIP
-    ):
-
-        failures.append(
-            "right-foot slip > 5 mm"
-        )
-
-    if (
-        result[
-            "both_contact_ratio"
-        ]
-        <
-        MIN_BOTH_CONTACT_RATIO
-    ):
-
-        failures.append(
-            "double-support contact ratio < 95%"
-        )
-
-    if (
-        result[
-            "max_torque_utilization"
-        ]
-        >
-        MAX_ALLOWED_TORQUE_UTILIZATION
-    ):
-
-        failures.append(
-            "actuator torque limit violated"
-        )
-
-    if not (
-        result[
-            "final_left_contact"
-        ]
-        and
-        result[
-            "final_right_contact"
-        ]
-    ):
-
-        failures.append(
-            "both feet are not in contact at final state"
-        )
-
-    print()
-
-    separator()
-
-    if failures:
-
-        print(
-            "STEP 3B FAILED"
-        )
-
-        separator()
-
-        print()
-
-        for failure in failures:
-
-            print(
-                " -",
-                failure,
+                viewer=(
+                    viewer
+                ),
             )
 
-        raise RuntimeError(
-            "Dynamic double-support standing "
-            "did not satisfy the PASS criteria."
+    else:
+
+        run_double_support(
+
+            model=model,
+
+            data=data,
+
+            dynamics=dynamics,
+
+            controller=controller,
+
+            actuated_qpos_indices=(
+                actuated_qpos_indices
+            ),
+
+            posture_reference=(
+                posture_reference
+            ),
+
+            home_torque=(
+                home_torque
+            ),
+
+            torque_lower=(
+                torque_lower
+            ),
+
+            torque_upper=(
+                torque_upper
+            ),
+
+            left_support_bounds=(
+                left_support_bounds
+            ),
+
+            right_support_bounds=(
+                right_support_bounds
+            ),
+
+            viewer=None,
         )
-
-    print(
-        "STEP 3B PASSED"
-    )
-
-    separator()
-
-    print()
-
-    print(
-        "Double-support standing was maintained "
-        "using torque control only."
-    )
-
-    print()
-
-    print(
-        "Verified dynamic chain:"
-    )
-
-    print()
-
-    print(
-        "  current state"
-    )
-
-    print(
-        "      -> mj_step1"
-    )
-
-    print(
-        "      -> inverse-dynamics QP"
-    )
-
-    print(
-        "      -> tau"
-    )
-
-    print(
-        "      -> mj_step2"
-    )
-
-    print(
-        "      -> next state"
-    )
 
 
 # ============================================================
-# ENTRY POINT
+# ENTRY
 # ============================================================
 
 if __name__ == "__main__":
