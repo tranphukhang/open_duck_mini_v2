@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import sys
+import math
 import time
+from pathlib import Path
 
 import mujoco
 import mujoco.viewer
@@ -24,22 +26,36 @@ ROOT_DIR = (
     CURRENT_DIR.parent
 )
 
+if str(ROOT_DIR) not in sys.path:
+
+    sys.path.insert(
+        0,
+        str(ROOT_DIR),
+    )
+
+
+ROBOT_XML = (
+    ROOT_DIR
+    /
+    "xmls"
+    /
+    "open_duck_mini_v2.xml"
+)
+
 SCENE_XML = (
     ROOT_DIR
-    / "xmls"
-    / "scene_flat_terrain_torque.xml"
+    /
+    "xmls"
+    /
+    "scene_flat_terrain.xml"
 )
 
 
 # ============================================================
-# IMPORTS
+# STEP TIMING ADAPTATION
 # ============================================================
 
 if __package__:
-
-    from .dynamics_model import (
-        WholeBodyDynamicsModel,
-    )
 
     from .adaptive_step_planner import (
         AdaptiveStepPlanner,
@@ -52,18 +68,13 @@ if __package__:
         VerticalSwingQPParameters,
     )
 
-    from .whole_body_qp import (
-        WholeBodyHQPConfig,
-        WholeBodyHierarchicalInverseDynamics,
-        DoubleSupportPreparationHierarchicalInverseDynamics,
+    from .adaptive_support_preview import (
+        INITIAL_DOUBLE_SUPPORT,
+        SINGLE_SUPPORT,
+        build_adaptive_support_preview,
     )
-
 
 else:
-
-    from dynamics_model import (
-        WholeBodyDynamicsModel,
-    )
 
     from adaptive_step_planner import (
         AdaptiveStepPlanner,
@@ -76,223 +87,47 @@ else:
         VerticalSwingQPParameters,
     )
 
-    from whole_body_qp import (
-        WholeBodyHQPConfig,
-        WholeBodyHierarchicalInverseDynamics,
-        DoubleSupportPreparationHierarchicalInverseDynamics,
+    from adaptive_support_preview import (
+        INITIAL_DOUBLE_SUPPORT,
+        SINGLE_SUPPORT,
+        build_adaptive_support_preview,
     )
 
 
-
 # ============================================================
-# MODEL NAMES
-# ============================================================
-
-ROBOT_ROOT_BODY = "base"
-
-LEFT_FOOT_SITE = "left_foot"
-RIGHT_FOOT_SITE = "right_foot"
-
-LEFT_FOOT_GEOM = "left_foot_bottom_tpu"
-RIGHT_FOOT_GEOM = "right_foot_bottom_tpu"
-
-FLOOR_GEOM = "floor"
-
-
-# ============================================================
-# SIMULATION
+# REUSE EXISTING LIPM-MPC
 # ============================================================
 
-CONTROL_FREQUENCY = 1000.0
+from lipm_mpc.lipm_model import (
+    LIPMModel1D,
+)
 
-SHOW_VIEWER = True
+from lipm_mpc.mpc_1d import (
+    LIPMMPC1D,
+)
 
-REALTIME_FACTOR = 1.0
-
-VIEWER_REFRESH_FREQUENCY = 60.0
-
-STATUS_PRINT_PERIOD = 0.05
+from lipm_mpc.com_trajectory import (
+    ConstantJerkCoMSegment,
+)
 
 
 # ============================================================
-# CONTACT
+# REUSE EXISTING WHOLE-BODY KINEMATICS
 # ============================================================
 
-FRICTION_COEFFICIENT = 0.6
+from footstep_planning.pinocchio_model import (
+    PinocchioModel,
+)
 
-# Shrink support rectangle inward.
-SUPPORT_POLYGON_MARGIN = 0.002
-# 2 mm
-
-
-# ============================================================
-# COM HEIGHT
-# ============================================================
-
-COM_HEIGHT_REFERENCE = 0.2044
-
-COM_HEIGHT_KP = 80.0
-COM_HEIGHT_KD = 16.0
+from footstep_planning.differential_ik import (
+    TRUNK_FRAME,
+    solve_single_support_ik,
+    solve_double_support_ik,
+)
 
 
 # ============================================================
-# ADAPTIVE STEP PLANNER
-# ============================================================
-
-# ------------------------------------------------------------
-# Stage-2 QP weights
-#
-# Khadiv et al. simulation values:
-# alpha_1 = 1
-# alpha_2 = 5
-# alpha_3 = 1000
-# ------------------------------------------------------------
-
-STEP_QP_ALPHA_LOCATION = 1.0
-STEP_QP_ALPHA_TIMING = 5.0
-STEP_QP_ALPHA_DCM = 1000.0
-STEP_QP_ALPHA_VIABILITY = 1.0e6
-STEP_TIMING_GAP = 0.02
-
-
-# ------------------------------------------------------------
-# Desired walking velocity
-# ------------------------------------------------------------
-
-DESIRED_VELOCITY_X = 0.05
-DESIRED_VELOCITY_Y = 0.0
-
-
-# ------------------------------------------------------------
-# LIPM
-# ------------------------------------------------------------
-
-GRAVITY = 9.81
-
-
-# ------------------------------------------------------------
-# Nominal lateral foot spacing l_p
-# ------------------------------------------------------------
-
-DEFAULT_STEP_WIDTH = 0.16
-
-
-# ------------------------------------------------------------
-# Step location bounds
-#
-# Temporary planner bounds.
-# Replace later with identified physical limits
-# of the Open Duck Mini.
-# ------------------------------------------------------------
-
-STEP_LENGTH_MIN = -0.10
-STEP_LENGTH_MAX = +0.10
-
-STEP_WIDTH_MIN = -0.03
-STEP_WIDTH_MAX = +0.03
-
-
-# ------------------------------------------------------------
-# Step timing bounds
-# ------------------------------------------------------------
-
-STEP_TIME_MIN = 0.20
-STEP_TIME_MAX = 0.30
-
-
-# ============================================================
-# SWING FOOT TRAJECTORY
-# ============================================================
-
-# Desired swing-foot clearance.
-SWING_HEIGHT_DESIRED = 0.03
-
-# Hard upper bound for swing-foot height.
-SWING_HEIGHT_MAX = 0.04
-
-# Initial discretization of:
-#
-#     0 <= z(t) <= z_max
-#
-# Continuous extrema are checked and refined automatically.
-SWING_VERTICAL_CONSTRAINT_SAMPLES = 41
-
-# Small numerical regularization only.
-SWING_VERTICAL_COEFFICIENT_REGULARIZATION = 1.0e-8
-
-SWING_VERTICAL_BOUND_TOLERANCE = 1.0e-9
-
-SWING_VERTICAL_MAX_REFINEMENTS = 8
-
-
-# ============================================================
-# ONLINE EXECUTION
-# ============================================================
-
-PLANNER_UPDATE_FREQUENCY = 100.0
-
-SWING_TRACKING_KP = 250.0
-SWING_TRACKING_KD = 30.0
-
-# Contact is accepted only near the planned touchdown.
-TOUCHDOWN_CONTACT_WINDOW = 0.02
-
-# Keep final landing target for a short settling interval.
-TOUCHDOWN_SETTLE_TIME = 0.0
-
-
-# ============================================================
-# DOUBLE-SUPPORT PREPARATION
-# ============================================================
-
-PREPARE_DURATION = 2.00
-PREPARE_HOLD_TIME = 0.50
-
-# CoM target is placed slightly toward the inside
-# of the future LEFT stance foot.
-PREPARE_LEFT_INNER_OFFSET = 0.010
-
-PREPARE_COM_KP = 40.0
-PREPARE_COM_KD = 12.0
-
-# Desired final load distribution before lift-off.
-PREPARE_LEFT_LOAD_FRACTION = 0.90
-
-# Transition conditions.
-PREPARE_RIGHT_LOAD_MAX = 0.15
-PREPARE_DCM_MARGIN = 0.003
-PREPARE_VELOCITY_Y_MAX = 0.04
-PREPARE_MAX_TILT_DEG = 8.0
-
-PREPARE_STATUS_PRINT_PERIOD = 0.10
-
-
-# ============================================================
-# POSTURE — LOWER PRIORITY
-# ============================================================
-
-POSTURE_KP = 50.0
-POSTURE_KD = 14.0
-
-
-# ============================================================
-# NUMERICAL
-# ============================================================
-
-COM_JDOT_EPSILON = 1.0e-6
-
-
-# ============================================================
-# EMERGENCY
-# ============================================================
-
-EMERGENCY_BASE_TILT_DEG = 45.0
-
-EMERGENCY_COM_DROP = 0.050
-
-
-# ============================================================
-# PRINT
+# NUMPY
 # ============================================================
 
 np.set_printoptions(
@@ -301,6 +136,294 @@ np.set_printoptions(
 )
 
 
+# ============================================================
+# TEST
+#
+# Current scope:
+#
+#       INITIAL DS
+#           |
+#           v
+#       LEFT SUPPORT
+#       RIGHT SWING
+#           |
+#           v
+#       TOUCHDOWN
+#
+# One adaptive step only.
+# ============================================================
+
+STANCE_LEG = (
+    StanceLeg.LEFT
+)
+
+STANCE_SIDE = (
+    "left"
+)
+
+SWING_SIDE = (
+    "right"
+)
+
+
+# ============================================================
+# EXECUTOR
+#
+# Pure kinematic execution.
+#
+# NO mj_step().
+# NO rigid-body dynamics.
+# ============================================================
+
+DT = 0.01
+# 100 Hz differential IK / set-state
+
+
+# ============================================================
+# INITIAL DOUBLE SUPPORT
+#
+# Same purpose as lipm_mpc:
+# allow MPC to move the CoM toward the future support foot
+# before single support begins.
+#
+# This phase is still purely kinematic.
+# ============================================================
+
+INITIAL_DOUBLE_SUPPORT_DURATION = (
+    0.36
+)
+
+
+# ============================================================
+# LIPM / PLANNER
+# ============================================================
+
+GRAVITY = 9.81
+
+COM_HEIGHT = 0.2044
+
+DESIRED_VELOCITY_X = 0.05
+
+DESIRED_VELOCITY_Y = 0.0
+
+DEFAULT_STEP_WIDTH = 0.16
+
+
+# ============================================================
+# STEP BOUNDS
+# ============================================================
+
+STEP_LENGTH_MIN = -0.10
+STEP_LENGTH_MAX = +0.10
+
+STEP_WIDTH_MIN = -0.03
+STEP_WIDTH_MAX = +0.03
+
+STEP_TIME_MIN = 0.20
+STEP_TIME_MAX = 0.30
+
+
+# ============================================================
+# STEP QP
+# ============================================================
+
+STEP_QP_ALPHA_LOCATION = 1.0
+
+STEP_QP_ALPHA_TIMING = 5.0
+
+STEP_QP_ALPHA_DCM = 1000.0
+
+STEP_QP_ALPHA_VIABILITY = 1.0e6
+
+STEP_TIMING_GAP = 0.02
+
+
+# ============================================================
+# PLANNER RATE
+# ============================================================
+
+PLANNER_UPDATE_FREQUENCY = (
+    100.0
+)
+
+PLANNER_UPDATE_PERIOD = (
+    1.0
+    /
+    PLANNER_UPDATE_FREQUENCY
+)
+
+
+# ============================================================
+# SWING TRAJECTORY
+# ============================================================
+
+SWING_HEIGHT_DESIRED = 0.03
+
+SWING_HEIGHT_MAX = 0.04
+
+SWING_VERTICAL_CONSTRAINT_SAMPLES = (
+    41
+)
+
+SWING_VERTICAL_COEFFICIENT_REGULARIZATION = (
+    1.0e-8
+)
+
+SWING_VERTICAL_BOUND_TOLERANCE = (
+    1.0e-9
+)
+
+SWING_VERTICAL_MAX_REFINEMENTS = (
+    8
+)
+
+
+# ============================================================
+# LIPM-MPC
+#
+# Reused from lipm_mpc implementation.
+# ============================================================
+
+MPC_TIMESTEP = 0.03
+
+MPC_HORIZON_STEPS = 48
+
+TERMINAL_POSITION_WEIGHT = 1.0
+
+TERMINAL_VELOCITY_WEIGHT = 1.0
+
+TERMINAL_ACCELERATION_WEIGHT = 1.0
+
+CONTROL_WEIGHT = 2.0e-5
+
+MPC_SOLVER_OPTIONS = {
+    "ftol": 1.0e-10,
+    "maxiter": 1000,
+}
+
+
+# ============================================================
+# SUPPORT GEOMETRY
+#
+# Same values as lipm_mpc/run.py
+# ============================================================
+
+ZMP_SUPPORT_SCALE = 0.9
+
+FOOT_TOE = 0.0645
+
+FOOT_HEEL = 0.0386
+
+FOOT_HALF_WIDTH = 0.02065
+
+
+# ============================================================
+# DIFFERENTIAL IK
+#
+# Same structure as lipm_mpc.
+# ============================================================
+
+IK_DAMPING = 1.0e-8
+
+IK_RCOND = 1.0e-10
+
+SUPPORT_POSITION_KP = 25.0
+
+SWING_POSITION_KP = 20.0
+
+COM_POSITION_KP = 10.0
+
+TRUNK_ORIENTATION_KP = 10.0
+
+
+# ============================================================
+# DISTURBANCE
+#
+# Applied to the LIPM state.
+#
+# A desired DCM jump:
+#
+#       Delta xi
+#
+# is produced by:
+#
+#       Delta v = omega * Delta xi
+#
+# while keeping CoM position unchanged.
+#
+# Therefore the disturbance affects both:
+#
+#       planner
+#       MPC
+#
+# rather than only faking a planner measurement.
+# ============================================================
+
+ENABLE_DISTURBANCE = True
+
+DISTURBANCE_TIME = 0.10
+# time from beginning of SINGLE SUPPORT
+
+DISTURBANCE_DCM_X = +0.010
+DISTURBANCE_DCM_Y = 0.000
+
+
+# ============================================================
+# VIEWER
+# ============================================================
+
+SHOW_VIEWER = True
+
+REALTIME_PLAYBACK = True
+
+VIEWER_SYNC_PERIOD = 0.02
+
+
+# ============================================================
+# PRINT
+# ============================================================
+
+STATUS_PRINT_PERIOD = 0.05
+
+
+# ============================================================
+# NUMERICAL
+# ============================================================
+
+TIME_TOLERANCE = 1.0e-10
+
+
+# ============================================================
+# MPC / IK RATIO
+# ============================================================
+
+MPC_IK_RATIO = (
+    MPC_TIMESTEP
+    /
+    DT
+)
+
+MPC_IK_STEPS = int(
+    round(
+        MPC_IK_RATIO
+    )
+)
+
+if not np.isclose(
+    MPC_IK_RATIO,
+    MPC_IK_STEPS,
+    atol=1.0e-12,
+):
+
+    raise RuntimeError(
+        "MPC_TIMESTEP must be an integer multiple of DT."
+    )
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
 def separator():
 
     print(
@@ -308,1928 +431,836 @@ def separator():
     )
 
 
-# ============================================================
-# OBJECT LOOKUP
-# ============================================================
-
-def require_object_id(
-    model,
-    object_type,
-    object_name,
+def update_mujoco_from_pinocchio(
+    robot,
+    q_pin,
+    mj_model,
+    mj_data,
 ):
 
-    object_id = mujoco.mj_name2id(
-        model,
-        object_type,
-        object_name,
-    )
-
-    if object_id < 0:
-
-        raise RuntimeError(
-            f"MuJoCo object not found: "
-            f"'{object_name}'"
-        )
-
-    return int(
-        object_id
-    )
-
-
-# ============================================================
-# ACTUATED QPOS
-# ============================================================
-
-def build_actuated_qpos_indices(
-    model,
-):
-
-    indices = []
-
-    for actuator_id in range(
-        model.nactuator
-    ):
-
-        joint_id = int(
-            model.actuator_trnid[
-                actuator_id,
-                0,
-            ]
-        )
-
-        if joint_id < 0:
-
-            raise RuntimeError(
-                f"Actuator {actuator_id} "
-                "does not target a joint."
-            )
-
-        joint_type = int(
-            model.jnt_type[
-                joint_id
-            ]
-        )
-
-        if (
-            joint_type
-            !=
-            int(
-                mujoco.mjtJoint.mjJNT_HINGE
-            )
-        ):
-
-            raise RuntimeError(
-                "Controller currently assumes "
-                "direct hinge-joint actuators."
-            )
-
-        qpos_index = int(
-            model.jnt_qposadr[
-                joint_id
-            ]
-        )
-
-        indices.append(
-            qpos_index
-        )
-
-    return np.asarray(
-        indices,
-        dtype=int,
-    )
-
-
-# ============================================================
-# BASE TILT
-# ============================================================
-
-def get_base_tilt_deg(
-    data,
-    base_body_id,
-):
-
-    rotation = (
-        data.xmat[
-            base_body_id
-        ]
-        .reshape(
-            3,
-            3,
+    q_mj = (
+        robot.pin_to_mujoco(
+            q_pin
         )
     )
 
-    base_z_world = (
-        rotation[
-            :,
-            2
-        ]
+    mj_data.qpos[:] = (
+        q_mj
     )
 
-    cos_tilt = float(
-        np.clip(
-            base_z_world[
-                2
-            ],
-            -1.0,
-            1.0,
-        )
-    )
-
-    return float(
-        np.degrees(
-            np.arccos(
-                cos_tilt
-            )
-        )
-    )
-
-
-# ============================================================
-# CONTACT CHECK
-# ============================================================
-
-def has_geom_contact(
-    data,
-    geom_a,
-    geom_b,
-):
-
-    for contact_id in range(
-        data.ncon
-    ):
-
-        contact = (
-            data.contact[
-                contact_id
-            ]
-        )
-
-        geom1 = int(
-            contact.geom1
-        )
-
-        geom2 = int(
-            contact.geom2
-        )
-
-        if (
-            (
-                geom1 == geom_a
-                and
-                geom2 == geom_b
-            )
-            or
-            (
-                geom1 == geom_b
-                and
-                geom2 == geom_a
-            )
-        ):
-
-            return True
-
-    return False
-
-
-# ============================================================
-# SUPPORT RECTANGLE FROM COLLISION GEOM
-# ============================================================
-
-def get_support_rectangle_from_geom_aabb(
-    model,
-    data,
-    geom_name,
-    site_name,
-    safety_margin,
-):
-    """
-    Build a conservative rectangular support region from the
-    collision geom's MuJoCo AABB.
-
-    Result:
-
-        [xmin, xmax, ymin, ymax]
-
-    where x/y are WORLD-horizontal offsets measured from the
-    corresponding foot-site origin.
-
-    This is evaluated at the HOME configuration.
-
-    Since the stance-foot task later constrains the foot pose
-    in 6D, this rectangle remains the nominal contact support
-    region during the standing test.
-    """
-
-    geom_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        geom_name,
-    )
-
-    site_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_SITE,
-        site_name,
-    )
-
-    aabb = np.asarray(
-        model.geom_aabb[
-            geom_id
-        ],
-        dtype=float,
-    ).reshape(
-        2,
-        3,
-    )
-
-    center_local = (
-        aabb[
-            0,
-            :
-        ]
-    )
-
-    half_size_local = (
-        aabb[
-            1,
-            :
-        ]
-    )
-
-    geom_position_world = (
-        data.geom_xpos[
-            geom_id
-        ]
-        .copy()
-    )
-
-    geom_rotation_world = (
-        data.geom_xmat[
-            geom_id
-        ]
-        .reshape(
-            3,
-            3,
-        )
-        .copy()
-    )
-
-    site_position_world = (
-        data.site_xpos[
-            site_id
-        ]
-        .copy()
-    )
-
-    corners_world = []
-
-    for sx in (
-        -1.0,
-        +1.0,
-    ):
-
-        for sy in (
-            -1.0,
-            +1.0,
-        ):
-
-            for sz in (
-                -1.0,
-                +1.0,
-            ):
-
-                corner_local = (
-                    center_local
-                    +
-                    np.array(
-                        [
-                            sx
-                            *
-                            half_size_local[
-                                0
-                            ],
-
-                            sy
-                            *
-                            half_size_local[
-                                1
-                            ],
-
-                            sz
-                            *
-                            half_size_local[
-                                2
-                            ],
-                        ],
-                        dtype=float,
-                    )
-                )
-
-                corner_world = (
-                    geom_position_world
-                    +
-                    geom_rotation_world
-                    @
-                    corner_local
-                )
-
-                corners_world.append(
-                    corner_world
-                )
-
-    corners_world = np.asarray(
-        corners_world,
-        dtype=float,
-    )
-
-    # Horizontal offsets from wrench-reference site.
-
-    relative_xy = (
-        corners_world[
-            :,
-            0:2
-        ]
-        -
-        site_position_world[
-            0:2
-        ]
-    )
-
-    xmin = float(
-        np.min(
-            relative_xy[
-                :,
-                0
-            ]
-        )
-    )
-
-    xmax = float(
-        np.max(
-            relative_xy[
-                :,
-                0
-            ]
-        )
-    )
-
-    ymin = float(
-        np.min(
-            relative_xy[
-                :,
-                1
-            ]
-        )
-    )
-
-    ymax = float(
-        np.max(
-            relative_xy[
-                :,
-                1
-            ]
-        )
-    )
-
-    margin = float(
-        safety_margin
-    )
-
-    xmin += margin
-    xmax -= margin
-
-    ymin += margin
-    ymax -= margin
-
-    if xmin >= xmax:
-
-        raise RuntimeError(
-            f"Invalid support x-range "
-            f"for {geom_name}."
-        )
-
-    if ymin >= ymax:
-
-        raise RuntimeError(
-            f"Invalid support y-range "
-            f"for {geom_name}."
-        )
-
-    # Basic sanity check.
-    #
-    # Open Duck feet are nowhere near 0.5 m long/wide.
-
-    if (
-        xmax
-        -
-        xmin
-        >
-        0.5
-    ):
-
-        raise RuntimeError(
-            f"Suspicious support x-size "
-            f"for {geom_name}."
-        )
-
-    if (
-        ymax
-        -
-        ymin
-        >
-        0.5
-    ):
-
-        raise RuntimeError(
-            f"Suspicious support y-size "
-            f"for {geom_name}."
-        )
-
-    return np.array(
-        [
-            xmin,
-            xmax,
-            ymin,
-            ymax,
-        ],
-        dtype=float,
-    )
-
-
-# ============================================================
-# COP FROM OPTIMIZED WRENCH
-# ============================================================
-
-def compute_cop_from_wrench(
-    wrench,
-    contact_height,
-):
-
-    wrench = np.asarray(
-        wrench,
-        dtype=float,
-    )
-
-    fx = float(
-        wrench[
-            0
-        ]
-    )
-
-    fy = float(
-        wrench[
-            1
-        ]
-    )
-
-    fz = float(
-        wrench[
-            2
-        ]
-    )
-
-    mx = float(
-        wrench[
-            3
-        ]
-    )
-
-    my = float(
-        wrench[
-            4
-        ]
-    )
-
-    if (
-        fz
-        <=
-        1.0e-6
-    ):
-
-        return np.array(
-            [
-                np.nan,
-                np.nan,
-            ],
-            dtype=float,
-        )
-
-    h = float(
-        contact_height
-    )
-
-    x_cop = (
-        -(
-            my
-            +
-            h
-            *
-            fx
-        )
-        /
-        fz
-    )
-
-    y_cop = (
-        (
-            mx
-            -
-            h
-            *
-            fy
-        )
-        /
-        fz
-    )
-
-    return np.array(
-        [
-            x_cop,
-            y_cop,
-        ],
-        dtype=float,
-    )
-
-
-# ============================================================
-# COM Jdot*v
-# ============================================================
-
-def compute_com_jdot_v(
-    model,
-    data,
-    root_body_id,
-    scratch_plus,
-    scratch_minus,
-    epsilon,
-):
-
-    qvel = (
-        data.qvel.copy()
-    )
-
-    if (
-        np.linalg.norm(
-            qvel
-        )
-        <
-        1.0e-12
-    ):
-
-        return np.zeros(
-            3,
-            dtype=float,
-        )
-
-    # ========================================================
-    # PLUS
-    # ========================================================
-
-    q_plus = (
-        data.qpos.copy()
-    )
-
-    mujoco.mj_integratePos(
-        model,
-        q_plus,
-        qvel,
-        +epsilon,
-    )
-
-    scratch_plus.qpos[:] = (
-        q_plus
-    )
-
-    scratch_plus.qvel[:] = (
-        qvel
-    )
-
-    scratch_plus.ctrl[:] = (
-        data.ctrl
+    mj_data.qvel[:] = (
+        0.0
     )
 
     mujoco.mj_forward(
-        model,
-        scratch_plus,
+        mj_model,
+        mj_data,
     )
 
-    J_plus = np.zeros(
-        (
-            3,
-            model.nv,
-        ),
+
+# ============================================================
+# MPC
+# ============================================================
+
+def create_axis_mpc():
+
+    model = (
+        LIPMModel1D(
+            timestep=(
+                MPC_TIMESTEP
+            ),
+            com_height=(
+                COM_HEIGHT
+            ),
+            gravity=(
+                GRAVITY
+            ),
+        )
+    )
+
+    terminal_weights = np.array(
+        [
+            TERMINAL_POSITION_WEIGHT,
+            TERMINAL_VELOCITY_WEIGHT,
+            TERMINAL_ACCELERATION_WEIGHT,
+        ],
         dtype=float,
     )
 
-    mujoco.mj_jacSubtreeCom(
-        model,
-        scratch_plus,
-        J_plus,
-        root_body_id,
-    )
-
-    # ========================================================
-    # MINUS
-    # ========================================================
-
-    q_minus = (
-        data.qpos.copy()
-    )
-
-    mujoco.mj_integratePos(
-        model,
-        q_minus,
-        qvel,
-        -epsilon,
-    )
-
-    scratch_minus.qpos[:] = (
-        q_minus
-    )
-
-    scratch_minus.qvel[:] = (
-        qvel
-    )
-
-    scratch_minus.ctrl[:] = (
-        data.ctrl
-    )
-
-    mujoco.mj_forward(
-        model,
-        scratch_minus,
-    )
-
-    J_minus = np.zeros(
-        (
-            3,
-            model.nv,
-        ),
-        dtype=float,
-    )
-
-    mujoco.mj_jacSubtreeCom(
-        model,
-        scratch_minus,
-        J_minus,
-        root_body_id,
-    )
-
-    Jdot = (
-        J_plus
-        -
-        J_minus
-    ) / (
-        2.0
-        *
-        epsilon
+    controller = (
+        LIPMMPC1D(
+            model=(
+                model
+            ),
+            horizon_steps=(
+                MPC_HORIZON_STEPS
+            ),
+            terminal_weights=(
+                terminal_weights
+            ),
+            control_weight=(
+                CONTROL_WEIGHT
+            ),
+        )
     )
 
     return (
-        Jdot
-        @
-        qvel
+        model,
+        controller,
     )
 
 
-def run_double_support_preparation(
-    model,
-    data,
-    dynamics,
-    controller,
-
-    actuated_qpos_indices,
-    posture_reference,
-
-    home_torque,
-
-    torque_lower,
-    torque_upper,
-
-    left_support_bounds,
-    right_support_bounds,
-
-    planner,
-
-    viewer=None,
+def shift_control_sequence(
+    control,
 ):
 
-    dt = float(
-        model.opt.timestep
+    if control is None:
+
+        return None
+
+    control = np.asarray(
+        control,
+        dtype=float,
     )
 
-    control_decimation = int(
-        round(
-            (
-                1.0
-                /
-                CONTROL_FREQUENCY
-            )
-            /
-            dt
-        )
+    shifted = np.empty_like(
+        control
     )
 
-    if control_decimation < 1:
-
-        raise RuntimeError(
-            "Invalid preparation control decimation."
-        )
-
-    base_body_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_BODY,
-        ROBOT_ROOT_BODY,
+    shifted[:-1] = (
+        control[1:]
     )
 
-    left_geom_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        LEFT_FOOT_GEOM,
+    shifted[-1] = (
+        control[-1]
     )
 
-    right_geom_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        RIGHT_FOOT_GEOM,
-    )
-
-    floor_geom_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        FLOOR_GEOM,
-    )
-
-    floor_z = float(
-        data.geom_xpos[
-            floor_geom_id,
-            2
-        ]
-    )
-
-    mujoco.mj_forward(
-        model,
-        data,
-    )
-
-    initial_com = dynamics.get_com_kinematics(
-        data,
-        ROBOT_ROOT_BODY,
-    )
-
-    initial_left = dynamics.get_site_kinematics(
-        data,
-        LEFT_FOOT_SITE,
-    )
-
-    initial_right = dynamics.get_site_kinematics(
-        data,
-        RIGHT_FOOT_SITE,
-    )
-
-    initial_com_y = float(
-        initial_com.position[
-            1
-        ]
-    )
-
-    target_com_y = float(
-        initial_left.position[
-            1
-        ]
-        -
-        PREPARE_LEFT_INNER_OFFSET
-    )
-
-    delta_y = (
-        target_com_y
-        -
-        initial_com_y
-    )
-
-    robot_weight = (
-        initial_com.mass
-        *
-        np.linalg.norm(
-            model.opt.gravity
-        )
-    )
-
-    scratch_plus = mujoco.MjData(
-        model
-    )
-
-    scratch_minus = mujoco.MjData(
-        model
-    )
-
-    phase_start_time = float(
-        data.time
-    )
-
-    last_tau = (
-        home_torque.copy()
-    )
-
-    last_solution = None
-
-    step_index = 0
-
-    next_print_time = 0.0
-
-    total_duration = (
-        PREPARE_DURATION
-        +
-        PREPARE_HOLD_TIME
-    )
-
-    print()
-
-    separator()
-
-    print(
-        "DOUBLE-SUPPORT PREPARATION"
-    )
-
-    separator()
-
-    print(
-        f"initial CoM-y = "
-        f"{initial_com_y:+.6f} m"
-    )
-
-    print(
-        f"left foot y   = "
-        f"{initial_left.position[1]:+.6f} m"
-    )
-
-    print(
-        f"target CoM-y  = "
-        f"{target_com_y:+.6f} m"
-    )
-
-    while True:
-
-        mujoco.mj_step1(
-            model,
-            data,
-        )
-
-        current_time = float(
-            data.time
-        )
-
-        elapsed_time = (
-            current_time
-            -
-            phase_start_time
-        )
-
-        com = dynamics.get_com_kinematics(
-            data,
-            ROBOT_ROOT_BODY,
-        )
-
-        left = dynamics.get_site_kinematics(
-            data,
-            LEFT_FOOT_SITE,
-        )
-
-        right = dynamics.get_site_kinematics(
-            data,
-            RIGHT_FOOT_SITE,
-        )
-
-        left_contact = has_geom_contact(
-            data,
-            left_geom_id,
-            floor_geom_id,
-        )
-
-        right_contact = has_geom_contact(
-            data,
-            right_geom_id,
-            floor_geom_id,
-        )
-
-        tilt = get_base_tilt_deg(
-            data,
-            base_body_id,
-        )
-
-        if (
-            not left_contact
-            or
-            not right_contact
-        ):
-
-            raise RuntimeError(
-                "A foot lost contact during "
-                "double-support preparation."
-            )
-
-        # --------------------------------------------
-        # Quintic preparation profile
-        # --------------------------------------------
-
-        if (
-            elapsed_time
-            <
-            PREPARE_DURATION
-        ):
-
-            r = float(
-                np.clip(
-                    elapsed_time
-                    /
-                    PREPARE_DURATION,
-                    0.0,
-                    1.0,
-                )
-            )
-
-            s = (
-                10.0 * r**3
-                -
-                15.0 * r**4
-                +
-                6.0 * r**5
-            )
-
-            s_dot = (
-                (
-                    30.0 * r**2
-                    -
-                    60.0 * r**3
-                    +
-                    30.0 * r**4
-                )
-                /
-                PREPARE_DURATION
-            )
-
-            s_ddot = (
-                (
-                    60.0 * r
-                    -
-                    180.0 * r**2
-                    +
-                    120.0 * r**3
-                )
-                /
-                PREPARE_DURATION**2
-            )
-
-        else:
-
-            s = 1.0
-            s_dot = 0.0
-            s_ddot = 0.0
-
-        desired_y = (
-            initial_com_y
-            +
-            delta_y * s
-        )
-
-        desired_vy = (
-            delta_y
-            *
-            s_dot
-        )
-
-        desired_ay_ff = (
-            delta_y
-            *
-            s_ddot
-        )
-
-        desired_com_acceleration_y = (
-            desired_ay_ff
-
-            +
-            PREPARE_COM_KP
-            *
-            (
-                desired_y
-                -
-                com.position[1]
-            )
-
-            +
-            PREPARE_COM_KD
-            *
-            (
-                desired_vy
-                -
-                com.velocity[1]
-            )
-        )
-
-        desired_left_fraction = (
-            0.5
-            +
-            (
-                PREPARE_LEFT_LOAD_FRACTION
-                -
-                0.5
-            )
-            *
-            s
-        )
-
-        desired_right_fraction = (
-            1.0
-            -
-            desired_left_fraction
-        )
-
-        if (
-            step_index
-            %
-            control_decimation
-            ==
-            0
-        ):
-
-            terms = dynamics.compute(
-                data,
-                forward=False,
-            )
-
-            com_jdot_v = compute_com_jdot_v(
-                model=model,
-                data=data,
-                root_body_id=base_body_id,
-                scratch_plus=scratch_plus,
-                scratch_minus=scratch_minus,
-                epsilon=COM_JDOT_EPSILON,
-            )
-
-            desired_com_acceleration_z = (
-                COM_HEIGHT_KP
-                *
-                (
-                    COM_HEIGHT_REFERENCE
-                    -
-                    com.position[2]
-                )
-                -
-                COM_HEIGHT_KD
-                *
-                com.velocity[2]
-            )
-
-            q_actuated = (
-                data.qpos[
-                    actuated_qpos_indices
-                ]
-            )
-
-            v_actuated = (
-                data.qvel[
-                    dynamics.actuated_dof_indices
-                ]
-            )
-
-            desired_posture_acceleration = (
-                POSTURE_KP
-                *
-                (
-                    posture_reference
-                    -
-                    q_actuated
-                )
-                -
-                POSTURE_KD
-                *
-                v_actuated
-            )
-
-            last_solution = (
-                controller.solve_prepare(
-                    mass_matrix=(
-                        terms.mass_matrix
-                    ),
-
-                    effective_bias=(
-                        terms.effective_bias
-                    ),
-
-                    selection_matrix=(
-                        terms.selection_matrix
-                    ),
-
-                    left_jacobian=(
-                        left.jacobian
-                    ),
-
-                    left_jdot_v=(
-                        left.jacobian_dot_velocity
-                    ),
-
-                    right_jacobian=(
-                        right.jacobian
-                    ),
-
-                    right_jdot_v=(
-                        right.jacobian_dot_velocity
-                    ),
-
-                    com_jacobian=(
-                        com.jacobian
-                    ),
-
-                    com_jdot_v_y=(
-                        com_jdot_v[1]
-                    ),
-
-                    com_jdot_v_z=(
-                        com_jdot_v[2]
-                    ),
-
-                    desired_com_acceleration_y=(
-                        desired_com_acceleration_y
-                    ),
-
-                    desired_com_acceleration_z=(
-                        desired_com_acceleration_z
-                    ),
-
-                    desired_left_fz=(
-                        desired_left_fraction
-                        *
-                        robot_weight
-                    ),
-
-                    desired_right_fz=(
-                        desired_right_fraction
-                        *
-                        robot_weight
-                    ),
-
-                    desired_posture_acceleration=(
-                        desired_posture_acceleration
-                    ),
-
-                    left_support_bounds=(
-                        left_support_bounds
-                    ),
-
-                    right_support_bounds=(
-                        right_support_bounds
-                    ),
-
-                    left_contact_height=(
-                        left.position[2]
-                        -
-                        floor_z
-                    ),
-
-                    right_contact_height=(
-                        right.position[2]
-                        -
-                        floor_z
-                    ),
-
-                    torque_lower=(
-                        torque_lower
-                    ),
-
-                    torque_upper=(
-                        torque_upper
-                    ),
-                )
-            )
-
-            last_tau = (
-                last_solution.torque.copy()
-            )
-
-        data.ctrl[:] = (
-            last_tau
-        )
-
-        # --------------------------------------------
-        # Status
-        # --------------------------------------------
-
-        if (
-            elapsed_time
-            >=
-            next_print_time
-            -
-            0.5 * dt
-        ):
-
-            dcm_y = float(
-                com.position[1]
-                +
-                com.velocity[1]
-                /
-                planner.omega
-            )
-
-            if last_solution is None:
-
-                left_fraction = np.nan
-                right_fraction = np.nan
-
-                r2 = 0.0
-                r3 = 0.0
-                r4 = 0.0
-
-            else:
-
-                left_fraction = (
-                    last_solution.left_wrench[2]
-                    /
-                    robot_weight
-                )
-
-                right_fraction = (
-                    last_solution.right_wrench[2]
-                    /
-                    robot_weight
-                )
-
-                r2 = (
-                    last_solution.rank2_residual
-                )
-
-                r3 = (
-                    last_solution.rank3_residual
-                )
-
-                r4 = (
-                    last_solution.rank4_residual
-                )
-
-            print(
-                f"prepare t={elapsed_time:5.2f}"
-                f" | CoMy={com.position[1]:+.4f}"
-                f" | DCM_y={dcm_y:+.4f}"
-                f" | yref={desired_y:+.4f}"
-                f" | Vy={com.velocity[1]:+.4f}"
-                f" | load L/R="
-                f"{100.0 * left_fraction:5.1f}/"
-                f"{100.0 * right_fraction:5.1f}%"
-                f" | tilt={tilt:.2f}"
-                f" | R2={r2:.2e}"
-                f" | R3={r3:.2e}"
-                f" | R4={r4:.2e}"
-            )
-
-            next_print_time += (
-                PREPARE_STATUS_PRINT_PERIOD
-            )
-
-        if (
-            viewer is not None
-        ):
-
-            viewer.sync()
-
-        mujoco.mj_step2(
-            model,
-            data,
-        )
-
-        step_index += 1
-
-        if (
-            elapsed_time
-            >=
-            total_duration
-        ):
-
-            break
-
-    # ========================================================
-    # READINESS
-    # ========================================================
-
-    mujoco.mj_forward(
-        model,
-        data,
-    )
-
-    final_com = dynamics.get_com_kinematics(
-        data,
-        ROBOT_ROOT_BODY,
-    )
-
-    final_left = dynamics.get_site_kinematics(
-        data,
-        LEFT_FOOT_SITE,
-    )
-
-    final_dcm_y = float(
-        final_com.position[1]
-        +
-        final_com.velocity[1]
-        /
-        planner.omega
-    )
-
-    left_support_y_min = (
-        final_left.position[1]
-        +
-        left_support_bounds[2]
-        +
-        PREPARE_DCM_MARGIN
-    )
-
-    left_support_y_max = (
-        final_left.position[1]
-        +
-        left_support_bounds[3]
-        -
-        PREPARE_DCM_MARGIN
-    )
-
-    if last_solution is None:
-
-        raise RuntimeError(
-            "Preparation produced no HQP solution."
-        )
-
-    final_right_load_fraction = (
-        last_solution.right_wrench[2]
-        /
-        robot_weight
-    )
-
-    final_tilt = get_base_tilt_deg(
-        data,
-        base_body_id,
-    )
-
-    ready = (
-        left_support_y_min
-        <=
-        final_dcm_y
-        <=
-        left_support_y_max
-
-        and
-
-        abs(
-            final_com.velocity[1]
-        )
-        <=
-        PREPARE_VELOCITY_Y_MAX
-
-        and
-
-        final_right_load_fraction
-        <=
-        PREPARE_RIGHT_LOAD_MAX
-
-        and
-
-        final_tilt
-        <=
-        PREPARE_MAX_TILT_DEG
-    )
-
-    print()
-
-    separator()
-
-    print(
-        "DOUBLE-SUPPORT PREPARATION RESULT"
-    )
-
-    separator()
-
-    print(
-        f"final CoM-y       = "
-        f"{final_com.position[1]:+.6f} m"
-    )
-
-    print(
-        f"final DCM-y       = "
-        f"{final_dcm_y:+.6f} m"
-    )
-
-    print(
-        f"LEFT support y    = "
-        f"[{left_support_y_min:+.6f}, "
-        f"{left_support_y_max:+.6f}] m"
-    )
-
-    print(
-        f"final Vy          = "
-        f"{final_com.velocity[1]:+.6f} m/s"
-    )
-
-    print(
-        f"right load        = "
-        f"{100.0 * final_right_load_fraction:.2f}%"
-    )
-
-    print(
-        f"final tilt        = "
-        f"{final_tilt:.3f} deg"
-    )
-
-    print(
-        f"Rank-2 residual   = "
-        f"{last_solution.rank2_residual:.6e}"
-    )
-
-    print(
-        f"Rank-3 residual   = "
-        f"{last_solution.rank3_residual:.6e}"
-    )
-
-    print(
-        f"Rank-4 residual   = "
-        f"{last_solution.rank4_residual:.6e}"
-    )
-
-    print(
-        f"ready LEFT SS     = "
-        f"{ready}"
-    )
-
-    if not ready:
-
-        raise RuntimeError(
-            "Double-support preparation did not "
-            "reach a valid LEFT single-support state."
-        )
+    return shifted
 
 
 # ============================================================
-# SINGLE-SUPPORT / PLANNER-IN-THE-LOOP VALIDATION
+# DCM
 # ============================================================
 
-def run_single_support_step_validation(
-    model,
-    data,
-    dynamics,
-    controller,
-    planner,
-
-    actuated_qpos_indices,
-    posture_reference,
-
-    home_torque,
-
-    torque_lower,
-    torque_upper,
-
-    left_support_bounds,
-    right_support_bounds,
-
-    viewer=None,
+def compute_dcm_from_lipm(
+    x_state,
+    y_state,
+    omega,
 ):
 
-    # ========================================================
-    # FIXED TEST PHASE
-    #
-    # Stage 4A validates ONE step only:
-    #
-    #     LEFT stance -> RIGHT swing
-    #
-    # No alternating gait state machine yet.
-    # ========================================================
-
-    stance_leg = StanceLeg.LEFT
-
-    dt = float(
-        model.opt.timestep
-    )
-
-    simulation_frequency = (
-        1.0
-        /
-        dt
-    )
-
-    requested_control_period = (
-        1.0
-        /
-        CONTROL_FREQUENCY
-    )
-
-    control_decimation = int(
-        round(
-            requested_control_period
-            /
-            dt
-        )
-    )
-
-    if control_decimation < 1:
-
-        raise RuntimeError(
-            "WBC frequency is greater than MuJoCo frequency."
-        )
-
-    actual_control_period = (
-        control_decimation
-        *
-        dt
-    )
-
-    if (
-        abs(
-            actual_control_period
-            -
-            requested_control_period
-        )
-        >
-        1.0e-12
-    ):
-
-        raise RuntimeError(
-            "CONTROL_FREQUENCY is not an integer "
-            "decimation of simulation frequency."
-        )
-
-    planner_period = (
-        1.0
-        /
-        PLANNER_UPDATE_FREQUENCY
-    )
-
-    if planner_period < actual_control_period:
-
-        raise RuntimeError(
-            "PLANNER_UPDATE_FREQUENCY must not exceed "
-            "the WBC frequency in this validation."
-        )
-
-    # ========================================================
-    # IDS
-    # ========================================================
-
-    base_body_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_BODY,
-        ROBOT_ROOT_BODY,
-    )
-
-    left_geom_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        LEFT_FOOT_GEOM,
-    )
-
-    right_geom_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        RIGHT_FOOT_GEOM,
-    )
-
-    floor_geom_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        FLOOR_GEOM,
-    )
-
-    floor_plane_z = float(
-        data.geom_xpos[
-            floor_geom_id,
-            2
-        ]
-    )
-
-    # ========================================================
-    # INITIAL STATE
-    # ========================================================
-
-    com = dynamics.get_com_kinematics(
-        data,
-        ROBOT_ROOT_BODY,
-    )
-
-    left = dynamics.get_site_kinematics(
-        data,
-        LEFT_FOOT_SITE,
-    )
-
-    right = dynamics.get_site_kinematics(
-        data,
-        RIGHT_FOOT_SITE,
-    )
-
-    if stance_leg is StanceLeg.LEFT:
-
-        stance = left
-        swing = right
-
-        stance_support_bounds = (
-            left_support_bounds
-        )
-
-        stance_geom_id = (
-            left_geom_id
-        )
-
-        swing_geom_id = (
-            right_geom_id
-        )
-
-    else:
-
-        stance = right
-        swing = left
-
-        stance_support_bounds = (
-            right_support_bounds
-        )
-
-        stance_geom_id = (
-            right_geom_id
-        )
-
-        swing_geom_id = (
-            left_geom_id
-        )
-
-    stance_initial_position = (
-        stance.position.copy()
-    )
-
-    swing_initial_position = (
-        swing.position.copy()
-    )
-
-    # ========================================================
-    # NOMINAL STEP
-    # ========================================================
-
-    nominal_step = planner.compute_nominal_step(
-        desired_velocity_x=(
-            DESIRED_VELOCITY_X
-        ),
-        desired_velocity_y=(
-            DESIRED_VELOCITY_Y
-        ),
-        stance_leg=(
-            stance_leg
-        ),
-    )
-
-    # ========================================================
-    # INITIAL PLANNER SOLUTION
-    # ========================================================
-
-    dcm_xy = (
-        np.asarray(
-            com.position[
-                0:2
-            ],
-            dtype=float,
-        )
-        +
-        np.asarray(
-            com.velocity[
-                0:2
-            ],
-            dtype=float,
-        )
-        /
-        planner.omega
-    )
-
-    planner_result = planner.solve_adaptive_step(
-        nominal_step=(
-            nominal_step
-        ),
-        dcm_measured=(
-            dcm_xy
-        ),
-        stance_position=np.asarray(
-            stance.position[
-                0:2
-            ],
-            dtype=float,
-        ),
-        elapsed_time=0.0,
-        alpha_location=(
-            STEP_QP_ALPHA_LOCATION
-        ),
-        alpha_timing=(
-            STEP_QP_ALPHA_TIMING
-        ),
-        alpha_dcm=(
-            STEP_QP_ALPHA_DCM
-        ),
-        alpha_viability=(
-            STEP_QP_ALPHA_VIABILITY
-        ),
-        timing_gap=(
-            STEP_TIMING_GAP
-        ),
-    )
-
-    # ========================================================
-    # SWING TRAJECTORY
-    # ========================================================
-
-    vertical_parameters = VerticalSwingQPParameters(
-        desired_height=(
-            SWING_HEIGHT_DESIRED
-        ),
-        maximum_height=(
-            SWING_HEIGHT_MAX
-        ),
-        constraint_samples=(
-            SWING_VERTICAL_CONSTRAINT_SAMPLES
-        ),
-        coefficient_regularization=(
-            SWING_VERTICAL_COEFFICIENT_REGULARIZATION
-        ),
-        bound_tolerance=(
-            SWING_VERTICAL_BOUND_TOLERANCE
-        ),
-        max_refinements=(
-            SWING_VERTICAL_MAX_REFINEMENTS
-        ),
-    )
-
-    swing_trajectory = (
-        OnlineSwingFootTrajectory()
-    )
-
-    swing_trajectory.reset_3d(
-        initial_position=(
-            swing_initial_position
-        ),
-        initial_velocity=np.zeros(
-            3,
-            dtype=float,
-        ),
-        initial_acceleration=np.zeros(
-            3,
-            dtype=float,
-        ),
-        start_time=0.0,
-    )
-
-    trajectory_sample = (
-        swing_trajectory.update_3d(
-            current_time=0.0,
-            landing_time=(
-                planner_result.step_time
-            ),
-            landing_position_xy=np.array(
-                [
-                    planner_result.step_location_x,
-                    planner_result.step_location_y,
-                ],
-                dtype=float,
-            ),
-            vertical_parameters=(
-                vertical_parameters
-            ),
-        )
-    )
-
-    trajectory_sample_time = 0.0
-
-    # ========================================================
-    # STANCE WRENCH REFERENCE
-    # ========================================================
-
-    robot_weight = (
-        com.mass
-        *
-        np.linalg.norm(
-            model.opt.gravity
-        )
-    )
-
-    stance_wrench_reference = np.array(
+    return np.array(
         [
-            0.0,
-            0.0,
-            robot_weight,
-            0.0,
+            x_state[0]
+            +
+            x_state[1]
+            /
+            omega,
+
+            y_state[0]
+            +
+            y_state[1]
+            /
+            omega,
+        ],
+        dtype=float,
+    )
+
+
+# ============================================================
+# CURRENT CONTINUOUS LIPM STATE
+# ============================================================
+
+def get_current_lipm_state(
+    x_state,
+    y_state,
+    segment,
+    mpc_substep,
+):
+
+    if segment is None:
+
+        return (
+            x_state.copy(),
+            y_state.copy(),
+        )
+
+    tau = min(
+        mpc_substep
+        *
+        DT,
+        MPC_TIMESTEP,
+    )
+
+    return (
+        segment.get_x_state(
+            tau
+        ),
+        segment.get_y_state(
+            tau
+        ),
+    )
+
+
+# ============================================================
+# MPC SOLVE
+# ============================================================
+
+def solve_mpc_segment(
+    *,
+    current_phase,
+    phase_time,
+
+    x_state,
+    y_state,
+
+    x_mpc,
+    y_mpc,
+
+    previous_x_control,
+    previous_y_control,
+
+    left_initial_position,
+    right_initial_position,
+
+    left_rotation,
+    right_rotation,
+
+    landing_position,
+    single_support_duration,
+):
+
+    preview = (
+        build_adaptive_support_preview(
+            current_phase=(
+                current_phase
+            ),
+            phase_time=(
+                phase_time
+            ),
+
+            initial_double_support_duration=(
+                INITIAL_DOUBLE_SUPPORT_DURATION
+            ),
+
+            single_support_duration=(
+                single_support_duration
+            ),
+
+            stance_side=(
+                STANCE_SIDE
+            ),
+
+            left_initial_position=(
+                left_initial_position
+            ),
+
+            right_initial_position=(
+                right_initial_position
+            ),
+
+            landing_position=(
+                landing_position
+            ),
+
+            left_rotation=(
+                left_rotation
+            ),
+
+            right_rotation=(
+                right_rotation
+            ),
+
+            timestep=(
+                MPC_TIMESTEP
+            ),
+
+            horizon_steps=(
+                MPC_HORIZON_STEPS
+            ),
+
+            foot_toe=(
+                FOOT_TOE
+            ),
+
+            foot_heel=(
+                FOOT_HEEL
+            ),
+
+            foot_half_width=(
+                FOOT_HALF_WIDTH
+            ),
+
+            zmp_scale=(
+                ZMP_SUPPORT_SCALE
+            ),
+        )
+    )
+
+    # --------------------------------------------------------
+    # Terminal goal = center of final preview support region.
+    # --------------------------------------------------------
+
+    x_goal = np.array(
+        [
+            0.5
+            *
+            (
+                preview.x_min[-1]
+                +
+                preview.x_max[-1]
+            ),
             0.0,
             0.0,
         ],
         dtype=float,
     )
 
-    # ========================================================
-    # SCRATCH DATA FOR COM Jdot*v
-    # ========================================================
-
-    scratch_plus = mujoco.MjData(
-        model
-    )
-
-    scratch_minus = mujoco.MjData(
-        model
-    )
-
-    # ========================================================
-    # PHASE STATE
-    # ========================================================
-
-    phase_start_time = float(
-        data.time
-    )
-
-    next_planner_update = (
-        planner_period
-    )
-
-    planner_frozen = False
-
-    freeze_time = None
-
-    touchdown_time = None
-
-    # ========================================================
-    # CONTROL STATE
-    # ========================================================
-
-    last_tau = (
-        home_torque.copy()
-    )
-
-    last_solution = None
-
-    # ========================================================
-    # METRICS
-    # ========================================================
-
-    max_swing_position_error = 0.0
-    max_stance_slip = 0.0
-    max_tilt = 0.0
-    max_tau_utilization = 0.0
-
-    total_hqp_times = []
-
-    rank5_fallback_count = 0
-
-    # ========================================================
-    # PRINT / VIEWER
-    # ========================================================
-
-    next_print_elapsed = (
-        STATUS_PRINT_PERIOD
-    )
-
-    next_viewer_time = float(
-        data.time
-    )
-
-    viewer_period = (
-        1.0
-        /
-        VIEWER_REFRESH_FREQUENCY
+    y_goal = np.array(
+        [
+            0.5
+            *
+            (
+                preview.y_min[-1]
+                +
+                preview.y_max[-1]
+            ),
+            0.0,
+            0.0,
+        ],
+        dtype=float,
     )
 
     wall_start = (
         time.perf_counter()
     )
 
-    simulation_start_time = float(
-        data.time
+    x_result = (
+        x_mpc.solve(
+            current_state=(
+                x_state
+            ),
+            goal_state=(
+                x_goal
+            ),
+            lower_bounds=(
+                preview.x_min
+            ),
+            upper_bounds=(
+                preview.x_max
+            ),
+            initial_control=(
+                shift_control_sequence(
+                    previous_x_control
+                )
+            ),
+            solver_options=(
+                MPC_SOLVER_OPTIONS
+            ),
+        )
     )
 
-    step_index = 0
+    y_result = (
+        y_mpc.solve(
+            current_state=(
+                y_state
+            ),
+            goal_state=(
+                y_goal
+            ),
+            lower_bounds=(
+                preview.y_min
+            ),
+            upper_bounds=(
+                preview.y_max
+            ),
+            initial_control=(
+                shift_control_sequence(
+                    previous_y_control
+                )
+            ),
+            solver_options=(
+                MPC_SOLVER_OPTIONS
+            ),
+        )
+    )
+
+    solve_time = (
+        time.perf_counter()
+        -
+        wall_start
+    )
+
+    if not x_result.success:
+
+        raise RuntimeError(
+            "X MPC failed: "
+            f"{x_result.message}"
+        )
+
+    if not y_result.success:
+
+        raise RuntimeError(
+            "Y MPC failed: "
+            f"{y_result.message}"
+        )
+
+    segment = (
+        ConstantJerkCoMSegment(
+            x_state=(
+                x_state
+            ),
+            y_state=(
+                y_state
+            ),
+
+            x_jerk=(
+                x_result.first_control
+            ),
+            y_jerk=(
+                y_result.first_control
+            ),
+
+            com_height=(
+                COM_HEIGHT
+            ),
+
+            duration=(
+                MPC_TIMESTEP
+            ),
+        )
+    )
+
+    return {
+        "preview":
+            preview,
+
+        "x_result":
+            x_result,
+
+        "y_result":
+            y_result,
+
+        "segment":
+            segment,
+
+        "solve_time":
+            solve_time,
+    }
+
+
+# ============================================================
+# PLANNER
+# ============================================================
+
+def solve_step_planner(
+    planner,
+    nominal_step,
+    dcm,
+    stance_position_xy,
+    elapsed_time,
+):
+
+    return (
+        planner.solve_adaptive_step(
+            nominal_step=(
+                nominal_step
+            ),
+
+            dcm_measured=(
+                dcm
+            ),
+
+            stance_position=(
+                stance_position_xy
+            ),
+
+            elapsed_time=(
+                elapsed_time
+            ),
+
+            alpha_location=(
+                STEP_QP_ALPHA_LOCATION
+            ),
+
+            alpha_timing=(
+                STEP_QP_ALPHA_TIMING
+            ),
+
+            alpha_dcm=(
+                STEP_QP_ALPHA_DCM
+            ),
+
+            alpha_viability=(
+                STEP_QP_ALPHA_VIABILITY
+            ),
+
+            timing_gap=(
+                STEP_TIMING_GAP
+            ),
+        )
+    )
+
+
+# ============================================================
+# EXECUTION
+# ============================================================
+
+def run_test(
+    *,
+    mj_model,
+    mj_data,
+    robot,
+    planner,
+    viewer=None,
+):
+
+    # ========================================================
+    # INITIAL KINEMATIC STATE
+    # ========================================================
+
+    q_pin = (
+        robot.mujoco_to_pin(
+            mj_data.qpos.copy()
+        )
+    )
+
+    robot.update(
+        q_pin
+    )
+
+    (
+        left_initial_position,
+        left_rotation,
+    ) = (
+        robot.get_left_foot_pose()
+    )
+
+    (
+        right_initial_position,
+        right_rotation,
+    ) = (
+        robot.get_right_foot_pose()
+    )
+
+    initial_com = (
+        robot.get_com()
+    )
+
+    (
+        _,
+        trunk_rotation_ref,
+    ) = (
+        robot.get_frame_pose(
+            TRUNK_FRAME
+        )
+    )
+
+    stance_position_xy = (
+        left_initial_position[
+            0:2
+        ].copy()
+    )
+
+    # ========================================================
+    # NOMINAL STEP
+    # ========================================================
+
+    nominal_step = (
+        planner.compute_nominal_step(
+            stance_leg=(
+                STANCE_LEG
+            ),
+
+            desired_velocity_x=(
+                DESIRED_VELOCITY_X
+            ),
+
+            desired_velocity_y=(
+                DESIRED_VELOCITY_Y
+            ),
+        )
+    )
+
+    nominal_landing_position = (
+        right_initial_position.copy()
+    )
+
+    nominal_landing_position[0] = (
+        stance_position_xy[0]
+        +
+        nominal_step.step_displacement_x
+    )
+
+    nominal_landing_position[1] = (
+        stance_position_xy[1]
+        +
+        nominal_step.step_displacement_y
+    )
+
+    nominal_single_support_duration = (
+        nominal_step.step_time
+    )
+
+    # ========================================================
+    # LIPM STATE
+    # ========================================================
+
+    x_state = np.array(
+        [
+            initial_com[0],
+            0.0,
+            0.0,
+        ],
+        dtype=float,
+    )
+
+    y_state = np.array(
+        [
+            initial_com[1],
+            0.0,
+            0.0,
+        ],
+        dtype=float,
+    )
+
+    # ========================================================
+    # MPC
+    # ========================================================
+
+    (
+        _,
+        x_mpc,
+    ) = (
+        create_axis_mpc()
+    )
+
+    (
+        _,
+        y_mpc,
+    ) = (
+        create_axis_mpc()
+    )
+
+    current_segment = None
+
+    mpc_substep = 0
+
+    previous_x_control = None
+    previous_y_control = None
+
+    mpc_solve_count = 0
+
+    max_mpc_solve_time = 0.0
+
+    # ========================================================
+    # SWING TRAJECTORY
+    # ========================================================
+
+    swing_trajectory = (
+        OnlineSwingFootTrajectory()
+    )
+
+    vertical_parameters = (
+        VerticalSwingQPParameters(
+            desired_height=(
+                SWING_HEIGHT_DESIRED
+            ),
+
+            maximum_height=(
+                SWING_HEIGHT_MAX
+            ),
+
+            constraint_samples=(
+                SWING_VERTICAL_CONSTRAINT_SAMPLES
+            ),
+
+            coefficient_regularization=(
+                SWING_VERTICAL_COEFFICIENT_REGULARIZATION
+            ),
+
+            bound_tolerance=(
+                SWING_VERTICAL_BOUND_TOLERANCE
+            ),
+
+            max_refinements=(
+                SWING_VERTICAL_MAX_REFINEMENTS
+            ),
+        )
+    )
+
+    swing_initialized = False
+
+    # ========================================================
+    # PHASE
+    # ========================================================
+
+    phase = (
+        INITIAL_DOUBLE_SUPPORT
+    )
+
+    phase_time = 0.0
+
+    kinematic_time = 0.0
+
+    # Before SS starts, MPC preview uses nominal step.
+
+    landing_position = (
+        nominal_landing_position.copy()
+    )
+
+    current_step_time = (
+        nominal_single_support_duration
+    )
+
+    planner_result = None
+
+    planner_frozen = False
+
+    freeze_time = None
+
+    next_planner_update = 0.0
+
+    disturbance_applied = False
+
+    # ========================================================
+    # DIAGNOSTICS
+    # ========================================================
+
+    max_com_error = 0.0
+
+    max_support_error = 0.0
+
+    max_swing_error = 0.0
+
+    max_viability_slack_x = 0.0
+
+    max_viability_slack_y = 0.0
+
+    next_print_time = 0.0
+
+    # ========================================================
+    # INFO
+    # ========================================================
+
+    separator()
+
+    print(
+        "STEP TIMING ADAPTATION"
+    )
+
+    print(
+        "LIPM-MPC + HIERARCHICAL DIFFERENTIAL IK"
+    )
+
+    print(
+        "KINEMATIC SET-STATE VALIDATION"
+    )
+
+    separator()
 
     print()
 
     print(
-        f"simulation frequency = "
-        f"{simulation_frequency:.1f} Hz"
+        "Execution architecture:"
     )
 
     print(
-        f"WBC frequency        = "
-        f"{CONTROL_FREQUENCY:.1f} Hz"
+        "  adaptive step planner"
     )
 
     print(
-        f"planner frequency    = "
-        f"{PLANNER_UPDATE_FREQUENCY:.1f} Hz"
+        "       -> adaptive support preview"
     )
 
     print(
-        f"stance leg           = "
-        f"{stance_leg.value}"
+        "       -> LIPM-MPC CoM"
     )
 
     print(
-        f"initial planner T    = "
-        f"{planner_result.step_time:.6f} s"
+        "       -> swing trajectory"
     )
 
     print(
-        "initial planner uT   = "
-        f"({planner_result.step_location_x:+.6f}, "
-        f"{planner_result.step_location_y:+.6f}) m"
+        "       -> hierarchical differential IK"
     )
+
+    print(
+        "       -> Pinocchio integrate"
+    )
+
+    print(
+        "       -> MuJoCo qpos set-state"
+    )
+
+    print()
+
+    print(
+        "No rigid-body dynamics."
+    )
+
+    print(
+        "No WBC."
+    )
+
+    print(
+        "No mj_step()."
+    )
+
+    print()
+
+    print(
+        f"Initial LEFT  = "
+        f"{left_initial_position}"
+    )
+
+    print(
+        f"Initial RIGHT = "
+        f"{right_initial_position}"
+    )
+
+    print(
+        f"Initial CoM   = "
+        f"{initial_com}"
+    )
+
+    print()
+
+    print(
+        f"Nominal uT    = "
+        f"{nominal_landing_position}"
+    )
+
+    print(
+        f"Nominal T     = "
+        f"{nominal_step.step_time:.6f} s"
+    )
+
+    print(
+        f"omega         = "
+        f"{planner.omega:.6f} rad/s"
+    )
+
+    print()
+
+    print(
+        "IK hierarchy:"
+    )
+
+    print(
+        "  support > CoM > swing > trunk"
+    )
+
+    print()
+
+    # ========================================================
+    # REAL-TIME
+    # ========================================================
+
+    wall_start = (
+        time.perf_counter()
+    )
+
+    iteration = 0
 
     # ========================================================
     # LOOP
@@ -2245,935 +1276,1133 @@ def run_single_support_step_validation(
 
             break
 
-        mujoco.mj_step1(
-            model,
-            data,
-        )
-
-        current_time = float(
-            data.time
-        )
-
-        elapsed_time = (
-            current_time
-            -
-            phase_start_time
-        )
-
-        # ----------------------------------------------------
-        # Fresh robot state
-        # ----------------------------------------------------
-
-        com = dynamics.get_com_kinematics(
-            data,
-            ROBOT_ROOT_BODY,
-        )
-
-        left = dynamics.get_site_kinematics(
-            data,
-            LEFT_FOOT_SITE,
-        )
-
-        right = dynamics.get_site_kinematics(
-            data,
-            RIGHT_FOOT_SITE,
-        )
-
-        if stance_leg is StanceLeg.LEFT:
-
-            stance = left
-            swing = right
-
-        else:
-
-            stance = right
-            swing = left
-
-        tilt = get_base_tilt_deg(
-            data,
-            base_body_id,
-        )
-
-        stance_contact = has_geom_contact(
-            data,
-            stance_geom_id,
-            floor_geom_id,
-        )
-
-        swing_contact = has_geom_contact(
-            data,
-            swing_geom_id,
-            floor_geom_id,
-        )
-
-        stance_slip = float(
-            np.linalg.norm(
-                stance.position[
-                    0:2
-                ]
-                -
-                stance_initial_position[
-                    0:2
-                ]
-            )
-        )
-
-        max_stance_slip = max(
-            max_stance_slip,
-            stance_slip,
-        )
-
-        max_tilt = max(
-            max_tilt,
-            tilt,
-        )
-
-        # ----------------------------------------------------
-        # Emergency
-        # ----------------------------------------------------
+        # ====================================================
+        # INITIAL DS -> SINGLE SUPPORT
+        # ====================================================
 
         if (
-            tilt
-            >
-            EMERGENCY_BASE_TILT_DEG
-        ):
-
-            raise RuntimeError(
-                "Emergency base tilt at "
-                f"t={elapsed_time:.6f} s."
-            )
-
-        if (
-            com.position[
-                2
-            ]
-            <
-            COM_HEIGHT_REFERENCE
-            -
-            EMERGENCY_COM_DROP
-        ):
-
-            raise RuntimeError(
-                "Emergency CoM drop at "
-                f"t={elapsed_time:.6f} s."
-            )
-
-        # ----------------------------------------------------
-        # DCM
-        # ----------------------------------------------------
-
-        dcm_xy = (
-            np.asarray(
-                com.position[
-                    0:2
-                ],
-                dtype=float,
-            )
-            +
-            np.asarray(
-                com.velocity[
-                    0:2
-                ],
-                dtype=float,
-            )
-            /
-            planner.omega
-        )
-
-        # ----------------------------------------------------
-        # Freeze planner near landing.
-        #
-        # Once:
-        #
-        #     t >= T - T_gap
-        #
-        # the latest landing target is kept fixed.
-        # ----------------------------------------------------
-
-        if (
-            not planner_frozen
+            phase
+            ==
+            INITIAL_DOUBLE_SUPPORT
             and
-            elapsed_time
+            phase_time
             >=
-            planner_result.step_time
+            INITIAL_DOUBLE_SUPPORT_DURATION
             -
-            STEP_TIMING_GAP
+            TIME_TOLERANCE
         ):
 
-            planner_frozen = True
+            # Current MPC state at exact transition.
 
-            freeze_time = float(
-                elapsed_time
+            (
+                x_state,
+                y_state,
+            ) = (
+                get_current_lipm_state(
+                    x_state=(
+                        x_state
+                    ),
+                    y_state=(
+                        y_state
+                    ),
+                    segment=(
+                        current_segment
+                    ),
+                    mpc_substep=(
+                        mpc_substep
+                    ),
+                )
             )
 
-        # ----------------------------------------------------
-        # Planner + trajectory regeneration
-        # ----------------------------------------------------
+            current_segment = None
 
-        if (
-            elapsed_time
-            >=
-            next_planner_update
-            -
-            0.5
-            *
-            dt
-            and
-            elapsed_time
-            <
-            planner_result.step_time
-            -
-            0.5
-            *
-            dt
-        ):
+            mpc_substep = 0
 
-            if not planner_frozen:
+            previous_x_control = None
+            previous_y_control = None
 
-                planner_result = planner.solve_adaptive_step(
+            phase = (
+                SINGLE_SUPPORT
+            )
+
+            phase_time = 0.0
+
+            # ------------------------------------------------
+            # Current DCM from MPC CoM state.
+            # ------------------------------------------------
+
+            dcm = (
+                compute_dcm_from_lipm(
+                    x_state=(
+                        x_state
+                    ),
+                    y_state=(
+                        y_state
+                    ),
+                    omega=(
+                        planner.omega
+                    ),
+                )
+            )
+
+            planner_result = (
+                solve_step_planner(
+                    planner=(
+                        planner
+                    ),
                     nominal_step=(
                         nominal_step
                     ),
-                    dcm_measured=(
-                        dcm_xy
+                    dcm=(
+                        dcm
                     ),
-                    stance_position=np.asarray(
-                        stance.position[
-                            0:2
-                        ],
-                        dtype=float,
+                    stance_position_xy=(
+                        stance_position_xy
                     ),
-                    elapsed_time=(
-                        elapsed_time
-                    ),
-                    alpha_location=(
-                        STEP_QP_ALPHA_LOCATION
-                    ),
-                    alpha_timing=(
-                        STEP_QP_ALPHA_TIMING
-                    ),
-                    alpha_dcm=(
-                        STEP_QP_ALPHA_DCM
-                    ),
-                    alpha_viability=(
-                        STEP_QP_ALPHA_VIABILITY
-                    ),
-                    timing_gap=(
-                        STEP_TIMING_GAP
-                    ),
-                )
-
-                if (
-                    elapsed_time
-                    >=
-                    planner_result.step_time
-                    -
-                    STEP_TIMING_GAP
-                ):
-
-                    planner_frozen = True
-
-                    freeze_time = float(
-                        elapsed_time
-                    )
-
-            trajectory_sample = (
-                swing_trajectory.update_3d(
-                    current_time=(
-                        elapsed_time
-                    ),
-                    landing_time=(
-                        planner_result.step_time
-                    ),
-                    landing_position_xy=np.array(
-                        [
-                            planner_result.step_location_x,
-                            planner_result.step_location_y,
-                        ],
-                        dtype=float,
-                    ),
-                    vertical_parameters=(
-                        vertical_parameters
-                    ),
+                    elapsed_time=0.0,
                 )
             )
 
-            trajectory_sample_time = float(
-                elapsed_time
+            landing_position = (
+                right_initial_position.copy()
             )
 
-            while (
-                next_planner_update
-                <=
-                elapsed_time
-                +
-                0.5
-                *
-                dt
-            ):
+            landing_position[0] = (
+                planner_result.step_location_x
+            )
 
-                next_planner_update += (
-                    planner_period
-                )
+            landing_position[1] = (
+                planner_result.step_location_y
+            )
 
-        # ----------------------------------------------------
-        # Desired swing state.
-        #
-        # Between planner/trajectory updates, propagate the
-        # last sampled state with constant acceleration.
-        # This avoids a zero-order hold on desired position.
-        # ----------------------------------------------------
+            current_step_time = (
+                planner_result.step_time
+            )
+
+            # ------------------------------------------------
+            # Initialize online swing trajectory at lift-off.
+            # ------------------------------------------------
+
+            robot.update(
+                q_pin
+            )
+
+            (
+                current_right_position,
+                _,
+            ) = (
+                robot.get_right_foot_pose()
+            )
+
+            swing_trajectory.reset_3d(
+                initial_position=(
+                    current_right_position
+                ),
+
+                initial_velocity=np.zeros(
+                    3,
+                    dtype=float,
+                ),
+
+                initial_acceleration=np.zeros(
+                    3,
+                    dtype=float,
+                ),
+
+                start_time=0.0,
+            )
+
+            swing_initialized = True
+
+            next_planner_update = (
+                PLANNER_UPDATE_PERIOD
+            )
+
+            separator()
+
+            print(
+                "START ADAPTIVE SINGLE SUPPORT"
+            )
+
+            separator()
+
+            print(
+                f"DCM at lift-off = "
+                f"{dcm}"
+            )
+
+            print(
+                f"Initial adapted uT = "
+                f"{landing_position}"
+            )
+
+            print(
+                f"Initial adapted T  = "
+                f"{current_step_time:.6f} s"
+            )
+
+            print()
+
+        # ====================================================
+        # CURRENT CONTINUOUS LIPM STATE
+        # ====================================================
+
+        (
+            current_x_state,
+            current_y_state,
+        ) = (
+            get_current_lipm_state(
+                x_state=(
+                    x_state
+                ),
+                y_state=(
+                    y_state
+                ),
+                segment=(
+                    current_segment
+                ),
+                mpc_substep=(
+                    mpc_substep
+                ),
+            )
+        )
+
+        # ====================================================
+        # DISTURBANCE
+        # ====================================================
 
         if (
-            elapsed_time
-            <
-            planner_result.step_time
+            phase
+            ==
+            SINGLE_SUPPORT
+            and
+            ENABLE_DISTURBANCE
+            and
+            not disturbance_applied
+            and
+            phase_time
+            >=
+            DISTURBANCE_TIME
+            -
+            TIME_TOLERANCE
         ):
 
-            hold_time = max(
-                0.0,
-                elapsed_time
+            # DCM:
+            #
+            # xi = c + c_dot / omega
+            #
+            # For fixed position:
+            #
+            # Delta v = omega * Delta xi
+
+            current_x_state[1] += (
+                planner.omega
+                *
+                DISTURBANCE_DCM_X
+            )
+
+            current_y_state[1] += (
+                planner.omega
+                *
+                DISTURBANCE_DCM_Y
+            )
+
+            x_state = (
+                current_x_state.copy()
+            )
+
+            y_state = (
+                current_y_state.copy()
+            )
+
+            current_segment = None
+
+            mpc_substep = 0
+
+            previous_x_control = None
+            previous_y_control = None
+
+            disturbance_applied = True
+
+            print()
+
+            separator()
+
+            print(
+                "DCM DISTURBANCE APPLIED"
+            )
+
+            separator()
+
+            print(
+                f"t_SS = "
+                f"{phase_time:.6f} s"
+            )
+
+            print(
+                f"Delta DCM = "
+                f"({DISTURBANCE_DCM_X:+.6f}, "
+                f"{DISTURBANCE_DCM_Y:+.6f}) m"
+            )
+
+            print()
+
+            current_x_state = (
+                x_state.copy()
+            )
+
+            current_y_state = (
+                y_state.copy()
+            )
+
+        # ====================================================
+        # CURRENT DCM
+        # ====================================================
+
+        dcm = (
+            compute_dcm_from_lipm(
+                x_state=(
+                    current_x_state
+                ),
+                y_state=(
+                    current_y_state
+                ),
+                omega=(
+                    planner.omega
+                ),
+            )
+        )
+
+        # ====================================================
+        # ONLINE STEP TIMING / LOCATION ADAPTATION
+        # ====================================================
+
+        if (
+            phase
+            ==
+            SINGLE_SUPPORT
+            and
+            not planner_frozen
+        ):
+
+            # Freeze current target when there is no longer
+            # enough time to adapt safely.
+
+            if (
+                phase_time
+                >=
+                current_step_time
                 -
-                trajectory_sample_time,
+                STEP_TIMING_GAP
+                -
+                TIME_TOLERANCE
+            ):
+
+                planner_frozen = True
+
+                freeze_time = (
+                    phase_time
+                )
+
+            elif (
+                phase_time
+                >=
+                next_planner_update
+                -
+                TIME_TOLERANCE
+            ):
+
+                try:
+
+                    new_result = (
+                        solve_step_planner(
+                            planner=(
+                                planner
+                            ),
+
+                            nominal_step=(
+                                nominal_step
+                            ),
+
+                            dcm=(
+                                dcm
+                            ),
+
+                            stance_position_xy=(
+                                stance_position_xy
+                            ),
+
+                            elapsed_time=(
+                                phase_time
+                            ),
+                        )
+                    )
+
+                    planner_result = (
+                        new_result
+                    )
+
+                    landing_position[0] = (
+                        planner_result.step_location_x
+                    )
+
+                    landing_position[1] = (
+                        planner_result.step_location_y
+                    )
+
+                    current_step_time = (
+                        planner_result.step_time
+                    )
+
+                    max_viability_slack_x = max(
+                        max_viability_slack_x,
+                        planner_result.viability_slack_x,
+                    )
+
+                    max_viability_slack_y = max(
+                        max_viability_slack_y,
+                        planner_result.viability_slack_y,
+                    )
+
+                except RuntimeError as error:
+
+                    if (
+                        "timing adaptation window is closed"
+                        in
+                        str(
+                            error
+                        ).lower()
+                    ):
+
+                        planner_frozen = True
+
+                        freeze_time = (
+                            phase_time
+                        )
+
+                    else:
+
+                        raise
+
+                while (
+                    next_planner_update
+                    <=
+                    phase_time
+                    +
+                    TIME_TOLERANCE
+                ):
+
+                    next_planner_update += (
+                        PLANNER_UPDATE_PERIOD
+                    )
+
+        # ====================================================
+        # MPC
+        # ====================================================
+
+        if current_segment is None:
+
+            # The segment begins from the exact current state.
+
+            x_state = (
+                current_x_state.copy()
             )
 
-            desired_swing_position = (
-                trajectory_sample.position
-                +
-                trajectory_sample.velocity
-                *
-                hold_time
-                +
-                0.5
-                *
-                trajectory_sample.acceleration
-                *
-                hold_time**2
+            y_state = (
+                current_y_state.copy()
             )
 
-            desired_swing_velocity = (
-                trajectory_sample.velocity
-                +
-                trajectory_sample.acceleration
-                *
-                hold_time
+            mpc_info = (
+                solve_mpc_segment(
+                    current_phase=(
+                        phase
+                    ),
+
+                    phase_time=(
+                        phase_time
+                    ),
+
+                    x_state=(
+                        x_state
+                    ),
+
+                    y_state=(
+                        y_state
+                    ),
+
+                    x_mpc=(
+                        x_mpc
+                    ),
+
+                    y_mpc=(
+                        y_mpc
+                    ),
+
+                    previous_x_control=(
+                        previous_x_control
+                    ),
+
+                    previous_y_control=(
+                        previous_y_control
+                    ),
+
+                    left_initial_position=(
+                        left_initial_position
+                    ),
+
+                    right_initial_position=(
+                        right_initial_position
+                    ),
+
+                    left_rotation=(
+                        left_rotation
+                    ),
+
+                    right_rotation=(
+                        right_rotation
+                    ),
+
+                    landing_position=(
+                        landing_position
+                    ),
+
+                    single_support_duration=(
+                        current_step_time
+                    ),
+                )
             )
 
-            desired_swing_feedforward_acceleration = (
-                trajectory_sample.acceleration.copy()
+            current_segment = (
+                mpc_info[
+                    "segment"
+                ]
             )
+
+            x_result = (
+                mpc_info[
+                    "x_result"
+                ]
+            )
+
+            y_result = (
+                mpc_info[
+                    "y_result"
+                ]
+            )
+
+            previous_x_control = (
+                x_result
+                .control
+                .copy()
+            )
+
+            previous_y_control = (
+                y_result
+                .control
+                .copy()
+            )
+
+            mpc_substep = 0
+
+            mpc_solve_count += 1
+
+            max_mpc_solve_time = max(
+                max_mpc_solve_time,
+                mpc_info[
+                    "solve_time"
+                ],
+            )
+
+        # ====================================================
+        # CURRENT CONTINUOUS COM REFERENCE
+        # ====================================================
+
+        tau = (
+            mpc_substep
+            *
+            DT
+        )
+
+        com_reference = (
+            current_segment.evaluate(
+                tau
+            )
+        )
+
+        # ====================================================
+        # FOOT REFERENCES
+        # ====================================================
+
+        if (
+            phase
+            ==
+            INITIAL_DOUBLE_SUPPORT
+        ):
+
+            p_left_ref = (
+                left_initial_position
+                .copy()
+            )
+
+            p_right_ref = (
+                right_initial_position
+                .copy()
+            )
+
+            v_swing_ref = None
 
         else:
 
-            desired_swing_position = np.array(
-                [
-                    planner_result.step_location_x,
-                    planner_result.step_location_y,
-                    swing_initial_position[
-                        2
-                    ],
-                ],
-                dtype=float,
-            )
+            if not swing_initialized:
 
-            desired_swing_velocity = np.zeros(
-                3,
-                dtype=float,
-            )
-
-            desired_swing_feedforward_acceleration = np.zeros(
-                3,
-                dtype=float,
-            )
-
-        swing_position_error = (
-            desired_swing_position
-            -
-            swing.position
-        )
-
-        swing_velocity_error = (
-            desired_swing_velocity
-            -
-            swing.linear_velocity
-        )
-
-        swing_position_error_norm = float(
-            np.linalg.norm(
-                swing_position_error
-            )
-        )
-
-        max_swing_position_error = max(
-            max_swing_position_error,
-            swing_position_error_norm,
-        )
-
-        desired_swing_linear_acceleration = (
-            desired_swing_feedforward_acceleration
-            +
-            SWING_TRACKING_KP
-            *
-            swing_position_error
-            +
-            SWING_TRACKING_KD
-            *
-            swing_velocity_error
-        )
-
-        # ----------------------------------------------------
-        # HQP update
-        # ----------------------------------------------------
-
-        if (
-            step_index
-            %
-            control_decimation
-            ==
-            0
-        ):
-
-            terms = dynamics.compute(
-                data,
-                forward=False,
-            )
-
-            com_jdot_v = compute_com_jdot_v(
-                model=model,
-                data=data,
-                root_body_id=(
-                    base_body_id
-                ),
-                scratch_plus=(
-                    scratch_plus
-                ),
-                scratch_minus=(
-                    scratch_minus
-                ),
-                epsilon=(
-                    COM_JDOT_EPSILON
-                ),
-            )
-
-            desired_com_acceleration_z = (
-                COM_HEIGHT_KP
-                *
-                (
-                    COM_HEIGHT_REFERENCE
-                    -
-                    com.position[
-                        2
-                    ]
+                raise RuntimeError(
+                    "Swing trajectory was not initialized."
                 )
+
+            landing_now = (
+                phase_time
+                >=
+                current_step_time
                 -
-                COM_HEIGHT_KD
-                *
-                com.velocity[
-                    2
-                ]
+                TIME_TOLERANCE
             )
 
-            q_actuated = (
-                data.qpos[
-                    actuated_qpos_indices
-                ]
-            )
+            if landing_now:
 
-            v_actuated = (
-                data.qvel[
-                    dynamics.actuated_dof_indices
-                ]
-            )
-
-            desired_posture_acceleration = (
-                POSTURE_KP
-                *
-                (
-                    posture_reference
-                    -
-                    q_actuated
+                p_left_ref = (
+                    left_initial_position
+                    .copy()
                 )
-                -
-                POSTURE_KD
-                *
-                v_actuated
-            )
 
-            stance_contact_height = float(
-                stance.position[
-                    2
-                ]
-                -
-                floor_plane_z
-            )
-
-            hqp_start = (
-                time.perf_counter()
-            )
-
-            solution = controller.solve(
-                mass_matrix=(
-                    terms.mass_matrix
-                ),
-
-                effective_bias=(
-                    terms.effective_bias
-                ),
-
-                selection_matrix=(
-                    terms.selection_matrix
-                ),
-
-                stance_jacobian=(
-                    stance.jacobian
-                ),
-
-                stance_jdot_v=(
-                    stance.jacobian_dot_velocity
-                ),
-
-                swing_jacobian=(
-                    swing.jacobian
-                ),
-
-                swing_jdot_v=(
-                    swing.jacobian_dot_velocity
-                ),
-
-                com_jacobian=(
-                    com.jacobian
-                ),
-
-                com_jdot_v_z=(
-                    com_jdot_v[
-                        2
-                    ]
-                ),
-
-                desired_com_acceleration_z=(
-                    desired_com_acceleration_z
-                ),
-
-                desired_swing_linear_acceleration=(
-                    desired_swing_linear_acceleration
-                ),
-
-                desired_posture_acceleration=(
-                    desired_posture_acceleration
-                ),
-
-                stance_wrench_reference=(
-                    stance_wrench_reference
-                ),
-
-                stance_support_bounds=(
-                    stance_support_bounds
-                ),
-
-                stance_contact_height=(
-                    stance_contact_height
-                ),
-
-                torque_lower=(
-                    torque_lower
-                ),
-
-                torque_upper=(
-                    torque_upper
-                ),
-            )
-
-            if not solution.rank5_used:
-
-                rank5_fallback_count += 1
-
-            last_solution = (
-                solution
-            )
-
-            last_tau = (
-                solution.torque.copy()
-            )
-
-            hqp_elapsed = (
-                time.perf_counter()
-                -
-                hqp_start
-            )
-
-            total_hqp_times.append(
-                hqp_elapsed
-            )
-
-
-        # ----------------------------------------------------
-        # Apply torque
-        # ----------------------------------------------------
-
-        data.ctrl[:] = (
-            last_tau
-        )
-
-        torque_limit_abs = np.maximum(
-            np.abs(
-                torque_lower
-            ),
-            np.abs(
-                torque_upper
-            ),
-        )
-
-        torque_utilization = float(
-            np.max(
-                np.abs(
-                    last_tau
+                p_right_ref = (
+                    landing_position
+                    .copy()
                 )
-                /
-                torque_limit_abs
-            )
-        )
 
-        max_tau_utilization = max(
-            max_tau_utilization,
-            torque_utilization,
-        )
-
-        # ----------------------------------------------------
-        # Touchdown observation
-        #
-        # Ignore initial swing-foot contact. Only accept contact
-        # near/after the planned landing time.
-        # ----------------------------------------------------
-
-        if (
-            touchdown_time is None
-            and
-            swing_contact
-            and
-            elapsed_time
-            >=
-            planner_result.step_time
-            -
-            TOUCHDOWN_CONTACT_WINDOW
-        ):
-
-            touchdown_time = float(
-                elapsed_time
-            )
-
-        # ----------------------------------------------------
-        # Status
-        # ----------------------------------------------------
-
-        if (
-            elapsed_time
-            >=
-            next_print_elapsed
-            -
-            0.5
-            *
-            dt
-        ):
-
-            if last_solution is None:
-
-                rank2 = 0.0
-                rank3 = 0.0
-                rank4 = 0.0
-                rank5 = 0.0
-
-                hqp_ms = 0.0
-
-                cop = np.array(
-                    [
-                        np.nan,
-                        np.nan,
-                    ],
+                v_swing_ref = np.zeros(
+                    3,
                     dtype=float,
                 )
 
             else:
 
-                rank2 = (
-                    last_solution.rank2_residual
-                )
+                swing_sample = (
+                    swing_trajectory.update_3d(
+                        current_time=(
+                            phase_time
+                        ),
 
-                rank3 = (
-                    last_solution.rank3_residual
-                )
+                        landing_time=(
+                            current_step_time
+                        ),
 
-                rank4 = (
-                    last_solution.rank4_residual
-                )
+                        landing_position_xy=(
+                            landing_position[
+                                0:2
+                            ]
+                        ),
 
-                rank5 = (
-                    last_solution.rank5_residual
-                )
-
-                hqp_ms = (
-                    1000.0
-                    *
-                    (
-                        last_solution.solve_time_rank2
-                        +
-                        last_solution.solve_time_rank3
-                        +
-                        last_solution.solve_time_rank4
-                        +
-                        last_solution.solve_time_rank5
+                        vertical_parameters=(
+                            vertical_parameters
+                        ),
                     )
                 )
 
-                cop = compute_cop_from_wrench(
-                    last_solution.stance_wrench,
-                    (
-                        stance.position[
-                            2
-                        ]
-                        -
-                        floor_plane_z
-                    ),
+                p_left_ref = (
+                    left_initial_position
+                    .copy()
                 )
 
-            print(
-                f"t={elapsed_time:6.3f} s"
+                p_right_ref = (
+                    swing_sample
+                    .position
+                    .copy()
+                )
 
-                f" | DCM="
-                f"({dcm_xy[0]:+.4f},"
-                f"{dcm_xy[1]:+.4f})"
+                v_swing_ref = (
+                    swing_sample
+                    .velocity
+                    .copy()
+                )
 
-                f" | uT="
-                f"({planner_result.step_location_x:+.4f},"
-                f"{planner_result.step_location_y:+.4f})"
+        # ====================================================
+        # DIFFERENTIAL IK
+        # ====================================================
 
-                f" | T="
-                f"{planner_result.step_time:.4f}"
+        if (
+            phase
+            ==
+            INITIAL_DOUBLE_SUPPORT
+        ):
 
-                f" | frozen="
-                f"{int(planner_frozen)}"
+            (
+                qdot_full,
+                diagnostics,
+                Z,
+            ) = (
+                solve_double_support_ik(
+                    robot=(
+                        robot
+                    ),
 
-                f" | swing_err="
-                f"{1000.0 * swing_position_error_norm:.2f} mm"
+                    q_pin=(
+                        q_pin
+                    ),
 
-                f" | contact="
-                f"{int(stance_contact)}/"
-                f"{int(swing_contact)}"
+                    left_position_ref=(
+                        p_left_ref
+                    ),
 
-                f" | CoP="
-                f"({1000.0 * cop[0]:+.1f},"
-                f"{1000.0 * cop[1]:+.1f}) mm"
+                    right_position_ref=(
+                        p_right_ref
+                    ),
 
-                f" | tau="
-                f"{100.0 * torque_utilization:.1f}%"
+                    com_position_ref=(
+                        com_reference.position
+                    ),
 
-                f" | R2="
-                f"{rank2:.2e}"
+                    com_velocity_ref=(
+                        com_reference.velocity
+                    ),
 
-                f" | R3="
-                f"{rank3:.2e}"
+                    trunk_rotation_ref=(
+                        trunk_rotation_ref
+                    ),
 
-                f" | R4="
-                f"{rank4:.2e}"
+                    foot_position_gain=(
+                        SUPPORT_POSITION_KP
+                    ),
 
-                f" | R5="
-                f"{rank5:.2e}"
+                    com_position_gain=(
+                        COM_POSITION_KP
+                    ),
 
-                f" | HQP="
-                f"{hqp_ms:.2f} ms"
+                    trunk_orientation_gain=(
+                        TRUNK_ORIENTATION_KP
+                    ),
+
+                    damping=(
+                        IK_DAMPING
+                    ),
+
+                    rcond=(
+                        IK_RCOND
+                    ),
+                )
             )
 
-            next_print_elapsed += (
+        else:
+
+            (
+                qdot_full,
+                diagnostics,
+                Z,
+            ) = (
+                solve_single_support_ik(
+                    robot=(
+                        robot
+                    ),
+
+                    q_pin=(
+                        q_pin
+                    ),
+
+                    support_side=(
+                        STANCE_SIDE
+                    ),
+
+                    support_position_ref=(
+                        p_left_ref
+                    ),
+
+                    swing_position_ref=(
+                        p_right_ref
+                    ),
+
+                    swing_linear_velocity_ref=(
+                        v_swing_ref
+                    ),
+
+                    com_position_ref=(
+                        com_reference.position
+                    ),
+
+                    com_velocity_ref=(
+                        com_reference.velocity
+                    ),
+
+                    trunk_rotation_ref=(
+                        trunk_rotation_ref
+                    ),
+
+                    support_position_gain=(
+                        SUPPORT_POSITION_KP
+                    ),
+
+                    swing_position_gain=(
+                        SWING_POSITION_KP
+                    ),
+
+                    com_position_gain=(
+                        COM_POSITION_KP
+                    ),
+
+                    trunk_orientation_gain=(
+                        TRUNK_ORIENTATION_KP
+                    ),
+
+                    damping=(
+                        IK_DAMPING
+                    ),
+
+                    rcond=(
+                        IK_RCOND
+                    ),
+                )
+            )
+
+        if not np.all(
+            np.isfinite(
+                qdot_full
+            )
+        ):
+
+            raise RuntimeError(
+                "Differential IK returned NaN/Inf."
+            )
+
+        # ====================================================
+        # INTEGRATE KINEMATICS
+        # ====================================================
+
+        q_pin = (
+            robot.integrate(
+                q_pin=(
+                    q_pin
+                ),
+
+                v_pin=(
+                    qdot_full
+                ),
+
+                dt=(
+                    DT
+                ),
+            )
+        )
+
+        robot.update(
+            q_pin
+        )
+
+        update_mujoco_from_pinocchio(
+            robot=(
+                robot
+            ),
+
+            q_pin=(
+                q_pin
+            ),
+
+            mj_model=(
+                mj_model
+            ),
+
+            mj_data=(
+                mj_data
+            ),
+        )
+
+        # ====================================================
+        # TRACKING ERRORS
+        # ====================================================
+
+        p_com_actual = (
+            robot.get_com()
+        )
+
+        (
+            p_left_actual,
+            _,
+        ) = (
+            robot.get_left_foot_pose()
+        )
+
+        (
+            p_right_actual,
+            _,
+        ) = (
+            robot.get_right_foot_pose()
+        )
+
+        com_error = float(
+            np.linalg.norm(
+                com_reference.position
+                -
+                p_com_actual
+            )
+        )
+
+        max_com_error = max(
+            max_com_error,
+            com_error,
+        )
+
+        if (
+            phase
+            ==
+            INITIAL_DOUBLE_SUPPORT
+        ):
+
+            left_error = float(
+                np.linalg.norm(
+                    p_left_ref
+                    -
+                    p_left_actual
+                )
+            )
+
+            right_error = float(
+                np.linalg.norm(
+                    p_right_ref
+                    -
+                    p_right_actual
+                )
+            )
+
+            support_error = max(
+                left_error,
+                right_error,
+            )
+
+            swing_error = 0.0
+
+        else:
+
+            support_error = float(
+                np.linalg.norm(
+                    p_left_ref
+                    -
+                    p_left_actual
+                )
+            )
+
+            swing_error = float(
+                np.linalg.norm(
+                    p_right_ref
+                    -
+                    p_right_actual
+                )
+            )
+
+        max_support_error = max(
+            max_support_error,
+            support_error,
+        )
+
+        max_swing_error = max(
+            max_swing_error,
+            swing_error,
+        )
+
+        # ====================================================
+        # STATUS
+        # ====================================================
+
+        if (
+            kinematic_time
+            >=
+            next_print_time
+            -
+            TIME_TOLERANCE
+        ):
+
+            if (
+                phase
+                ==
+                INITIAL_DOUBLE_SUPPORT
+            ):
+
+                print(
+                    f"t={kinematic_time:6.3f}"
+                    f" | phase=INITIAL_DS"
+                    f" | CoM="
+                    f"({p_com_actual[0]:+.4f},"
+                    f"{p_com_actual[1]:+.4f})"
+                    f" | CoM err="
+                    f"{1000.0 * com_error:.2f} mm"
+                    f" | foot err="
+                    f"{1000.0 * support_error:.2f} mm"
+                )
+
+            else:
+
+                print(
+                    f"tSS={phase_time:6.3f}"
+                    f" | DCM="
+                    f"({dcm[0]:+.4f},"
+                    f"{dcm[1]:+.4f})"
+                    f" | uT="
+                    f"({landing_position[0]:+.4f},"
+                    f"{landing_position[1]:+.4f})"
+                    f" | T="
+                    f"{current_step_time:.4f}"
+                    f" | CoM err="
+                    f"{1000.0 * com_error:.2f} mm"
+                    f" | support err="
+                    f"{1000.0 * support_error:.2f} mm"
+                    f" | swing err="
+                    f"{1000.0 * swing_error:.2f} mm"
+                    f" | frozen="
+                    f"{int(planner_frozen)}"
+                )
+
+            next_print_time += (
                 STATUS_PRINT_PERIOD
             )
 
-        # ----------------------------------------------------
-        # Viewer
-        # ----------------------------------------------------
+        # ====================================================
+        # TOUCHDOWN / FINISH
+        # ====================================================
 
         if (
-            viewer is not None
+            phase
+            ==
+            SINGLE_SUPPORT
             and
-            current_time
+            phase_time
             >=
-            next_viewer_time
+            current_step_time
             -
-            0.5
-            *
-            dt
-        ):
-
-            viewer.sync()
-
-            next_viewer_time += (
-                viewer_period
-            )
-
-            simulation_elapsed = (
-                current_time
-                -
-                simulation_start_time
-            )
-
-            target_wall_elapsed = (
-                simulation_elapsed
-                /
-                REALTIME_FACTOR
-            )
-
-            current_wall_elapsed = (
-                time.perf_counter()
-                -
-                wall_start
-            )
-
-            sleep_time = (
-                target_wall_elapsed
-                -
-                current_wall_elapsed
-            )
-
-            if sleep_time > 0.0:
-
-                time.sleep(
-                    sleep_time
-                )
-
-        mujoco.mj_step2(
-            model,
-            data,
-        )
-
-        step_index += 1
-
-        # ----------------------------------------------------
-        # End after a short touchdown-settling period.
-        # ----------------------------------------------------
-
-        if (
-            elapsed_time
-            >=
-            planner_result.step_time
-            +
-            TOUCHDOWN_SETTLE_TIME
+            TIME_TOLERANCE
         ):
 
             break
 
-    # ========================================================
-    # FINAL STATE
-    # ========================================================
+        # ====================================================
+        # ADVANCE MPC INTERVAL
+        # ====================================================
 
-    mujoco.mj_forward(
-        model,
-        data,
-    )
+        mpc_substep += 1
 
-    final_com = dynamics.get_com_kinematics(
-        data,
-        ROBOT_ROOT_BODY,
-    )
+        if (
+            mpc_substep
+            >=
+            MPC_IK_STEPS
+        ):
 
-    final_left = dynamics.get_site_kinematics(
-        data,
-        LEFT_FOOT_SITE,
-    )
-
-    final_right = dynamics.get_site_kinematics(
-        data,
-        RIGHT_FOOT_SITE,
-    )
-
-    if stance_leg is StanceLeg.LEFT:
-
-        final_stance = final_left
-        final_swing = final_right
-
-    else:
-
-        final_stance = final_right
-        final_swing = final_left
-
-    final_target = np.array(
-        [
-            planner_result.step_location_x,
-            planner_result.step_location_y,
-            swing_initial_position[
-                2
-            ],
-        ],
-        dtype=float,
-    )
-
-    final_swing_error = float(
-        np.linalg.norm(
-            final_swing.position
-            -
-            final_target
-        )
-    )
-
-    final_stance_slip = float(
-        np.linalg.norm(
-            final_stance.position[
-                0:2
-            ]
-            -
-            stance_initial_position[
-                0:2
-            ]
-        )
-    )
-
-    final_tilt = get_base_tilt_deg(
-        data,
-        base_body_id,
-    )
-
-    final_stance_contact = has_geom_contact(
-        data,
-        stance_geom_id,
-        floor_geom_id,
-    )
-
-    final_swing_contact = has_geom_contact(
-        data,
-        swing_geom_id,
-        floor_geom_id,
-    )
-
-    if total_hqp_times:
-
-        mean_hqp_ms = (
-            1000.0
-            *
-            float(
-                np.mean(
-                    total_hqp_times
-                )
+            x_state = (
+                current_segment
+                .get_terminal_x_state()
             )
-        )
 
-        max_hqp_ms = (
-            1000.0
-            *
-            float(
-                np.max(
-                    total_hqp_times
-                )
+            y_state = (
+                current_segment
+                .get_terminal_y_state()
             )
+
+            current_segment = None
+
+            mpc_substep = 0
+
+        # ====================================================
+        # TIME
+        # ====================================================
+
+        phase_time += (
+            DT
         )
 
-    else:
+        kinematic_time += (
+            DT
+        )
 
-        mean_hqp_ms = 0.0
-        max_hqp_ms = 0.0
+        iteration += 1
+
+        mj_data.time = (
+            kinematic_time
+        )
+
+        # ====================================================
+        # VIEWER
+        # ====================================================
+
+        if viewer is not None:
+
+            viewer.sync()
+
+            if REALTIME_PLAYBACK:
+
+                target_wall_time = (
+                    wall_start
+                    +
+                    kinematic_time
+                )
+
+                remaining = (
+                    target_wall_time
+                    -
+                    time.perf_counter()
+                )
+
+                if remaining > 0.0:
+
+                    time.sleep(
+                        remaining
+                    )
+
+    # ========================================================
+    # FINAL
+    # ========================================================
+
+    robot.update(
+        q_pin
+    )
+
+    final_com = (
+        robot.get_com()
+    )
+
+    (
+        final_left,
+        _,
+    ) = (
+        robot.get_left_foot_pose()
+    )
+
+    (
+        final_right,
+        _,
+    ) = (
+        robot.get_right_foot_pose()
+    )
+
+    final_landing_error = float(
+        np.linalg.norm(
+            landing_position
+            -
+            final_right
+        )
+    )
+
+    final_support_error = float(
+        np.linalg.norm(
+            left_initial_position
+            -
+            final_left
+        )
+    )
+
+    # ========================================================
+    # OUTPUT
+    # ========================================================
 
     print()
 
     separator()
 
     print(
-        "SINGLE-SUPPORT PLANNER/WBC RESULT"
+        "FINAL RESULT"
     )
 
     separator()
@@ -3181,143 +2410,170 @@ def run_single_support_step_validation(
     print()
 
     print(
-        f"stance leg             = "
-        f"{stance_leg.value}"
+        f"Nominal uT = "
+        f"{nominal_landing_position}"
     )
 
     print(
-        f"final planner uT       = "
-        f"({planner_result.step_location_x:+.6f}, "
-        f"{planner_result.step_location_y:+.6f}) m"
+        f"Nominal T  = "
+        f"{nominal_step.step_time:.6f} s"
+    )
+
+    print()
+
+    print(
+        f"Adapted uT = "
+        f"{landing_position}"
     )
 
     print(
-        f"final planner T        = "
-        f"{planner_result.step_time:.6f} s"
+        f"Adapted T  = "
+        f"{current_step_time:.6f} s"
+    )
+
+    print()
+
+    print(
+        "Adaptation:"
     )
 
     print(
-        f"planner frozen         = "
+        f"  Delta uT = "
+        f"{landing_position - nominal_landing_position}"
+    )
+
+    print(
+        f"  Delta T  = "
+        f"{1000.0 * (current_step_time - nominal_step.step_time):+.3f} ms"
+    )
+
+    print()
+
+    if planner_result is not None:
+
+        print(
+            f"b = "
+            f"({planner_result.dcm_offset_x:+.6f}, "
+            f"{planner_result.dcm_offset_y:+.6f}) m"
+        )
+
+        print(
+            f"viability slack = "
+            f"({planner_result.viability_slack_x:.3e}, "
+            f"{planner_result.viability_slack_y:.3e})"
+        )
+
+        print(
+            f"QP equality residual = "
+            f"{planner_result.max_equality_residual:.3e}"
+        )
+
+    print()
+
+    print(
+        f"planner frozen      = "
         f"{planner_frozen}"
     )
 
     print(
-        f"freeze time            = "
+        f"freeze time         = "
         f"{freeze_time}"
     )
 
     print(
-        f"observed touchdown     = "
-        f"{touchdown_time}"
+        f"disturbance applied = "
+        f"{disturbance_applied}"
     )
 
     print()
 
     print(
-        f"final swing target     = "
-        f"{final_target}"
+        f"final CoM           = "
+        f"{final_com}"
     )
 
     print(
-        f"final swing position   = "
-        f"{final_swing.position}"
+        f"final LEFT          = "
+        f"{final_left}"
     )
 
     print(
-        f"final swing error      = "
-        f"{1000.0 * final_swing_error:.3f} mm"
-    )
-
-    print(
-        f"max swing error        = "
-        f"{1000.0 * max_swing_position_error:.3f} mm"
-    )
-
-    print(
-        f"final stance slip      = "
-        f"{1000.0 * final_stance_slip:.3f} mm"
-    )
-
-    print(
-        f"max stance slip        = "
-        f"{1000.0 * max_stance_slip:.3f} mm"
-    )
-
-    print(
-        f"final base tilt        = "
-        f"{final_tilt:.3f} deg"
-    )
-
-    print(
-        f"max base tilt          = "
-        f"{max_tilt:.3f} deg"
-    )
-
-    print(
-        f"final stance contact   = "
-        f"{final_stance_contact}"
-    )
-
-    print(
-        f"final swing contact    = "
-        f"{final_swing_contact}"
-    )
-
-    print(
-        f"final CoM height       = "
-        f"{final_com.position[2]:.8f} m"
-    )
-
-    print(
-        f"max torque utilization = "
-        f"{100.0 * max_tau_utilization:.2f}%"
+        f"final RIGHT         = "
+        f"{final_right}"
     )
 
     print()
 
     print(
-        f"mean HQP time          = "
-        f"{mean_hqp_ms:.3f} ms"
+        f"final landing error = "
+        f"{1000.0 * final_landing_error:.3f} mm"
     )
 
     print(
-        f"max HQP time           = "
-        f"{max_hqp_ms:.3f} ms"
+        f"final support error = "
+        f"{1000.0 * final_support_error:.3f} mm"
+    )
+
+    print()
+
+    print(
+        f"max CoM error       = "
+        f"{1000.0 * max_com_error:.3f} mm"
     )
 
     print(
-        f"Rank-5 fallbacks       = "
-        f"{rank5_fallback_count}"
+        f"max support error   = "
+        f"{1000.0 * max_support_error:.3f} mm"
     )
 
-    if last_solution is not None:
+    print(
+        f"max swing error     = "
+        f"{1000.0 * max_swing_error:.3f} mm"
+    )
 
-        print()
+    print()
 
-        print(
-            f"Rank-2 residual        = "
-            f"{last_solution.rank2_residual:.6e}"
-        )
+    print(
+        f"max slack x         = "
+        f"{max_viability_slack_x:.3e}"
+    )
 
-        print(
-            f"Rank-3 residual        = "
-            f"{last_solution.rank3_residual:.6e}"
-        )
+    print(
+        f"max slack y         = "
+        f"{max_viability_slack_y:.3e}"
+    )
 
-        print(
-            f"Rank-4 residual        = "
-            f"{last_solution.rank4_residual:.6e}"
-        )
+    print()
 
-        print(
-            f"Rank-5 residual        = "
-            f"{last_solution.rank5_residual:.6e}"
-        )
+    print(
+        f"MPC solves          = "
+        f"{mpc_solve_count}"
+    )
 
-        print(
-            f"max constraint violation = "
-            f"{last_solution.max_constraint_violation:.6e}"
-        )
+    print(
+        f"max MPC solve time  = "
+        f"{1000.0 * max_mpc_solve_time:.2f} ms"
+    )
+
+    print()
+
+    print(
+        "IMPORTANT:"
+    )
+
+    print(
+        "  This validates planner -> MPC -> IK integration."
+    )
+
+    print(
+        "  Motion is executed by kinematic set-state only."
+    )
+
+    print(
+        "  Dynamic feasibility is NOT evaluated."
+    )
+
+    separator()
 
 
 # ============================================================
@@ -3325,551 +2581,157 @@ def run_single_support_step_validation(
 # ============================================================
 
 def main():
-    
+
     # ========================================================
-    # ADAPTIVE STEP PLANNER
+    # STEP PLANNER
     # ========================================================
 
-    planner_parameters = StepPlannerParameters(
+    planner = (
+        AdaptiveStepPlanner(
+            StepPlannerParameters(
+                gravity=(
+                    GRAVITY
+                ),
 
-        gravity=(
-            GRAVITY
-        ),
+                com_height=(
+                    COM_HEIGHT
+                ),
 
-        com_height=(
-            COM_HEIGHT_REFERENCE
-        ),
+                default_step_width=(
+                    DEFAULT_STEP_WIDTH
+                ),
 
-        default_step_width=(
-            DEFAULT_STEP_WIDTH
-        ),
+                step_length_min=(
+                    STEP_LENGTH_MIN
+                ),
 
-        step_length_min=(
-            STEP_LENGTH_MIN
-        ),
+                step_length_max=(
+                    STEP_LENGTH_MAX
+                ),
 
-        step_length_max=(
-            STEP_LENGTH_MAX
-        ),
+                step_width_min=(
+                    STEP_WIDTH_MIN
+                ),
 
-        step_width_min=(
-            STEP_WIDTH_MIN
-        ),
+                step_width_max=(
+                    STEP_WIDTH_MAX
+                ),
 
-        step_width_max=(
-            STEP_WIDTH_MAX
-        ),
+                step_time_min=(
+                    STEP_TIME_MIN
+                ),
 
-        step_time_min=(
-            STEP_TIME_MIN
-        ),
-
-        step_time_max=(
-            STEP_TIME_MAX
-        ),
+                step_time_max=(
+                    STEP_TIME_MAX
+                ),
+            )
+        )
     )
 
-    planner = AdaptiveStepPlanner(
-        planner_parameters
+    # ========================================================
+    # MUJOCO
+    # ========================================================
+
+    mj_model = (
+        mujoco.MjModel.from_xml_path(
+            str(
+                SCENE_XML
+            )
+        )
     )
+
+    mj_data = (
+        mujoco.MjData(
+            mj_model
+        )
+    )
+
+    home_id = int(
+        mujoco.mj_name2id(
+            mj_model,
+            mujoco.mjtObj.mjOBJ_KEY,
+            "home",
+        )
+    )
+
+    if home_id < 0:
+
+        raise RuntimeError(
+            "HOME keyframe was not found."
+        )
+
+    mujoco.mj_resetDataKeyframe(
+        mj_model,
+        mj_data,
+        home_id,
+    )
+
+    mj_data.qvel[:] = 0.0
+
+    mujoco.mj_forward(
+        mj_model,
+        mj_data,
+    )
+
+    # ========================================================
+    # PINOCCHIO
+    # ========================================================
+
+    robot = (
+        PinocchioModel(
+            mjcf_path=(
+                ROBOT_XML
+            ),
+
+            mujoco_model=(
+                mj_model
+            ),
+        )
+    )
+
+    # ========================================================
+    # HEADER
+    # ========================================================
 
     separator()
 
     print(
-        "STEP TIMING ADAPTATION"
-    )
-
-    print(
-        "HIERARCHICAL INVERSE DYNAMICS"
-    )
-
-    print(
-        "SINGLE-SUPPORT ADAPTIVE STEP TEST"
+        "LOAD COMPLETE"
     )
 
     separator()
-
-    print()
 
     print(
         f"MuJoCo = "
         f"{mujoco.__version__}"
     )
 
-    # ========================================================
-    # MODEL
-    # ========================================================
-
-    if not SCENE_XML.exists():
-
-        raise FileNotFoundError(
-            f"Scene not found:\n"
-            f"{SCENE_XML}"
-        )
-
-    model = mujoco.MjModel.from_xml_path(
-        str(
-            SCENE_XML
-        )
+    print(
+        f"nq     = "
+        f"{mj_model.nq}"
     )
 
-    data = mujoco.MjData(
-        model
+    print(
+        f"nv     = "
+        f"{mj_model.nv}"
+    )
+
+    print(
+        f"DT     = "
+        f"{DT:.6f} s"
+    )
+
+    print(
+        f"MPC dt = "
+        f"{MPC_TIMESTEP:.6f} s"
+    )
+
+    print(
+        f"IK steps / MPC interval = "
+        f"{MPC_IK_STEPS}"
     )
 
     print()
-
-    print(
-        f"nq = {model.nq}"
-    )
-
-    print(
-        f"nv = {model.nv}"
-    )
-
-    print(
-        f"nu = {model.nu}"
-    )
-
-    print(
-        f"dt = {model.opt.timestep}"
-    )
-
-    print(
-        f"integrator = "
-        f"{mujoco.mjtIntegrator(model.opt.integrator).name}"
-    )
-
-    if (
-        model.opt.integrator
-        ==
-        mujoco.mjtIntegrator.mjINT_RK4
-    ):
-
-        raise RuntimeError(
-            "This split-step controller "
-            "must not use RK4."
-        )
-
-    # ========================================================
-    # HOME
-    # ========================================================
-
-    home_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_KEY,
-        "home",
-    )
-
-    mujoco.mj_resetDataKeyframe(
-        model,
-        data,
-        home_id,
-    )
-
-    # Preserve HOME ctrl.
-
-    home_torque = (
-        data.ctrl.copy()
-    )
-
-    # Initial generalized velocity.
-
-    data.qvel[:] = 0.0
-
-    mujoco.mj_forward(
-        model,
-        data,
-    )
-
-    # ========================================================
-    # DYNAMICS BACKEND
-    # ========================================================
-
-    dynamics = WholeBodyDynamicsModel(
-        model
-    )
-
-    # ========================================================
-    # ACTUATED QPOS
-    # ========================================================
-
-    actuated_qpos_indices = (
-        build_actuated_qpos_indices(
-            model
-        )
-    )
-
-    posture_reference = (
-        data.qpos[
-            actuated_qpos_indices
-        ]
-        .copy()
-    )
-
-    # ========================================================
-    # TORQUE LIMITS
-    # ========================================================
-
-    torque_lower = (
-        model.actuator_ctrlrange[
-            :,
-            0
-        ]
-        .copy()
-    )
-
-    torque_upper = (
-        model.actuator_ctrlrange[
-            :,
-            1
-        ]
-        .copy()
-    )
-
-    # ========================================================
-    # SUPPORT POLYGONS
-    # ========================================================
-
-    left_support_bounds = (
-        get_support_rectangle_from_geom_aabb(
-
-            model=model,
-
-            data=data,
-
-            geom_name=(
-                LEFT_FOOT_GEOM
-            ),
-
-            site_name=(
-                LEFT_FOOT_SITE
-            ),
-
-            safety_margin=(
-                SUPPORT_POLYGON_MARGIN
-            ),
-        )
-    )
-
-    right_support_bounds = (
-        get_support_rectangle_from_geom_aabb(
-
-            model=model,
-
-            data=data,
-
-            geom_name=(
-                RIGHT_FOOT_GEOM
-            ),
-
-            site_name=(
-                RIGHT_FOOT_SITE
-            ),
-
-            safety_margin=(
-                SUPPORT_POLYGON_MARGIN
-            ),
-        )
-    )
-
-    # ========================================================
-    # INITIAL STATE
-    # ========================================================
-
-    initial_com = (
-        dynamics.get_com_kinematics(
-            data,
-            ROBOT_ROOT_BODY,
-        )
-    )
-
-    initial_left = (
-        dynamics.get_site_kinematics(
-            data,
-            LEFT_FOOT_SITE,
-        )
-    )
-
-    initial_right = (
-        dynamics.get_site_kinematics(
-            data,
-            RIGHT_FOOT_SITE,
-        )
-    )
-
-    floor_geom_id = require_object_id(
-        model,
-        mujoco.mjtObj.mjOBJ_GEOM,
-        FLOOR_GEOM,
-    )
-
-    floor_z = float(
-        data.geom_xpos[
-            floor_geom_id,
-            2
-        ]
-    )
-
-    initial_left_height = float(
-        initial_left.position[
-            2
-        ]
-        -
-        floor_z
-    )
-
-    initial_right_height = float(
-        initial_right.position[
-            2
-        ]
-        -
-        floor_z
-    )
-
-    # ========================================================
-    # PRINT ARCHITECTURE
-    # ========================================================
-
-    separator()
-
-    print(
-        "SINGLE-SUPPORT HQP ARCHITECTURE"
-    )
-
-    separator()
-
-    print()
-
-    print(
-        "Decision vector:"
-    )
-
-    print(
-        "  y = [qddot(20), lambda_stance(6)]"
-    )
-
-    print(
-        "  total = 26 variables"
-    )
-
-    print()
-
-    print(
-        "Rank 1:"
-    )
-
-    print(
-        "  floating-base Newton-Euler"
-    )
-
-    print(
-        "  torque limits"
-    )
-
-    print(
-        "  unilateral stance contact"
-    )
-
-    print(
-        "  friction feasibility"
-    )
-
-    print(
-        "  stance CoP feasibility"
-    )
-
-    print()
-
-    print(
-        "Rank 2:"
-    )
-
-    print(
-        "  stance foot 6D"
-    )
-
-    print(
-        "  CoM height"
-    )
-
-    print()
-
-    print(
-        "Rank 3:"
-    )
-
-    print(
-        "  swing-foot translation XYZ"
-    )
-
-    print()
-
-    print(
-        "Rank 4:"
-    )
-
-    print(
-        "  posture"
-    )
-
-    print()
-
-    print(
-        "Rank 5:"
-    )
-
-    print(
-        "  stance-wrench regularization"
-    )
-
-    print()
-
-    print(
-        "No horizontal CoM control."
-    )
-
-    print(
-        "No CoP tracking."
-    )
-
-    print(
-        "No ZMP tracking."
-    )
-
-    print()
-
-    print(
-        f"Initial CoM height = "
-        f"{initial_com.position[2]:.8f} m"
-    )
-
-    print(
-        f"Desired CoM height = "
-        f"{COM_HEIGHT_REFERENCE:.8f} m"
-    )
-
-    print()
-
-    print(
-        "Left support bounds "
-        "[xmin xmax ymin ymax] [m]:"
-    )
-
-    print(
-        left_support_bounds
-    )
-
-    print(
-        "Right support bounds "
-        "[xmin xmax ymin ymax] [m]:"
-    )
-
-    print(
-        right_support_bounds
-    )
-
-    print()
-
-    print(
-        f"Initial left site height above ground  = "
-        f"{initial_left_height:.6f} m"
-    )
-
-    print(
-        f"Initial right site height above ground = "
-        f"{initial_right_height:.6f} m"
-    )
-
-    print()
-
-    print(
-        "HOME torque:"
-    )
-
-    print(
-        home_torque
-    )
-
-    print()
-
-    print(
-        f"CoM PD: "
-        f"Kp={COM_HEIGHT_KP}, "
-        f"Kd={COM_HEIGHT_KD}"
-    )
-
-    print(
-        f"Posture PD: "
-        f"Kp={POSTURE_KP}, "
-        f"Kd={POSTURE_KD}"
-    )
-
-    separator()
-
-    # ========================================================
-    # WHOLE-BODY CONTROLLER
-    # ========================================================
-
-    wbc_config = WholeBodyHQPConfig(
-        friction_coefficient=(
-            FRICTION_COEFFICIENT
-        ),
-
-        numerical_regularization=(
-            1.0e-4
-        ),
-
-        svd_tolerance=(
-            1.0e-9
-        ),
-
-        constraint_tolerance=(
-            1.0e-6
-        ),
-
-        solver_name="qrqp",
-    )
-
-    controller = (
-        WholeBodyHierarchicalInverseDynamics(
-            nv=(
-                model.nv
-            ),
-
-            nu=(
-                model.nu
-            ),
-
-            actuated_dof_indices=(
-                dynamics.actuated_dof_indices
-            ),
-
-            config=(
-                wbc_config
-            ),
-        )
-    )
-
-    prepare_controller = (
-        DoubleSupportPreparationHierarchicalInverseDynamics(
-            nv=(
-                model.nv
-            ),
-
-            nu=(
-                model.nu
-            ),
-
-            actuated_dof_indices=(
-                dynamics.actuated_dof_indices
-            ),
-
-            config=(
-                wbc_config
-            ),
-        )
-    )
 
     # ========================================================
     # RUN
@@ -3878,87 +2740,25 @@ def main():
     if SHOW_VIEWER:
 
         with mujoco.viewer.launch_passive(
-            model,
-            data,
+            mj_model,
+            mj_data,
         ) as viewer:
 
-            run_double_support_preparation(
-                model=model,
-                data=data,
-                dynamics=dynamics,
-                controller=prepare_controller,
-
-                actuated_qpos_indices=(
-                    actuated_qpos_indices
+            run_test(
+                mj_model=(
+                    mj_model
                 ),
 
-                posture_reference=(
-                    posture_reference
+                mj_data=(
+                    mj_data
                 ),
 
-                home_torque=(
-                    home_torque
+                robot=(
+                    robot
                 ),
 
-                torque_lower=(
-                    torque_lower
-                ),
-
-                torque_upper=(
-                    torque_upper
-                ),
-
-                left_support_bounds=(
-                    left_support_bounds
-                ),
-
-                right_support_bounds=(
-                    right_support_bounds
-                ),
-
-                planner=planner,
-
-                viewer=viewer,
-            )
-
-            run_single_support_step_validation(
-
-                model=model,
-
-                data=data,
-
-                dynamics=dynamics,
-
-                controller=controller,
-
-                planner=planner,
-
-                actuated_qpos_indices=(
-                    actuated_qpos_indices
-                ),
-
-                posture_reference=(
-                    posture_reference
-                ),
-
-                home_torque=(
-                    home_torque
-                ),
-
-                torque_lower=(
-                    torque_lower
-                ),
-
-                torque_upper=(
-                    torque_upper
-                ),
-
-                left_support_bounds=(
-                    left_support_bounds
-                ),
-
-                right_support_bounds=(
-                    right_support_bounds
+                planner=(
+                    planner
                 ),
 
                 viewer=(
@@ -3968,83 +2768,21 @@ def main():
 
     else:
 
-        run_double_support_preparation(
-            model=model,
-            data=data,
-            dynamics=dynamics,
-            controller=prepare_controller,
-
-            actuated_qpos_indices=(
-                actuated_qpos_indices
+        run_test(
+            mj_model=(
+                mj_model
             ),
 
-            posture_reference=(
-                posture_reference
+            mj_data=(
+                mj_data
             ),
 
-            home_torque=(
-                home_torque
+            robot=(
+                robot
             ),
 
-            torque_lower=(
-                torque_lower
-            ),
-
-            torque_upper=(
-                torque_upper
-            ),
-
-            left_support_bounds=(
-                left_support_bounds
-            ),
-
-            right_support_bounds=(
-                right_support_bounds
-            ),
-
-            planner=planner,
-
-            viewer=viewer,
-        )
-
-        run_single_support_step_validation(
-
-            model=model,
-
-            data=data,
-
-            dynamics=dynamics,
-
-            controller=controller,
-
-            planner=planner,
-
-            actuated_qpos_indices=(
-                actuated_qpos_indices
-            ),
-
-            posture_reference=(
-                posture_reference
-            ),
-
-            home_torque=(
-                home_torque
-            ),
-
-            torque_lower=(
-                torque_lower
-            ),
-
-            torque_upper=(
-                torque_upper
-            ),
-
-            left_support_bounds=(
-                left_support_bounds
-            ),
-
-            right_support_bounds=(
-                right_support_bounds
+            planner=(
+                planner
             ),
 
             viewer=None,
