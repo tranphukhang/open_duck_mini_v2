@@ -973,7 +973,6 @@ def run_single_support_step_validation(
     model,
     data,
     dynamics,
-    controller,
     planner,
 
     actuated_qpos_indices,
@@ -1914,62 +1913,6 @@ def run_single_support_step_validation(
                 time.perf_counter()
             )
 
-            solution = controller.solve(
-                mass_matrix=(
-                    terms.mass_matrix
-                ),
-                effective_bias=(
-                    terms.effective_bias
-                ),
-                selection_matrix=(
-                    terms.selection_matrix
-                ),
-                stance_jacobian=(
-                    stance.jacobian
-                ),
-                stance_jdot_v=(
-                    stance.jacobian_dot_velocity
-                ),
-                swing_jacobian=(
-                    swing.jacobian
-                ),
-                swing_jdot_v=(
-                    swing.jacobian_dot_velocity
-                ),
-                com_jacobian=(
-                    com.jacobian
-                ),
-                com_jdot_v_z=(
-                    com_jdot_v[
-                        2
-                    ]
-                ),
-                desired_com_acceleration_z=(
-                    desired_com_acceleration_z
-                ),
-                desired_swing_linear_acceleration=(
-                    desired_swing_linear_acceleration
-                ),
-                desired_posture_acceleration=(
-                    desired_posture_acceleration
-                ),
-                stance_wrench_reference=(
-                    stance_wrench_reference
-                ),
-                stance_support_bounds=(
-                    stance_support_bounds
-                ),
-                stance_contact_height=(
-                    stance_contact_height
-                ),
-                torque_lower=(
-                    torque_lower
-                ),
-                torque_upper=(
-                    torque_upper
-                ),
-            )
-
             hqp_elapsed = (
                 time.perf_counter()
                 -
@@ -1980,17 +1923,6 @@ def run_single_support_step_validation(
                 hqp_elapsed
             )
 
-            if not solution.rank5_used:
-
-                rank5_fallback_count += 1
-
-            last_solution = (
-                solution
-            )
-
-            last_tau = (
-                solution.torque.copy()
-            )
 
         # ----------------------------------------------------
         # Apply torque
