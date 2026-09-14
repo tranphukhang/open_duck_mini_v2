@@ -1,4 +1,4 @@
-# step_timing_adaptation/whole_body_qp.py
+﻿# step_timing_adaptation/single_support_qp.py
 
 from __future__ import annotations
 
@@ -13,18 +13,18 @@ import numpy as np
 # CONFIGURATION
 # ============================================================
 
-@dataclass
-class DoubleSupportHQPConfig:
+@dataclass(frozen=True)
+class WholeBodyHQPConfig:
 
     friction_coefficient: float = 0.6
 
-    # Numerical regularization used in reduced QPs.
+    # Numerical regularization in reduced QPs.
     numerical_regularization: float = 1.0e-4
 
     # SVD / pseudoinverse tolerance.
     svd_tolerance: float = 1.0e-9
 
-    # Validation tolerance.
+    # Physical-constraint / hierarchy validation tolerance.
     constraint_tolerance: float = 1.0e-6
 
     solver_name: str = "qrqp"
@@ -34,17 +34,17 @@ class DoubleSupportHQPConfig:
 # SOLUTION
 # ============================================================
 
-@dataclass
-class DoubleSupportHQPSolution:
+@dataclass(frozen=True)
+class WholeBodyHQPSolution:
 
     qacc: np.ndarray
 
-    left_wrench: np.ndarray
-    right_wrench: np.ndarray
+    stance_wrench: np.ndarray
 
     torque: np.ndarray
 
     rank2_residual: float
+    rank3_residual: float
     rank4_residual: float
     rank5_residual: float
 
@@ -53,6 +53,7 @@ class DoubleSupportHQPSolution:
     max_constraint_violation: float
 
     solve_time_rank2: float
+    solve_time_rank3: float
     solve_time_rank4: float
     solve_time_rank5: float
 
@@ -63,45 +64,38 @@ class DoubleSupportHQPSolution:
 
 class WholeBodyHierarchicalInverseDynamics:
     """
-    Double-support hierarchical inverse dynamics.
+    Single-support hierarchical inverse dynamics.
 
     Decision variable:
 
-        y =
-        [
-            qddot       nv
-            lambda_L      6
-            lambda_R      6
-        ]
-
-    Torque is recovered from actuated rigid-body dynamics.
+        y = [qddot(nv), lambda_stance(6)]
 
     Hierarchy:
 
         Rank 1:
             floating-base Newton-Euler
-            torque limits
-            unilateral contact
-            friction feasibility
-            CoP feasibility
+            actuator torque limits
+            stance unilateral-contact constraint
+            stance friction feasibility
+            stance CoP feasibility
 
         Rank 2:
-            left stance foot 6D
-            right stance foot 6D
-            CoM height
+            stance-foot 6D acceleration constraint
+            CoM vertical acceleration task
 
         Rank 3:
-            none in double support
+            swing-foot translational acceleration task
 
         Rank 4:
-            actuated-joint posture
+            actuated-joint posture task
 
         Rank 5:
-            contact-wrench regularization
+            stance-wrench regularization
 
-    No horizontal CoM control.
-    No CoP tracking.
-    No ZMP tracking.
+    The swing-foot orientation is intentionally NOT controlled
+    here. For this project, the WBC is only the execution layer;
+    the main contribution remains step-location / step-timing
+    adaptation.
     """
 
     def __init__(
@@ -109,7 +103,7 @@ class WholeBodyHierarchicalInverseDynamics:
         nv: int,
         nu: int,
         actuated_dof_indices,
-        config: DoubleSupportHQPConfig,
+        config: WholeBodyHQPConfig,
     ) -> None:
 
         self.nv = int(nv)
@@ -122,9 +116,7 @@ class WholeBodyHierarchicalInverseDynamics:
             dtype=int,
         )
 
-        if self.actuated_dof_indices.shape != (
-            self.nu,
-        ):
+        if self.actuated_dof_indices.shape != (self.nu,):
 
             raise ValueError(
                 "actuated_dof_indices has invalid shape."
@@ -136,62 +128,48 @@ class WholeBodyHierarchicalInverseDynamics:
 
         self.unactuated_dof_indices = np.asarray(
             [
-                i
-                for i in range(self.nv)
-                if i not in actuated_set
+                index
+                for index in range(self.nv)
+                if index not in actuated_set
             ],
             dtype=int,
         )
 
-        if self.unactuated_dof_indices.shape != (
-            6,
-        ):
+        if self.unactuated_dof_indices.shape != (6,):
 
             raise RuntimeError(
                 "Controller assumes a 6-DoF floating base."
             )
 
-        # ====================================================
-        # VARIABLE LAYOUT
-        # ====================================================
+        # ----------------------------------------------------
+        # Decision-vector layout
+        # ----------------------------------------------------
 
         self.qacc_slice = slice(
             0,
             self.nv,
         )
 
-        self.left_wrench_start = (
+        self.stance_wrench_start = (
             self.nv
         )
 
-        self.right_wrench_start = (
-            self.left_wrench_start
-            +
-            6
-        )
-
-        self.left_wrench_slice = slice(
-            self.left_wrench_start,
-            self.right_wrench_start,
-        )
-
-        self.right_wrench_slice = slice(
-            self.right_wrench_start,
-            self.right_wrench_start + 6,
+        self.stance_wrench_slice = slice(
+            self.stance_wrench_start,
+            self.stance_wrench_start + 6,
         )
 
         self.nvar = (
             self.nv
             +
-            12
+            6
         )
 
-        # CasADi solvers indexed by reduced problem size.
         self._solver_cache = {}
 
 
     # ========================================================
-    # NULL SPACE
+    # LINEAR-ALGEBRA HELPERS
     # ========================================================
 
     def _nullspace(
@@ -228,7 +206,7 @@ class WholeBodyHierarchicalInverseDynamics:
 
         else:
 
-            numerical_tol = (
+            numerical_tolerance = (
                 max(A.shape)
                 *
                 np.max(singular_values)
@@ -240,7 +218,7 @@ class WholeBodyHierarchicalInverseDynamics:
                 float(
                     self.config.svd_tolerance
                 ),
-                numerical_tol,
+                numerical_tolerance,
             )
 
             rank = int(
@@ -260,10 +238,6 @@ class WholeBodyHierarchicalInverseDynamics:
             .copy()
         )
 
-
-    # ========================================================
-    # PARTICULAR SOLUTION
-    # ========================================================
 
     def _particular_solution(
         self,
@@ -323,7 +297,7 @@ class WholeBodyHierarchicalInverseDynamics:
 
 
     # ========================================================
-    # CASADI SOLVER
+    # CASADI QP
     # ========================================================
 
     def _get_solver(
@@ -333,19 +307,67 @@ class WholeBodyHierarchicalInverseDynamics:
         number_constraints,
     ):
 
+        # ====================================================
+        # SOLVER SELECTION
+        #
+        # Rank 3 uses qpOASES explicitly.
+        #
+        # QRQP has already been observed to cycle on the
+        # feasible Rank-3 QP. Therefore Rank 3 must NOT
+        # silently fall back to QRQP.
+        # ====================================================
+
+        if name == "single_rank3":
+
+            if not ca.has_conic(
+                "qpoases"
+            ):
+
+                raise RuntimeError(
+                    "CasADi qpOASES plugin is not available. "
+                    "Rank 3 must not fall back to QRQP."
+                )
+
+            solver_plugin = (
+                "qpoases"
+            )
+
+            options = {
+                "error_on_fail": False,
+                "print_time": False,
+            }
+
+        else:
+
+            solver_plugin = (
+                self.config.solver_name
+            )
+
+            options = {
+                "print_header": False,
+                "print_iter": False,
+                "print_info": False,
+
+                "error_on_fail": False,
+
+                "constr_viol_tol": 1.0e-9,
+                "dual_inf_tol": 1.0e-9,
+
+                "max_iter": 1000,
+            }
+
         key = (
             str(name),
             int(number_variables),
             int(number_constraints),
+            str(solver_plugin),
         )
 
         if key in self._solver_cache:
 
-            return (
-                self._solver_cache[
-                    key
-                ]
-            )
+            return self._solver_cache[
+                key
+            ]
 
         qp_structure = {
             "h": ca.Sparsity.dense(
@@ -359,28 +381,16 @@ class WholeBodyHierarchicalInverseDynamics:
             ),
         }
 
-        solver_options = {
-            "print_header": False,
-            "print_iter": False,
-            "print_info": False,
-
-            "error_on_fail": False,
-
-            "constr_viol_tol": 1.0e-9,
-            "dual_inf_tol": 1.0e-9,
-
-            "max_iter": 1000,
-        }
-
         solver = ca.conic(
             (
                 f"{name}_"
+                f"{solver_plugin}_"
                 f"{number_variables}_"
                 f"{number_constraints}"
             ),
-            self.config.solver_name,
+            solver_plugin,
             qp_structure,
-            solver_options,
+            options,
         )
 
         self._solver_cache[
@@ -389,10 +399,6 @@ class WholeBodyHierarchicalInverseDynamics:
 
         return solver
 
-
-    # ========================================================
-    # REDUCED OBJECTIVE
-    # ========================================================
 
     def _build_reduced_objective(
         self,
@@ -422,11 +428,19 @@ class WholeBodyHierarchicalInverseDynamics:
             dtype=float,
         )
 
-        # y = y_base + Z u
+        # ========================================================
+        # REDUCED TASK
         #
-        # min || B y - desired ||^2
+        #     y = y_base + Z u
         #
-        #     + epsilon ||y||^2
+        # Therefore:
+        #
+        #     B y - desired
+        #
+        #       =
+        #
+        #     B Z u - (desired - B y_base)
+        # ========================================================
 
         C = (
             B
@@ -446,6 +460,33 @@ class WholeBodyHierarchicalInverseDynamics:
             self.config.numerical_regularization
         )
 
+        number_variables = int(
+            Z.shape[
+                1
+            ]
+        )
+
+        # ========================================================
+        # OBJECTIVE
+        #
+        #   || C u - error_target ||^2
+        #
+        #       +
+        #
+        #   epsilon ||u||^2
+        #
+        # IMPORTANT:
+        #
+        # Regularize the NULL-SPACE STEP u, not the complete
+        # solution:
+        #
+        #     ||y_base + Z u||^2
+        #
+        # Otherwise the regularizer creates an artificial
+        # incentive to move away from the valid higher-priority
+        # solution y_base.
+        # ========================================================
+
         H = (
             2.0
             *
@@ -456,10 +497,9 @@ class WholeBodyHierarchicalInverseDynamics:
                 +
                 epsilon
                 *
-                (
-                    Z.T
-                    @
-                    Z
+                np.eye(
+                    number_variables,
+                    dtype=float,
                 )
             )
         )
@@ -470,15 +510,9 @@ class WholeBodyHierarchicalInverseDynamics:
             C.T
             @
             error_target
-            +
-            2.0
-            *
-            epsilon
-            *
-            Z.T
-            @
-            y_base
         )
+
+        # Numerical symmetry.
 
         H = (
             0.5
@@ -494,11 +528,6 @@ class WholeBodyHierarchicalInverseDynamics:
             H,
             g,
         )
-
-
-    # ========================================================
-    # REDUCE INEQUALITIES
-    # ========================================================
 
     def _reduce_constraints(
         self,
@@ -560,7 +589,15 @@ class WholeBodyHierarchicalInverseDynamics:
 
         keep_rows = []
 
-        zero_row_tolerance = 1.0e-12
+        # --------------------------------------------------------
+        # Rows smaller than this have essentially no remaining
+        # effect inside the current null space.
+        #
+        # 1e-12 was too aggressive and allowed nearly-zero rows
+        # into QRQP, creating badly scaled active-set constraints.
+        # --------------------------------------------------------
+
+        zero_row_tolerance = 1.0e-9
 
         for row_index in range(
             A_reduced.shape[0]
@@ -587,8 +624,12 @@ class WholeBodyHierarchicalInverseDynamics:
 
                 continue
 
-            # No remaining freedom along this row.
-            # y_base itself must already satisfy it.
+            # ----------------------------------------------------
+            # This physical inequality has no remaining direction
+            # in the current hierarchy null space.
+            #
+            # Therefore y_base itself must already satisfy it.
+            # ----------------------------------------------------
 
             lower_value = (
                 lower_reduced[
@@ -607,10 +648,8 @@ class WholeBodyHierarchicalInverseDynamics:
                     lower_value
                 )
                 and
-                0.0
-                <
                 lower_value
-                -
+                >
                 self.config.constraint_tolerance
             ):
 
@@ -624,17 +663,19 @@ class WholeBodyHierarchicalInverseDynamics:
                     upper_value
                 )
                 and
-                0.0
-                >
                 upper_value
-                +
-                self.config.constraint_tolerance
+                <
+                -self.config.constraint_tolerance
             ):
 
                 raise RuntimeError(
                     "Locked higher-priority solution "
                     "violates a physical upper bound."
                 )
+
+        # ========================================================
+        # KEEP ACTIVE-DIRECTION ROWS
+        # ========================================================
 
         if keep_rows:
 
@@ -659,6 +700,78 @@ class WholeBodyHierarchicalInverseDynamics:
             upper_reduced = (
                 upper_reduced[
                     indices
+                ]
+            )
+
+            # ====================================================
+            # ROW NORMALIZATION
+            #
+            # Each inequality:
+            #
+            #     l <= a^T u <= h
+            #
+            # is divided by ||a||:
+            #
+            #     l/||a|| <= (a/||a||)^T u <= h/||a||
+            #
+            # This does NOT change the feasible set.
+            #
+            # It only improves numerical conditioning.
+            # ====================================================
+
+            row_norms = np.linalg.norm(
+                A_reduced,
+                axis=1,
+            )
+
+            if np.any(
+                row_norms
+                <=
+                zero_row_tolerance
+            ):
+
+                raise RuntimeError(
+                    "Unexpected near-zero reduced constraint row."
+                )
+
+            A_reduced = (
+                A_reduced
+                /
+                row_norms[
+                    :,
+                    None
+                ]
+            )
+
+            finite_lower = np.isfinite(
+                lower_reduced
+            )
+
+            finite_upper = np.isfinite(
+                upper_reduced
+            )
+
+            lower_reduced[
+                finite_lower
+            ] = (
+                lower_reduced[
+                    finite_lower
+                ]
+                /
+                row_norms[
+                    finite_lower
+                ]
+            )
+
+            upper_reduced[
+                finite_upper
+            ] = (
+                upper_reduced[
+                    finite_upper
+                ]
+                /
+                row_norms[
+                    finite_upper
                 ]
             )
 
@@ -687,11 +800,6 @@ class WholeBodyHierarchicalInverseDynamics:
             lower_reduced,
             upper_reduced,
         )
-
-
-    # ========================================================
-    # SOLVE REDUCED QP
-    # ========================================================
 
     def _solve_reduced_qp(
         self,
@@ -739,12 +847,7 @@ class WholeBodyHierarchicalInverseDynamics:
             )
         )
 
-        # QRQP expects a constraint matrix.
-        #
-        # If no physical inequalities remain, add one
-        # harmless equality:
-        #
-        #     0 = 0
+        # QRQP expects at least one row.
 
         if A_reduced.shape[0] == 0:
 
@@ -765,6 +868,61 @@ class WholeBodyHierarchicalInverseDynamics:
                 [0.0],
                 dtype=float,
             )
+
+        # ========================================================
+        # DIAGNOSTIC ΓÇö u = 0 FEASIBILITY
+        #
+        # Since y_base comes from the previous hierarchy level,
+        # u = 0 should normally remain physically feasible.
+        # ========================================================
+
+        zero_u = np.zeros(
+            number_variables,
+            dtype=float,
+        )
+
+        zero_values = (
+            A_reduced
+            @
+            zero_u
+        )
+
+        zero_lower_violation = np.where(
+            np.isfinite(
+                lower_reduced
+            ),
+            np.maximum(
+                lower_reduced
+                -
+                zero_values,
+                0.0,
+            ),
+            0.0,
+        )
+
+        zero_upper_violation = np.where(
+            np.isfinite(
+                upper_reduced
+            ),
+            np.maximum(
+                zero_values
+                -
+                upper_reduced,
+                0.0,
+            ),
+            0.0,
+        )
+
+        zero_feasibility_violation = float(
+            max(
+                np.max(
+                    zero_lower_violation
+                ),
+                np.max(
+                    zero_upper_violation
+                ),
+            )
+        )
 
         solver = self._get_solver(
             name=name,
@@ -814,9 +972,7 @@ class WholeBodyHierarchicalInverseDynamics:
             ),
         )
 
-        stats = (
-            solver.stats()
-        )
+        stats = solver.stats()
 
         success = bool(
             stats.get(
@@ -827,10 +983,36 @@ class WholeBodyHierarchicalInverseDynamics:
 
         if not success:
 
+            h_eigenvalues = np.linalg.eigvalsh(
+                0.5
+                *
+                (
+                    H
+                    +
+                    H.T
+                )
+            )
+
             raise RuntimeError(
                 f"{name} solver failed.\n"
                 f"status = "
-                f"{stats.get('return_status', 'unknown')}"
+                f"{stats.get('return_status', 'unknown')}\n"
+
+                f"reduced variables = "
+                f"{number_variables}\n"
+
+                f"reduced constraints = "
+                f"{A_reduced.shape[0]}\n"
+
+                f"u=0 feasibility violation = "
+                f"{zero_feasibility_violation:.6e}\n"
+
+                f"H eig min/max = "
+                f"{np.min(h_eigenvalues):.6e} / "
+                f"{np.max(h_eigenvalues):.6e}\n"
+
+                f"||A_reduced||inf = "
+                f"{np.linalg.norm(A_reduced, ord=np.inf):.6e}"
             )
 
         u = np.asarray(
@@ -857,9 +1039,9 @@ class WholeBodyHierarchicalInverseDynamics:
             u
         )
 
-        # ====================================================
-        # VALIDATE ORIGINAL PHYSICAL INEQUALITIES
-        # ====================================================
+        # ----------------------------------------------------
+        # Validate original physical inequalities.
+        # ----------------------------------------------------
 
         values = (
             A_ineq
@@ -923,7 +1105,7 @@ class WholeBodyHierarchicalInverseDynamics:
 
 
     # ========================================================
-    # FRICTION
+    # PHYSICAL CONSTRAINTS
     # ========================================================
 
     def _append_friction_constraints(
@@ -931,27 +1113,33 @@ class WholeBodyHierarchicalInverseDynamics:
         rows,
         lower,
         upper,
-        wrench_start,
-    ):
-
-        """
-        Conservative inner approximation:
-
-            |Fx| + |Fy| <= mu Fz
-
-            Fz >= 0
-
-        Flat horizontal terrain -> forces are represented
-        directly in WORLD coordinates.
-        """
+    ) -> None:
 
         mu = float(
             self.config.friction_coefficient
         )
 
-        fx = wrench_start + 0
-        fy = wrench_start + 1
-        fz = wrench_start + 2
+        fx = (
+            self.stance_wrench_start
+            +
+            0
+        )
+
+        fy = (
+            self.stance_wrench_start
+            +
+            1
+        )
+
+        fz = (
+            self.stance_wrench_start
+            +
+            2
+        )
+
+        # Conservative friction pyramid:
+        #
+        #     |Fx| + |Fy| <= mu Fz
 
         for sx, sy in (
             (+1.0, +1.0),
@@ -965,9 +1153,17 @@ class WholeBodyHierarchicalInverseDynamics:
                 dtype=float,
             )
 
-            row[fx] = sx
-            row[fy] = sy
-            row[fz] = -mu
+            row[
+                fx
+            ] = sx
+
+            row[
+                fy
+            ] = sy
+
+            row[
+                fz
+            ] = -mu
 
             rows.append(
                 row
@@ -981,14 +1177,16 @@ class WholeBodyHierarchicalInverseDynamics:
                 0.0
             )
 
-        # Fz >= 0
+        # Fz >= 0.
 
         row = np.zeros(
             self.nvar,
             dtype=float,
         )
 
-        row[fz] = 1.0
+        row[
+            fz
+        ] = 1.0
 
         rows.append(
             row
@@ -1003,66 +1201,21 @@ class WholeBodyHierarchicalInverseDynamics:
         )
 
 
-    # ========================================================
-    # COP FEASIBILITY
-    # ========================================================
-
     def _append_cop_constraints(
         self,
         rows,
         lower,
         upper,
-        wrench_start,
         support_bounds,
         contact_height,
-    ):
-
-        """
-        Contact wrench is represented at the foot site:
-
-            lambda =
-            [Fx, Fy, Fz, Mx, My, Mz]
-
-        in WORLD coordinates.
-
-        Flat ground:
-
-            n = world +Z.
-
-        If foot-site origin is h meters above the ground plane:
-
-            r = [x_cop, y_cop, -h]
-
-        and:
-
-            M = r x F + [0, 0, Mz_free]
-
-        Therefore:
-
-            x_cop =
-                -(My + h Fx) / Fz
-
-            y_cop =
-                (Mx - h Fy) / Fz
-
-        Enforce:
-
-            xmin <= x_cop <= xmax
-            ymin <= y_cop <= ymax
-
-        This is CoP FEASIBILITY only.
-
-        There is no desired CoP and no CoP tracking task.
-        """
+    ) -> None:
 
         bounds = np.asarray(
             support_bounds,
             dtype=float,
         )
 
-        if bounds.shape != (
-            4,
-        ):
+        if bounds.shape != (4,):
 
             raise ValueError(
                 "support_bounds must be "
@@ -1080,98 +1233,171 @@ class WholeBodyHierarchicalInverseDynamics:
             contact_height
         )
 
-        fx = wrench_start + 0
-        fy = wrench_start + 1
-        fz = wrench_start + 2
+        fx = (
+            self.stance_wrench_start
+            +
+            0
+        )
 
-        mx = wrench_start + 3
-        my = wrench_start + 4
+        fy = (
+            self.stance_wrench_start
+            +
+            1
+        )
 
-        # ====================================================
-        # x_cop >= xmin
+        fz = (
+            self.stance_wrench_start
+            +
+            2
+        )
+
+        mx = (
+            self.stance_wrench_start
+            +
+            3
+        )
+
+        my = (
+            self.stance_wrench_start
+            +
+            4
+        )
+
+        # x_cop >= xmin:
         #
-        # -(My + h Fx)/Fz >= xmin
-        #
-        # My + h Fx + xmin Fz <= 0
-        # ====================================================
+        #     My + h Fx + xmin Fz <= 0
 
         row = np.zeros(
             self.nvar,
             dtype=float,
         )
 
-        row[fx] = h
-        row[fz] = xmin
-        row[my] = 1.0
+        row[
+            fx
+        ] = h
 
-        rows.append(row)
-        lower.append(-np.inf)
-        upper.append(0.0)
+        row[
+            fz
+        ] = xmin
 
-        # ====================================================
-        # x_cop <= xmax
+        row[
+            my
+        ] = 1.0
+
+        rows.append(
+            row
+        )
+
+        lower.append(
+            -np.inf
+        )
+
+        upper.append(
+            0.0
+        )
+
+        # x_cop <= xmax:
         #
-        # -(My + h Fx)/Fz <= xmax
-        #
-        # -My - h Fx - xmax Fz <= 0
-        # ====================================================
+        #     -My - h Fx - xmax Fz <= 0
 
         row = np.zeros(
             self.nvar,
             dtype=float,
         )
 
-        row[fx] = -h
-        row[fz] = -xmax
-        row[my] = -1.0
+        row[
+            fx
+        ] = -h
 
-        rows.append(row)
-        lower.append(-np.inf)
-        upper.append(0.0)
+        row[
+            fz
+        ] = -xmax
 
-        # ====================================================
-        # y_cop >= ymin
+        row[
+            my
+        ] = -1.0
+
+        rows.append(
+            row
+        )
+
+        lower.append(
+            -np.inf
+        )
+
+        upper.append(
+            0.0
+        )
+
+        # y_cop >= ymin:
         #
-        # (Mx - h Fy)/Fz >= ymin
-        #
-        # -Mx + h Fy + ymin Fz <= 0
-        # ====================================================
+        #     -Mx + h Fy + ymin Fz <= 0
 
         row = np.zeros(
             self.nvar,
             dtype=float,
         )
 
-        row[fy] = h
-        row[fz] = ymin
-        row[mx] = -1.0
+        row[
+            fy
+        ] = h
 
-        rows.append(row)
-        lower.append(-np.inf)
-        upper.append(0.0)
+        row[
+            fz
+        ] = ymin
 
-        # ====================================================
-        # y_cop <= ymax
+        row[
+            mx
+        ] = -1.0
+
+        rows.append(
+            row
+        )
+
+        lower.append(
+            -np.inf
+        )
+
+        upper.append(
+            0.0
+        )
+
+        # y_cop <= ymax:
         #
-        # Mx - h Fy - ymax Fz <= 0
-        # ====================================================
+        #     Mx - h Fy - ymax Fz <= 0
 
         row = np.zeros(
             self.nvar,
             dtype=float,
         )
 
-        row[fy] = -h
-        row[fz] = -ymax
-        row[mx] = 1.0
+        row[
+            fy
+        ] = -h
 
-        rows.append(row)
-        lower.append(-np.inf)
-        upper.append(0.0)
+        row[
+            fz
+        ] = -ymax
+
+        row[
+            mx
+        ] = 1.0
+
+        rows.append(
+            row
+        )
+
+        lower.append(
+            -np.inf
+        )
+
+        upper.append(
+            0.0
+        )
 
 
     # ========================================================
-    # PHYSICAL MODEL — RANK 1
+    # RANK 1 ΓÇö RIGID-BODY DYNAMICS + PHYSICAL FEASIBILITY
     # ========================================================
 
     def _build_physical_model(
@@ -1179,16 +1405,9 @@ class WholeBodyHierarchicalInverseDynamics:
         mass_matrix,
         effective_bias,
         selection_matrix,
-
-        left_jacobian,
-        right_jacobian,
-
-        left_support_bounds,
-        right_support_bounds,
-
-        left_contact_height,
-        right_contact_height,
-
+        stance_jacobian,
+        support_bounds,
+        contact_height,
         torque_lower,
         torque_upper,
     ):
@@ -1208,34 +1427,36 @@ class WholeBodyHierarchicalInverseDynamics:
             dtype=float,
         )
 
-        JL = np.asarray(
-            left_jacobian,
+        J = np.asarray(
+            stance_jacobian,
             dtype=float,
         )
 
-        JR = np.asarray(
-            right_jacobian,
-            dtype=float,
-        )
+        if M.shape != (
+            self.nv,
+            self.nv,
+        ):
 
-        # ====================================================
-        # CONTACT JACOBIAN
-        # ====================================================
-
-        Jc = np.vstack(
-            (
-                JL,
-                JR,
+            raise ValueError(
+                "mass_matrix has invalid shape."
             )
-        )
 
-        # ====================================================
-        # RANK-1 FLOATING-BASE DYNAMICS
-        # ====================================================
+        if J.shape != (
+            6,
+            self.nv,
+        ):
 
-        base_indices = (
-            self.unactuated_dof_indices
-        )
+            raise ValueError(
+                "stance_jacobian has invalid shape."
+            )
+
+        # ----------------------------------------------------
+        # Floating-base Newton-Euler equations:
+        #
+        #     M qdd + h = S.T tau + J.T lambda
+        #
+        # Use only the six unactuated rows.
+        # ----------------------------------------------------
 
         B1 = np.zeros(
             (
@@ -1243,6 +1464,10 @@ class WholeBodyHierarchicalInverseDynamics:
                 self.nvar,
             ),
             dtype=float,
+        )
+
+        base_indices = (
+            self.unactuated_dof_indices
         )
 
         B1[
@@ -1255,32 +1480,14 @@ class WholeBodyHierarchicalInverseDynamics:
             ]
         )
 
-        Jc_base_transpose = (
-            Jc[
+        B1[
+            :,
+            self.stance_wrench_slice
+        ] = (
+            -J[
                 :,
                 base_indices
-            ]
-            .T
-        )
-
-        B1[
-            :,
-            self.left_wrench_slice
-        ] = (
-            -Jc_base_transpose[
-                :,
-                0:6
-            ]
-        )
-
-        B1[
-            :,
-            self.right_wrench_slice
-        ] = (
-            -Jc_base_transpose[
-                :,
-                6:12
-            ]
+            ].T
         )
 
         d1 = (
@@ -1289,9 +1496,11 @@ class WholeBodyHierarchicalInverseDynamics:
             ]
         )
 
-        # ====================================================
-        # TORQUE RECOVERY MAP
-        # ====================================================
+        # ----------------------------------------------------
+        # Recover actuator torque:
+        #
+        #     tau = A_tau y + b_tau
+        # ----------------------------------------------------
 
         actuated_indices = (
             self.actuated_dof_indices
@@ -1310,7 +1519,7 @@ class WholeBodyHierarchicalInverseDynamics:
         ):
 
             raise RuntimeError(
-                "Unexpected actuated selection matrix shape."
+                "Unexpected actuated selection-matrix shape."
             )
 
         if (
@@ -1325,10 +1534,8 @@ class WholeBodyHierarchicalInverseDynamics:
                 "Actuated selection matrix is singular."
             )
 
-        E_inv = (
-            np.linalg.inv(
-                E
-            )
+        E_inv = np.linalg.inv(
+            E
         )
 
         A_tau = np.zeros(
@@ -1349,32 +1556,14 @@ class WholeBodyHierarchicalInverseDynamics:
             ]
         )
 
-        Jc_act_transpose = (
-            Jc[
+        A_tau[
+            :,
+            self.stance_wrench_slice
+        ] = (
+            -J[
                 :,
                 actuated_indices
-            ]
-            .T
-        )
-
-        A_tau[
-            :,
-            self.left_wrench_slice
-        ] = (
-            -Jc_act_transpose[
-                :,
-                0:6
-            ]
-        )
-
-        A_tau[
-            :,
-            self.right_wrench_slice
-        ] = (
-            -Jc_act_transpose[
-                :,
-                6:12
-            ]
+            ].T
         )
 
         A_tau = (
@@ -1401,19 +1590,23 @@ class WholeBodyHierarchicalInverseDynamics:
             dtype=float,
         )
 
-        # ====================================================
-        # PHYSICAL INEQUALITIES
-        # ====================================================
+        if (
+            tau_lower.shape != (self.nu,)
+            or
+            tau_upper.shape != (self.nu,)
+        ):
+
+            raise ValueError(
+                "Torque limits have invalid shape."
+            )
+
+        # ----------------------------------------------------
+        # Inequalities
+        # ----------------------------------------------------
 
         rows = []
         lower = []
         upper = []
-
-        # ----------------------------------------------------
-        # Torque limits
-        #
-        # tau = A_tau y + b_tau
-        # ----------------------------------------------------
 
         for actuator_id in range(
             self.nu
@@ -1446,59 +1639,21 @@ class WholeBodyHierarchicalInverseDynamics:
                 ]
             )
 
-        # ----------------------------------------------------
-        # Friction + unilateral
-        # ----------------------------------------------------
-
         self._append_friction_constraints(
             rows=rows,
             lower=lower,
             upper=upper,
-            wrench_start=(
-                self.left_wrench_start
-            ),
-        )
-
-        self._append_friction_constraints(
-            rows=rows,
-            lower=lower,
-            upper=upper,
-            wrench_start=(
-                self.right_wrench_start
-            ),
-        )
-
-        # ----------------------------------------------------
-        # CoP feasibility
-        # ----------------------------------------------------
-
-        self._append_cop_constraints(
-            rows=rows,
-            lower=lower,
-            upper=upper,
-            wrench_start=(
-                self.left_wrench_start
-            ),
-            support_bounds=(
-                left_support_bounds
-            ),
-            contact_height=(
-                left_contact_height
-            ),
         )
 
         self._append_cop_constraints(
             rows=rows,
             lower=lower,
             upper=upper,
-            wrench_start=(
-                self.right_wrench_start
-            ),
             support_bounds=(
-                right_support_bounds
+                support_bounds
             ),
             contact_height=(
-                right_contact_height
+                contact_height
             ),
         )
 
@@ -1530,113 +1685,99 @@ class WholeBodyHierarchicalInverseDynamics:
 
 
     # ========================================================
-    # RANK 2
+    # RANK 2 ΓÇö STANCE FOOT + COM HEIGHT
     # ========================================================
 
     def _build_rank2(
         self,
-
-        left_jacobian,
-        left_jdot_v,
-
-        right_jacobian,
-        right_jdot_v,
-
+        stance_jacobian,
+        stance_jdot_v,
         com_jacobian,
         com_jdot_v_z,
-
         desired_com_acceleration_z,
     ):
 
-        JL = np.asarray(
-            left_jacobian,
+        J_stance = np.asarray(
+            stance_jacobian,
             dtype=float,
         )
 
-        JR = np.asarray(
-            right_jacobian,
+        Jdot_stance_v = np.asarray(
+            stance_jdot_v,
             dtype=float,
         )
 
-        JdotL_v = np.asarray(
-            left_jdot_v,
-            dtype=float,
-        )
-
-        JdotR_v = np.asarray(
-            right_jdot_v,
-            dtype=float,
-        )
-
-        Jcom = np.asarray(
+        J_com = np.asarray(
             com_jacobian,
             dtype=float,
         )
 
-        # Two 6D stance-foot constraints + CoM-z.
+        if J_stance.shape != (
+            6,
+            self.nv,
+        ):
+
+            raise ValueError(
+                "stance_jacobian has invalid shape."
+            )
+
+        if Jdot_stance_v.shape != (6,):
+
+            raise ValueError(
+                "stance_jdot_v has invalid shape."
+            )
+
+        if J_com.shape != (
+            3,
+            self.nv,
+        ):
+
+            raise ValueError(
+                "com_jacobian has invalid shape."
+            )
+
         B2 = np.zeros(
             (
-                13,
+                7,
                 self.nvar,
             ),
             dtype=float,
         )
 
         d2 = np.zeros(
-            13,
+            7,
             dtype=float,
         )
 
-        # ----------------------------------------------------
-        # Left stance 6D
-        # ----------------------------------------------------
+        # 6D stance-foot acceleration = 0.
 
         B2[
             0:6,
             self.qacc_slice
         ] = (
-            JL
+            J_stance
         )
 
         d2[
             0:6
         ] = (
-            -JdotL_v
+            -Jdot_stance_v
         )
 
-        # ----------------------------------------------------
-        # Right stance 6D
-        # ----------------------------------------------------
+        # CoM vertical task.
 
         B2[
-            6:12,
+            6,
             self.qacc_slice
         ] = (
-            JR
-        )
-
-        d2[
-            6:12
-        ] = (
-            -JdotR_v
-        )
-
-        # ----------------------------------------------------
-        # CoM height only
-        # ----------------------------------------------------
-
-        B2[
-            12,
-            self.qacc_slice
-        ] = (
-            Jcom[
+            J_com[
                 2,
                 :
             ]
         )
 
         d2[
-            12
+            6
         ] = (
             float(
                 desired_com_acceleration_z
@@ -1654,7 +1795,87 @@ class WholeBodyHierarchicalInverseDynamics:
 
 
     # ========================================================
-    # RANK 4 — POSTURE
+    # RANK 3 ΓÇö SWING-FOOT TRANSLATION
+    # ========================================================
+
+    def _build_rank3(
+        self,
+        swing_jacobian,
+        swing_jdot_v,
+        desired_swing_linear_acceleration,
+    ):
+
+        J_swing = np.asarray(
+            swing_jacobian,
+            dtype=float,
+        )
+
+        Jdot_swing_v = np.asarray(
+            swing_jdot_v,
+            dtype=float,
+        )
+
+        desired = np.asarray(
+            desired_swing_linear_acceleration,
+            dtype=float,
+        )
+
+        if J_swing.shape != (
+            6,
+            self.nv,
+        ):
+
+            raise ValueError(
+                "swing_jacobian has invalid shape."
+            )
+
+        if Jdot_swing_v.shape != (6,):
+
+            raise ValueError(
+                "swing_jdot_v has invalid shape."
+            )
+
+        if desired.shape != (3,):
+
+            raise ValueError(
+                "desired_swing_linear_acceleration "
+                "must have shape (3,)."
+            )
+
+        B3 = np.zeros(
+            (
+                3,
+                self.nvar,
+            ),
+            dtype=float,
+        )
+
+        B3[
+            :,
+            self.qacc_slice
+        ] = (
+            J_swing[
+                0:3,
+                :
+            ]
+        )
+
+        d3 = (
+            desired
+            -
+            Jdot_swing_v[
+                0:3
+            ]
+        )
+
+        return (
+            B3,
+            d3,
+        )
+
+
+    # ========================================================
+    # RANK 4 ΓÇö POSTURE
     # ========================================================
 
     def _build_rank4(
@@ -1700,57 +1921,44 @@ class WholeBodyHierarchicalInverseDynamics:
 
 
     # ========================================================
-    # RANK 5 — WRENCH REGULARIZATION
+    # RANK 5 ΓÇö STANCE-WRENCH REGULARIZATION
     # ========================================================
 
     def _build_rank5(
         self,
-        left_wrench_reference,
-        right_wrench_reference,
+        stance_wrench_reference,
     ):
 
-        left_reference = np.asarray(
-            left_wrench_reference,
+        reference = np.asarray(
+            stance_wrench_reference,
             dtype=float,
         )
 
-        right_reference = np.asarray(
-            right_wrench_reference,
-            dtype=float,
-        )
+        if reference.shape != (6,):
+
+            raise ValueError(
+                "stance_wrench_reference "
+                "must have shape (6,)."
+            )
 
         B5 = np.zeros(
             (
-                12,
+                6,
                 self.nvar,
             ),
             dtype=float,
         )
 
         B5[
-            0:6,
-            self.left_wrench_slice
+            :,
+            self.stance_wrench_slice
         ] = np.eye(
             6
-        )
-
-        B5[
-            6:12,
-            self.right_wrench_slice
-        ] = np.eye(
-            6
-        )
-
-        d5 = np.concatenate(
-            (
-                left_reference,
-                right_reference,
-            )
         )
 
         return (
             B5,
-            d5,
+            reference,
         )
 
 
@@ -1758,38 +1966,36 @@ class WholeBodyHierarchicalInverseDynamics:
     # MAIN SOLVE
     # ========================================================
 
-    def solve_double_support(
+    def solve(
         self,
 
         mass_matrix,
         effective_bias,
         selection_matrix,
 
-        left_jacobian,
-        left_jdot_v,
+        stance_jacobian,
+        stance_jdot_v,
 
-        right_jacobian,
-        right_jdot_v,
+        swing_jacobian,
+        swing_jdot_v,
 
         com_jacobian,
         com_jdot_v_z,
 
         desired_com_acceleration_z,
 
+        desired_swing_linear_acceleration,
+
         desired_posture_acceleration,
 
-        left_wrench_reference,
-        right_wrench_reference,
+        stance_wrench_reference,
 
-        left_support_bounds,
-        right_support_bounds,
-
-        left_contact_height,
-        right_contact_height,
+        stance_support_bounds,
+        stance_contact_height,
 
         torque_lower,
         torque_upper,
-    ) -> DoubleSupportHQPSolution:
+    ) -> WholeBodyHQPSolution:
 
         # ====================================================
         # RANK 1
@@ -1807,55 +2013,32 @@ class WholeBodyHierarchicalInverseDynamics:
             b_tau,
         ) = (
             self._build_physical_model(
-
                 mass_matrix=(
                     mass_matrix
                 ),
-
                 effective_bias=(
                     effective_bias
                 ),
-
                 selection_matrix=(
                     selection_matrix
                 ),
-
-                left_jacobian=(
-                    left_jacobian
+                stance_jacobian=(
+                    stance_jacobian
                 ),
-
-                right_jacobian=(
-                    right_jacobian
+                support_bounds=(
+                    stance_support_bounds
                 ),
-
-                left_support_bounds=(
-                    left_support_bounds
+                contact_height=(
+                    stance_contact_height
                 ),
-
-                right_support_bounds=(
-                    right_support_bounds
-                ),
-
-                left_contact_height=(
-                    left_contact_height
-                ),
-
-                right_contact_height=(
-                    right_contact_height
-                ),
-
                 torque_lower=(
                     torque_lower
                 ),
-
                 torque_upper=(
                     torque_upper
                 ),
             )
         )
-
-        # Particular solution satisfying the 6D
-        # floating-base dynamics.
 
         y1 = (
             self._particular_solution(
@@ -1863,8 +2046,6 @@ class WholeBodyHierarchicalInverseDynamics:
                 d1,
             )
         )
-
-        # Remaining null space for lower priorities.
 
         Z1 = (
             self._nullspace(
@@ -1878,31 +2059,18 @@ class WholeBodyHierarchicalInverseDynamics:
 
         B2, d2 = (
             self._build_rank2(
-
-                left_jacobian=(
-                    left_jacobian
+                stance_jacobian=(
+                    stance_jacobian
                 ),
-
-                left_jdot_v=(
-                    left_jdot_v
+                stance_jdot_v=(
+                    stance_jdot_v
                 ),
-
-                right_jacobian=(
-                    right_jacobian
-                ),
-
-                right_jdot_v=(
-                    right_jdot_v
-                ),
-
                 com_jacobian=(
                     com_jacobian
                 ),
-
                 com_jdot_v_z=(
                     com_jdot_v_z
                 ),
-
                 desired_com_acceleration_z=(
                     desired_com_acceleration_z
                 ),
@@ -1915,23 +2083,15 @@ class WholeBodyHierarchicalInverseDynamics:
 
         y2, violation2 = (
             self._solve_reduced_qp(
-
-                name="rank2",
-
+                name="single_rank2",
                 y_base=y1,
-
                 Z=Z1,
-
                 B=B2,
-
                 desired=d2,
-
                 A_ineq=A_ineq,
-
                 lower_ineq=(
                     lower_ineq
                 ),
-
                 upper_ineq=(
                     upper_ineq
                 ),
@@ -1954,8 +2114,6 @@ class WholeBodyHierarchicalInverseDynamics:
             )
         )
 
-        # Lock the achieved Rank-2 task.
-
         B12 = np.vstack(
             (
                 B1,
@@ -1970,7 +2128,88 @@ class WholeBodyHierarchicalInverseDynamics:
         )
 
         # ====================================================
-        # RANK 4
+        # RANK 3
+        # ====================================================
+
+        B3, d3 = (
+            self._build_rank3(
+                swing_jacobian=(
+                    swing_jacobian
+                ),
+                swing_jdot_v=(
+                    swing_jdot_v
+                ),
+                desired_swing_linear_acceleration=(
+                    desired_swing_linear_acceleration
+                ),
+            )
+        )
+
+        start = (
+            time.perf_counter()
+        )
+
+        y3, violation3 = (
+            self._solve_reduced_qp(
+                name="single_rank3",
+                y_base=y2,
+                Z=Z2,
+                B=B3,
+                desired=d3,
+                A_ineq=A_ineq,
+                lower_ineq=(
+                    lower_ineq
+                ),
+                upper_ineq=(
+                    upper_ineq
+                ),
+            )
+        )
+
+        solve_time_rank3 = (
+            time.perf_counter()
+            -
+            start
+        )
+
+        rank3_residual = float(
+            np.linalg.norm(
+                B3
+                @
+                y3
+                -
+                d3
+            )
+        )
+
+        B123 = np.vstack(
+            (
+                B1,
+                B2,
+                B3,
+            )
+        )
+
+        Z3 = (
+            self._nullspace(
+                B123
+            )
+        )
+
+        # ====================================================
+        # RANK 4 ΓÇö POSTURE
+        #
+        # Rank 4 is only a lower-priority posture objective.
+        #
+        # If the higher-priority solution:
+        #
+        #     Rank 1 = rigid-body dynamics / feasibility
+        #     Rank 2 = stance + CoM-z
+        #     Rank 3 = swing-foot tracking
+        #
+        # leaves no numerically feasible direction for posture,
+        # keep the Rank-3 solution instead of sacrificing the
+        # planner execution task.
         # ====================================================
 
         B4, d4 = (
@@ -1979,34 +2218,67 @@ class WholeBodyHierarchicalInverseDynamics:
             )
         )
 
+        rank4_used = False
+
         start = (
             time.perf_counter()
         )
 
-        y4, violation4 = (
-            self._solve_reduced_qp(
+        if Z3.shape[1] > 0:
 
-                name="rank4",
+            try:
 
-                y_base=y2,
+                y4, violation4 = (
+                    self._solve_reduced_qp(
+                        name="single_rank4",
 
-                Z=Z2,
+                        y_base=y3,
 
-                B=B4,
+                        Z=Z3,
 
-                desired=d4,
+                        B=B4,
 
-                A_ineq=A_ineq,
+                        desired=d4,
 
-                lower_ineq=(
-                    lower_ineq
-                ),
+                        A_ineq=A_ineq,
 
-                upper_ineq=(
-                    upper_ineq
-                ),
+                        lower_ineq=(
+                            lower_ineq
+                        ),
+
+                        upper_ineq=(
+                            upper_ineq
+                        ),
+                    )
+                )
+
+                rank4_used = True
+
+            except RuntimeError:
+
+                # --------------------------------------------
+                # Posture is only an auxiliary task.
+                #
+                # Preserve the valid Rank-3 solution.
+                # --------------------------------------------
+
+                y4 = (
+                    y3.copy()
+                )
+
+                violation4 = (
+                    violation3
+                )
+
+        else:
+
+            y4 = (
+                y3.copy()
             )
-        )
+
+            violation4 = (
+                violation3
+            )
 
         solve_time_rank4 = (
             time.perf_counter()
@@ -2024,21 +2296,35 @@ class WholeBodyHierarchicalInverseDynamics:
             )
         )
 
-        # Lock achieved Rank 4.
+        # ----------------------------------------------------
+        # Only lock Rank 4 if it was actually solved.
+        #
+        # If Rank 4 fell back, there is no achieved posture
+        # objective to preserve.
+        # ----------------------------------------------------
 
-        B124 = np.vstack(
-            (
-                B1,
-                B2,
-                B4,
-            )
-        )
+        if rank4_used:
 
-        Z4 = (
-            self._nullspace(
-                B124
+            B1234 = np.vstack(
+                (
+                    B1,
+                    B2,
+                    B3,
+                    B4,
+                )
             )
-        )
+
+            Z4 = (
+                self._nullspace(
+                    B1234
+                )
+            )
+
+        else:
+
+            Z4 = (
+                Z3.copy()
+            )
 
         # ====================================================
         # RANK 5
@@ -2046,14 +2332,13 @@ class WholeBodyHierarchicalInverseDynamics:
 
         B5, d5 = (
             self._build_rank5(
-                left_wrench_reference,
-                right_wrench_reference,
+                stance_wrench_reference
             )
         )
 
         rank5_used = False
 
-        if Z4.shape[1] > 0:
+        if (rank4_used and Z4.shape[1] > 0):
 
             start = (
                 time.perf_counter()
@@ -2063,23 +2348,15 @@ class WholeBodyHierarchicalInverseDynamics:
 
                 y5, violation5 = (
                     self._solve_reduced_qp(
-
-                        name="rank5",
-
+                        name="single_rank5",
                         y_base=y4,
-
                         Z=Z4,
-
                         B=B5,
-
                         desired=d5,
-
                         A_ineq=A_ineq,
-
                         lower_ineq=(
                             lower_ineq
                         ),
-
                         upper_ineq=(
                             upper_ineq
                         ),
@@ -2089,13 +2366,6 @@ class WholeBodyHierarchicalInverseDynamics:
                 rank5_used = True
 
             except RuntimeError:
-
-                # Rank 5 is only redundancy resolution.
-                #
-                # Never sacrifice the higher-priority
-                # physically valid solution because the
-                # lowest-priority regularizer becomes
-                # numerically singular.
 
                 y5 = (
                     y4.copy()
@@ -2121,9 +2391,7 @@ class WholeBodyHierarchicalInverseDynamics:
                 violation4
             )
 
-            solve_time_rank5 = (
-                0.0
-            )
+            solve_time_rank5 = 0.0
 
         rank5_residual = float(
             np.linalg.norm(
@@ -2136,7 +2404,7 @@ class WholeBodyHierarchicalInverseDynamics:
         )
 
         # ====================================================
-        # EXTRACT VARIABLES
+        # EXTRACT + TORQUE
         # ====================================================
 
         qacc = (
@@ -2145,21 +2413,11 @@ class WholeBodyHierarchicalInverseDynamics:
             ].copy()
         )
 
-        left_wrench = (
+        stance_wrench = (
             y5[
-                self.left_wrench_slice
+                self.stance_wrench_slice
             ].copy()
         )
-
-        right_wrench = (
-            y5[
-                self.right_wrench_slice
-            ].copy()
-        )
-
-        # ====================================================
-        # RECOVER TORQUE
-        # ====================================================
 
         torque = (
             A_tau
@@ -2180,7 +2438,6 @@ class WholeBodyHierarchicalInverseDynamics:
         )
 
         torque_violation = max(
-
             float(
                 np.max(
                     np.maximum(
@@ -2191,7 +2448,6 @@ class WholeBodyHierarchicalInverseDynamics:
                     )
                 )
             ),
-
             float(
                 np.max(
                     np.maximum(
@@ -2213,8 +2469,7 @@ class WholeBodyHierarchicalInverseDynamics:
             raise RuntimeError(
                 "Recovered torque violates limits.\n"
                 f"max violation = "
-                f"{torque_violation:.6e}\n"
-                f"tau = {torque}"
+                f"{torque_violation:.6e}"
             )
 
         # ====================================================
@@ -2245,6 +2500,19 @@ class WholeBodyHierarchicalInverseDynamics:
             )
         )
 
+        rank3_lock_error = float(
+            np.linalg.norm(
+                B3
+                @
+                y5
+                -
+                B3
+                @
+                y3,
+                ord=np.inf,
+            )
+        )
+
         rank4_lock_error = float(
             np.linalg.norm(
                 B4
@@ -2258,100 +2526,85 @@ class WholeBodyHierarchicalInverseDynamics:
             )
         )
 
-        if (
-            rank1_lock_error
-            >
-            self.config.constraint_tolerance
+        for name, error in (
+            (
+                "Rank-1",
+                rank1_lock_error,
+            ),
+            (
+                "Rank-2",
+                rank2_lock_error,
+            ),
+            (
+                "Rank-3",
+                rank3_lock_error,
+            ),
+            (
+                "Rank-4",
+                rank4_lock_error,
+            ),
         ):
 
-            raise RuntimeError(
-                "Rank-1 hierarchy violation.\n"
-                f"error = "
-                f"{rank1_lock_error:.6e}"
-            )
+            if (
+                error
+                >
+                self.config.constraint_tolerance
+            ):
 
-        if (
-            rank2_lock_error
-            >
-            self.config.constraint_tolerance
-        ):
-
-            raise RuntimeError(
-                "Rank-2 hierarchy violation.\n"
-                f"error = "
-                f"{rank2_lock_error:.6e}"
-            )
-
-        if (
-            rank4_lock_error
-            >
-            self.config.constraint_tolerance
-        ):
-
-            raise RuntimeError(
-                "Rank-4 hierarchy violation.\n"
-                f"error = "
-                f"{rank4_lock_error:.6e}"
-            )
+                raise RuntimeError(
+                    f"{name} hierarchy violation.\n"
+                    f"error = {error:.6e}"
+                )
 
         max_violation = max(
             violation2,
+            violation3,
             violation4,
             violation5,
-
             torque_violation,
-
             rank1_lock_error,
             rank2_lock_error,
+            rank3_lock_error,
             rank4_lock_error,
         )
 
-        return DoubleSupportHQPSolution(
-
+        return WholeBodyHQPSolution(
             qacc=(
                 qacc
             ),
-
-            left_wrench=(
-                left_wrench
+            stance_wrench=(
+                stance_wrench
             ),
-
-            right_wrench=(
-                right_wrench
-            ),
-
             torque=(
                 torque
             ),
-
             rank2_residual=(
                 rank2_residual
             ),
-
+            rank3_residual=(
+                rank3_residual
+            ),
             rank4_residual=(
                 rank4_residual
             ),
-
             rank5_residual=(
                 rank5_residual
             ),
-
             rank5_used=(
                 rank5_used
             ),
-
             max_constraint_violation=(
                 max_violation
             ),
-
             solve_time_rank2=(
                 solve_time_rank2
             ),
-
+            solve_time_rank3=(
+                solve_time_rank3
+            ),
             solve_time_rank4=(
                 solve_time_rank4
             ),
-
             solve_time_rank5=(
                 solve_time_rank5
             ),

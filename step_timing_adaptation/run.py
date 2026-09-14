@@ -52,6 +52,11 @@ if __package__:
         VerticalSwingQPParameters,
     )
 
+    from .whole_body_qp import (
+        WholeBodyHQPConfig,
+        WholeBodyHierarchicalInverseDynamics,
+    )
+
 
 else:
 
@@ -68,6 +73,11 @@ else:
     from swing_trajectory import (
         OnlineSwingFootTrajectory,
         VerticalSwingQPParameters,
+    )
+
+    from whole_body_qp import (
+        WholeBodyHQPConfig,
+        WholeBodyHierarchicalInverseDynamics,
     )
 
 
@@ -100,17 +110,6 @@ REALTIME_FACTOR = 1.0
 VIEWER_REFRESH_FREQUENCY = 60.0
 
 STATUS_PRINT_PERIOD = 0.05
-
-
-# ============================================================
-# HOME BOOTSTRAP
-# ============================================================
-
-HOME_TORQUE_BOOTSTRAP_TIME = (
-    1.0
-    /
-    CONTROL_FREQUENCY
-)
 
 
 # ============================================================
@@ -973,6 +972,7 @@ def run_single_support_step_validation(
     model,
     data,
     dynamics,
+    controller,
     planner,
 
     actuated_qpos_indices,
@@ -1913,6 +1913,90 @@ def run_single_support_step_validation(
                 time.perf_counter()
             )
 
+            solution = controller.solve(
+                mass_matrix=(
+                    terms.mass_matrix
+                ),
+
+                effective_bias=(
+                    terms.effective_bias
+                ),
+
+                selection_matrix=(
+                    terms.selection_matrix
+                ),
+
+                stance_jacobian=(
+                    stance.jacobian
+                ),
+
+                stance_jdot_v=(
+                    stance.jacobian_dot_velocity
+                ),
+
+                swing_jacobian=(
+                    swing.jacobian
+                ),
+
+                swing_jdot_v=(
+                    swing.jacobian_dot_velocity
+                ),
+
+                com_jacobian=(
+                    com.jacobian
+                ),
+
+                com_jdot_v_z=(
+                    com_jdot_v[
+                        2
+                    ]
+                ),
+
+                desired_com_acceleration_z=(
+                    desired_com_acceleration_z
+                ),
+
+                desired_swing_linear_acceleration=(
+                    desired_swing_linear_acceleration
+                ),
+
+                desired_posture_acceleration=(
+                    desired_posture_acceleration
+                ),
+
+                stance_wrench_reference=(
+                    stance_wrench_reference
+                ),
+
+                stance_support_bounds=(
+                    stance_support_bounds
+                ),
+
+                stance_contact_height=(
+                    stance_contact_height
+                ),
+
+                torque_lower=(
+                    torque_lower
+                ),
+
+                torque_upper=(
+                    torque_upper
+                ),
+            )
+
+            if not solution.rank5_used:
+
+                rank5_fallback_count += 1
+
+            last_solution = (
+                solution
+            )
+
+            last_tau = (
+                solution.torque.copy()
+            )
+
             hqp_elapsed = (
                 time.perf_counter()
                 -
@@ -2438,7 +2522,6 @@ def run_single_support_step_validation(
         )
 
 
-
 # ============================================================
 # MAIN
 # ============================================================
@@ -2927,6 +3010,50 @@ def main():
     separator()
 
     # ========================================================
+    # WHOLE-BODY CONTROLLER
+    # ========================================================
+
+    wbc_config = WholeBodyHQPConfig(
+        friction_coefficient=(
+            FRICTION_COEFFICIENT
+        ),
+
+        numerical_regularization=(
+            1.0e-4
+        ),
+
+        svd_tolerance=(
+            1.0e-9
+        ),
+
+        constraint_tolerance=(
+            1.0e-6
+        ),
+
+        solver_name="qrqp",
+    )
+
+    controller = (
+        WholeBodyHierarchicalInverseDynamics(
+            nv=(
+                model.nv
+            ),
+
+            nu=(
+                model.nu
+            ),
+
+            actuated_dof_indices=(
+                dynamics.actuated_dof_indices
+            ),
+
+            config=(
+                wbc_config
+            ),
+        )
+    )
+
+    # ========================================================
     # RUN
     # ========================================================
 
@@ -2944,6 +3071,8 @@ def main():
                 data=data,
 
                 dynamics=dynamics,
+
+                controller=controller,
 
                 planner=planner,
 
@@ -2989,6 +3118,8 @@ def main():
             data=data,
 
             dynamics=dynamics,
+
+            controller=controller,
 
             planner=planner,
 
