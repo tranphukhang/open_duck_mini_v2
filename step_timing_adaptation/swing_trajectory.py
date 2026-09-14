@@ -15,14 +15,6 @@ import numpy as np
 
 @dataclass(frozen=True)
 class HorizontalSwingSample:
-    """
-    Desired horizontal swing-foot state at one sample.
-
-    All vectors use the world-frame horizontal coordinates:
-
-        x : forward
-        y : left
-    """
 
     time: float
 
@@ -33,32 +25,17 @@ class HorizontalSwingSample:
     landing_time: float
     landing_position: np.ndarray
 
-    # Polynomial coefficients for x and y.
-    #
-    # coefficients[axis, i] corresponds to:
-    #
-    #     X(s) = sum_{i=0}^5 c_i s^i
-    #
-    # where:
-    #
-    #     s = t - t_previous
     coefficients: np.ndarray
 
     max_boundary_residual: float
 
 
-
 # ============================================================
-# VERTICAL SWING QP PARAMETERS
+# VERTICAL SWING PARAMETERS
 # ============================================================
 
 @dataclass(frozen=True)
 class VerticalSwingQPParameters:
-    """
-    Runtime parameters for the vertical swing-foot QP.
-
-    The numerical values are intentionally supplied from run.py.
-    """
 
     desired_height: float
     maximum_height: float
@@ -77,14 +54,6 @@ class VerticalSwingQPParameters:
 
 @dataclass(frozen=True)
 class VerticalSwingSample:
-    """
-    Desired vertical swing-foot state at one sample.
-
-    Height is measured relative to the current ground/contact
-    plane of the step:
-
-        z = 0 at lift-off and touchdown.
-    """
 
     time: float
 
@@ -106,24 +75,12 @@ class VerticalSwingSample:
     refinement_iterations: int
 
 
-
 # ============================================================
-# COMBINED 3D SWING SAMPLE
+# COMBINED SWING SAMPLE
 # ============================================================
 
 @dataclass(frozen=True)
 class SwingFootSample:
-    """
-    Combined desired swing-foot state in world coordinates.
-
-    Horizontal x/y come from the online quintic trajectory.
-    Vertical z is obtained by adding the relative clearance
-    trajectory to the lift-off/touchdown site-height reference
-    stored when reset_3d() is called.
-
-    The current implementation therefore targets flat terrain:
-    lift-off and touchdown use the same world-z reference.
-    """
 
     time: float
 
@@ -146,37 +103,36 @@ class SwingFootSample:
 
 class OnlineSwingFootTrajectory:
     """
-    Online horizontal swing-foot trajectory regeneration.
+    Online swing-foot trajectory used together with the
+    Step Timing Adaptation planner.
 
-    This implements the horizontal part of the swing-foot
-    adaptation strategy used by Khadiv et al.
+    Horizontal:
+        fifth-order polynomial regenerated online.
 
-    At each update, a fifth-order polynomial is regenerated
-    from the desired swing-foot state at the previous sample
+    Vertical:
+        ninth-order polynomial based on Eq. (21) of
+        Khadiv et al.
 
-        X(t_{k-1})
-        X_dot(t_{k-1})
-        X_ddot(t_{k-1})
+    At every update the trajectory starts from the desired
+    state generated at the previous sample and connects to
+    the latest adapted landing time and landing location.
 
-    to the latest planner landing target
+    Therefore changes in:
 
-        X(T)      = u_T
-        X_dot(T)  = 0
-        X_ddot(T) = 0
+        u_T
+        T
 
-    The polynomial is represented in local time
-
-        s = t - t_{k-1}
-
-    for improved numerical conditioning.
-
-    This class does not contain walking parameters.
-    Runtime configuration remains in run.py.
+    can be incorporated online while maintaining continuity
+    of position, velocity and acceleration.
     """
 
     def __init__(
         self,
     ) -> None:
+
+        # ====================================================
+        # HORIZONTAL STATE
+        # ====================================================
 
         self._initialized = False
 
@@ -197,9 +153,9 @@ class OnlineSwingFootTrajectory:
             dtype=float,
         )
 
-        # ----------------------------------------------------
-        # Vertical trajectory state.
-        # ----------------------------------------------------
+        # ====================================================
+        # VERTICAL STATE
+        # ====================================================
 
         self._vertical_initialized = False
 
@@ -209,22 +165,23 @@ class OnlineSwingFootTrajectory:
         self._vertical_velocity = 0.0
         self._vertical_acceleration = 0.0
 
+        # Last feasible solution is retained and used as a
+        # numerical warm-start by the fallback solver.
+        self._vertical_coefficients = None
+
         self._vertical_solver_counter = 0
 
-        # ----------------------------------------------------
-        # Combined 3D trajectory state.
-        #
-        # Stage-3B models z as clearance relative to the
-        # touchdown level. For the current flat-terrain test,
-        # that level is the swing-foot site world-z at lift-off.
-        # ----------------------------------------------------
+        # ====================================================
+        # COMBINED 3D
+        # ====================================================
 
         self._vertical_reference_height = 0.0
+
         self._combined_initialized = False
 
 
     # ========================================================
-    # STATE
+    # BASIC PROPERTIES
     # ========================================================
 
     @property
@@ -286,7 +243,7 @@ class OnlineSwingFootTrajectory:
 
 
     # ========================================================
-    # COMBINED 3D SWING — RESET
+    # RESET COMPLETE 3D SWING
     # ========================================================
 
     def reset_3d(
@@ -296,17 +253,6 @@ class OnlineSwingFootTrajectory:
         initial_acceleration=None,
         start_time: float = 0.0,
     ) -> None:
-        """
-        Initialize one complete swing-foot trajectory.
-
-        The input position is the current swing-foot site
-        position in world coordinates.
-
-        For the current flat-terrain implementation, its world-z
-        value is stored as the common lift-off/touchdown height.
-        The ninth-order vertical polynomial then generates only
-        the clearance above that reference.
-        """
 
         position = self._as_vector3(
             initial_position,
@@ -314,50 +260,97 @@ class OnlineSwingFootTrajectory:
         )
 
         if initial_velocity is None:
-            velocity = np.zeros(3, dtype=float)
+
+            velocity = np.zeros(
+                3,
+                dtype=float,
+            )
+
         else:
+
             velocity = self._as_vector3(
                 initial_velocity,
                 "initial_velocity",
             )
 
         if initial_acceleration is None:
-            acceleration = np.zeros(3, dtype=float)
+
+            acceleration = np.zeros(
+                3,
+                dtype=float,
+            )
+
         else:
+
             acceleration = self._as_vector3(
                 initial_acceleration,
                 "initial_acceleration",
             )
 
-        t0 = float(start_time)
+        t0 = float(
+            start_time
+        )
 
         if (
             not math.isfinite(t0)
             or
             abs(t0) > 1.0e-12
         ):
+
             raise ValueError(
                 "reset_3d currently requires start_time = 0."
             )
 
-        if abs(velocity[2]) > 1.0e-10:
+        if (
+            abs(
+                velocity[2]
+            )
+            >
+            1.0e-10
+        ):
+
             raise ValueError(
-                "reset_3d requires zero initial vertical velocity."
+                "reset_3d requires zero initial "
+                "vertical velocity."
             )
 
-        if abs(acceleration[2]) > 1.0e-10:
+        if (
+            abs(
+                acceleration[2]
+            )
+            >
+            1.0e-10
+        ):
+
             raise ValueError(
-                "reset_3d requires zero initial vertical acceleration."
+                "reset_3d requires zero initial "
+                "vertical acceleration."
             )
 
+        # World-z reference of flat terrain.
         self._vertical_reference_height = float(
             position[2]
         )
 
         self.reset_horizontal(
-            initial_position=position[0:2],
-            initial_velocity=velocity[0:2],
-            initial_acceleration=acceleration[0:2],
+            initial_position=(
+                position[
+                    0:2
+                ]
+            ),
+
+            initial_velocity=(
+                velocity[
+                    0:2
+                ]
+            ),
+
+            initial_acceleration=(
+                acceleration[
+                    0:2
+                ]
+            ),
+
             start_time=0.0,
         )
 
@@ -367,7 +360,7 @@ class OnlineSwingFootTrajectory:
 
 
     # ========================================================
-    # COMBINED 3D SWING — ONLINE UPDATE
+    # UPDATE COMPLETE 3D SWING
     # ========================================================
 
     def update_3d(
@@ -377,15 +370,9 @@ class OnlineSwingFootTrajectory:
         landing_position_xy,
         vertical_parameters: VerticalSwingQPParameters,
     ) -> SwingFootSample:
-        """
-        Regenerate the complete 3D swing-foot state.
-
-        The planner supplies the horizontal landing location and
-        total landing time. The vertical touchdown level is the
-        flat-terrain reference stored by reset_3d().
-        """
 
         if not self._combined_initialized:
+
             raise RuntimeError(
                 "3D swing trajectory has not been initialized. "
                 "Call reset_3d() first."
@@ -397,23 +384,41 @@ class OnlineSwingFootTrajectory:
         )
 
         horizontal = self.update_horizontal(
-            current_time=current_time,
-            landing_time=landing_time,
-            landing_position=landing_xy,
+            current_time=(
+                current_time
+            ),
+
+            landing_time=(
+                landing_time
+            ),
+
+            landing_position=(
+                landing_xy
+            ),
         )
 
         vertical = self.update_vertical(
-            current_time=current_time,
-            landing_time=landing_time,
-            parameters=vertical_parameters,
+            current_time=(
+                current_time
+            ),
+
+            landing_time=(
+                landing_time
+            ),
+
+            parameters=(
+                vertical_parameters
+            ),
         )
 
         position = np.array(
             [
                 horizontal.position[0],
                 horizontal.position[1],
+
                 self._vertical_reference_height
-                + vertical.height,
+                +
+                vertical.height,
             ],
             dtype=float,
         )
@@ -445,30 +450,69 @@ class OnlineSwingFootTrajectory:
             dtype=float,
         )
 
-        if not np.all(np.isfinite(position)):
+        if not np.all(
+            np.isfinite(
+                position
+            )
+        ):
+
             raise RuntimeError(
-                "Non-finite combined swing position generated."
+                "Non-finite combined swing position."
             )
 
-        if not np.all(np.isfinite(velocity)):
+        if not np.all(
+            np.isfinite(
+                velocity
+            )
+        ):
+
             raise RuntimeError(
-                "Non-finite combined swing velocity generated."
+                "Non-finite combined swing velocity."
             )
 
-        if not np.all(np.isfinite(acceleration)):
+        if not np.all(
+            np.isfinite(
+                acceleration
+            )
+        ):
+
             raise RuntimeError(
-                "Non-finite combined swing acceleration generated."
+                "Non-finite combined swing acceleration."
             )
 
         return SwingFootSample(
-            time=float(current_time),
-            position=position,
-            velocity=velocity,
-            acceleration=acceleration,
-            landing_time=float(landing_time),
-            landing_position=landing_position,
-            horizontal=horizontal,
-            vertical=vertical,
+            time=float(
+                current_time
+            ),
+
+            position=(
+                position
+            ),
+
+            velocity=(
+                velocity
+            ),
+
+            acceleration=(
+                acceleration
+            ),
+
+            landing_time=float(
+                landing_time
+            ),
+
+            landing_position=(
+                landing_position
+            ),
+
+            horizontal=(
+                horizontal
+            ),
+
+            vertical=(
+                vertical
+            ),
+
             max_boundary_residual=float(
                 max(
                     horizontal.max_boundary_residual,
@@ -479,7 +523,7 @@ class OnlineSwingFootTrajectory:
 
 
     # ========================================================
-    # RESET AT LIFT-OFF
+    # RESET HORIZONTAL SWING
     # ========================================================
 
     def reset_horizontal(
@@ -489,22 +533,6 @@ class OnlineSwingFootTrajectory:
         initial_acceleration=None,
         start_time: float = 0.0,
     ) -> None:
-        """
-        Initialize a new swing phase.
-
-        initial_position:
-            [x, y] desired/actual swing-foot position.
-
-        initial_velocity:
-            [vx, vy]. Defaults to zero.
-
-        initial_acceleration:
-            [ax, ay]. Defaults to zero.
-
-        start_time:
-            Time measured from the beginning of the current
-            walking step. Normally zero.
-        """
 
         position = self._as_vector2(
             initial_position,
@@ -544,7 +572,9 @@ class OnlineSwingFootTrajectory:
         )
 
         if (
-            not math.isfinite(t0)
+            not math.isfinite(
+                t0
+            )
             or
             t0 < 0.0
         ):
@@ -553,7 +583,9 @@ class OnlineSwingFootTrajectory:
                 "start_time must be finite and >= 0."
             )
 
-        self._previous_time = t0
+        self._previous_time = (
+            t0
+        )
 
         self._position = (
             position.copy()
@@ -571,7 +603,7 @@ class OnlineSwingFootTrajectory:
 
 
     # ========================================================
-    # ONLINE UPDATE
+    # UPDATE HORIZONTAL SWING
     # ========================================================
 
     def update_horizontal(
@@ -581,20 +613,17 @@ class OnlineSwingFootTrajectory:
         landing_position,
     ) -> HorizontalSwingSample:
         """
-        Regenerate and evaluate the fifth-order trajectory.
+        Regenerate a quintic trajectory:
 
-        current_time:
-            Current elapsed time from the start of the step.
+            p(t_prev)
+            v(t_prev)
+            a(t_prev)
 
-        landing_time:
-            Adapted total step duration T from the planner.
+        ->
 
-        landing_position:
-            Adapted landing location [u_Tx, u_Ty].
-
-        The generated polynomial connects the previous desired
-        state continuously up to acceleration level to the new
-        landing target.
+            p(T) = landing target
+            v(T) = 0
+            a(T) = 0
         """
 
         self._require_initialized()
@@ -612,8 +641,14 @@ class OnlineSwingFootTrajectory:
             "landing_position",
         )
 
+        tolerance = (
+            1.0e-12
+        )
+
         if (
-            not math.isfinite(t_current)
+            not math.isfinite(
+                t_current
+            )
             or
             t_current < 0.0
         ):
@@ -623,7 +658,9 @@ class OnlineSwingFootTrajectory:
             )
 
         if (
-            not math.isfinite(T)
+            not math.isfinite(
+                T
+            )
             or
             T <= 0.0
         ):
@@ -631,8 +668,6 @@ class OnlineSwingFootTrajectory:
             raise ValueError(
                 "landing_time must be finite and positive."
             )
-
-        tolerance = 1.0e-12
 
         if (
             t_current
@@ -643,7 +678,7 @@ class OnlineSwingFootTrajectory:
         ):
 
             raise ValueError(
-                "current_time must be >= previous sample time."
+                "current_time must not move backwards."
             )
 
         if (
@@ -658,8 +693,10 @@ class OnlineSwingFootTrajectory:
                 "landing_time must be >= current_time."
             )
 
-        # If current_time is numerically equal to T, the swing
-        # has reached touchdown. Return the exact terminal state.
+        # ====================================================
+        # TOUCHDOWN
+        # ====================================================
+
         if (
             T
             -
@@ -679,7 +716,9 @@ class OnlineSwingFootTrajectory:
             coefficients[
                 :,
                 0
-            ] = target
+            ] = (
+                target
+            )
 
             position = (
                 target.copy()
@@ -695,7 +734,9 @@ class OnlineSwingFootTrajectory:
                 dtype=float,
             )
 
-            self._previous_time = t_current
+            self._previous_time = (
+                t_current
+            )
 
             self._position = (
                 position.copy()
@@ -710,17 +751,40 @@ class OnlineSwingFootTrajectory:
             )
 
             return HorizontalSwingSample(
-                time=t_current,
-                position=position,
-                velocity=velocity,
-                acceleration=acceleration,
-                landing_time=T,
+                time=(
+                    t_current
+                ),
+
+                position=(
+                    position
+                ),
+
+                velocity=(
+                    velocity
+                ),
+
+                acceleration=(
+                    acceleration
+                ),
+
+                landing_time=(
+                    T
+                ),
+
                 landing_position=(
                     target.copy()
                 ),
-                coefficients=coefficients,
+
+                coefficients=(
+                    coefficients
+                ),
+
                 max_boundary_residual=0.0,
             )
+
+        # ====================================================
+        # ONLINE REGENERATION
+        # ====================================================
 
         t_previous = float(
             self._previous_time
@@ -732,49 +796,40 @@ class OnlineSwingFootTrajectory:
             t_previous
         )
 
-        if horizon <= tolerance:
+        if (
+            horizon
+            <=
+            tolerance
+        ):
 
             raise RuntimeError(
-                "Remaining swing horizon is too small "
-                "to regenerate a fifth-order polynomial."
+                "Remaining horizontal swing horizon "
+                "is too small."
             )
 
-        evaluation_time = (
+        local_time = (
             t_current
             -
             t_previous
         )
 
-        if (
-            evaluation_time
-            >
-            horizon
-            +
-            tolerance
-        ):
-
-            raise RuntimeError(
-                "Current sample lies after the landing time."
-            )
-
-        # Clamp only numerical roundoff.
-        evaluation_time = min(
+        local_time = min(
             max(
-                evaluation_time,
+                local_time,
                 0.0,
             ),
             horizon,
         )
 
-        previous_position = (
+        p0 = (
             self._position.copy()
         )
 
-        previous_velocity = (
+        v0 = (
             self._velocity.copy()
         )
 
-        previous_acceleration = (
+        a0 = (
             self._acceleration.copy()
         )
 
@@ -785,81 +840,6 @@ class OnlineSwingFootTrajectory:
             ),
             dtype=float,
         )
-
-        max_boundary_residual = 0.0
-
-        for axis in range(
-            2
-        ):
-
-            axis_coefficients = (
-                self._solve_quintic(
-                    initial_position=(
-                        previous_position[
-                            axis
-                        ]
-                    ),
-                    initial_velocity=(
-                        previous_velocity[
-                            axis
-                        ]
-                    ),
-                    initial_acceleration=(
-                        previous_acceleration[
-                            axis
-                        ]
-                    ),
-                    final_position=(
-                        target[
-                            axis
-                        ]
-                    ),
-                    horizon=(
-                        horizon
-                    ),
-                )
-            )
-
-            coefficients[
-                axis,
-                :
-            ] = axis_coefficients
-
-            boundary_residual = (
-                self._compute_boundary_residual(
-                    coefficients=(
-                        axis_coefficients
-                    ),
-                    horizon=(
-                        horizon
-                    ),
-                    initial_position=(
-                        previous_position[
-                            axis
-                        ]
-                    ),
-                    initial_velocity=(
-                        previous_velocity[
-                            axis
-                        ]
-                    ),
-                    initial_acceleration=(
-                        previous_acceleration[
-                            axis
-                        ]
-                    ),
-                    final_position=(
-                        target[
-                            axis
-                        ]
-                    ),
-                )
-            )
-
-            max_boundary_residual = max(
-                max_boundary_residual,
-                boundary_residual,
-            )
 
         position = np.zeros(
             2,
@@ -876,9 +856,44 @@ class OnlineSwingFootTrajectory:
             dtype=float,
         )
 
+        max_boundary_residual = 0.0
+
         for axis in range(
             2
         ):
+
+            coefficients[
+                axis,
+                :
+            ] = self._solve_quintic(
+                initial_position=(
+                    p0[
+                        axis
+                    ]
+                ),
+
+                initial_velocity=(
+                    v0[
+                        axis
+                    ]
+                ),
+
+                initial_acceleration=(
+                    a0[
+                        axis
+                    ]
+                ),
+
+                final_position=(
+                    target[
+                        axis
+                    ]
+                ),
+
+                horizon=(
+                    horizon
+                ),
+            )
 
             (
                 position[
@@ -897,9 +912,54 @@ class OnlineSwingFootTrajectory:
                         :
                     ]
                 ),
+
                 local_time=(
-                    evaluation_time
+                    local_time
                 ),
+            )
+
+            residual = (
+                self._compute_quintic_boundary_residual(
+                    coefficients=(
+                        coefficients[
+                            axis,
+                            :
+                        ]
+                    ),
+
+                    horizon=(
+                        horizon
+                    ),
+
+                    initial_position=(
+                        p0[
+                            axis
+                        ]
+                    ),
+
+                    initial_velocity=(
+                        v0[
+                            axis
+                        ]
+                    ),
+
+                    initial_acceleration=(
+                        a0[
+                            axis
+                        ]
+                    ),
+
+                    final_position=(
+                        target[
+                            axis
+                        ]
+                    ),
+                )
+            )
+
+            max_boundary_residual = max(
+                max_boundary_residual,
+                residual,
             )
 
         if not np.all(
@@ -909,7 +969,7 @@ class OnlineSwingFootTrajectory:
         ):
 
             raise RuntimeError(
-                "Non-finite swing position generated."
+                "Horizontal swing position became non-finite."
             )
 
         if not np.all(
@@ -919,7 +979,7 @@ class OnlineSwingFootTrajectory:
         ):
 
             raise RuntimeError(
-                "Non-finite swing velocity generated."
+                "Horizontal swing velocity became non-finite."
             )
 
         if not np.all(
@@ -929,13 +989,16 @@ class OnlineSwingFootTrajectory:
         ):
 
             raise RuntimeError(
-                "Non-finite swing acceleration generated."
+                "Horizontal swing acceleration became non-finite."
             )
 
-        # The next online regeneration starts exactly from this
-        # desired state. This implements the paper's continuity
-        # condition at t_{k-1}.
-        self._previous_time = t_current
+        # ====================================================
+        # STORE CURRENT DESIRED STATE
+        # ====================================================
+
+        self._previous_time = (
+            t_current
+        )
 
         self._position = (
             position.copy()
@@ -950,55 +1013,75 @@ class OnlineSwingFootTrajectory:
         )
 
         return HorizontalSwingSample(
-            time=t_current,
-            position=position,
-            velocity=velocity,
-            acceleration=acceleration,
-            landing_time=T,
+            time=(
+                t_current
+            ),
+
+            position=(
+                position
+            ),
+
+            velocity=(
+                velocity
+            ),
+
+            acceleration=(
+                acceleration
+            ),
+
+            landing_time=(
+                T
+            ),
+
             landing_position=(
                 target.copy()
             ),
+
             coefficients=(
                 coefficients.copy()
             ),
+
             max_boundary_residual=float(
                 max_boundary_residual
             ),
         )
 
 
-
     # ========================================================
-    # VERTICAL SWING — RESET
+    # RESET VERTICAL SWING
     # ========================================================
 
     def reset_vertical(
         self,
     ) -> None:
-        """
-        Initialize a new vertical swing phase.
 
-        The paper uses the boundary conditions
+        self._vertical_previous_time = (
+            0.0
+        )
 
-            z(0)     = 0
-            z_dot(0) = 0
-            z_ddot(0)= 0
+        self._vertical_height = (
+            0.0
+        )
 
-        for flat-ground walking. Therefore the desired vertical
-        swing state is reset exactly to zero at lift-off.
-        """
+        self._vertical_velocity = (
+            0.0
+        )
 
-        self._vertical_previous_time = 0.0
+        self._vertical_acceleration = (
+            0.0
+        )
 
-        self._vertical_height = 0.0
-        self._vertical_velocity = 0.0
-        self._vertical_acceleration = 0.0
+        self._vertical_coefficients = (
+            None
+        )
 
-        self._vertical_initialized = True
+        self._vertical_initialized = (
+            True
+        )
 
 
     # ========================================================
-    # VERTICAL SWING — ONLINE 9TH-ORDER QP
+    # UPDATE VERTICAL SWING
     # ========================================================
 
     def update_vertical(
@@ -1008,52 +1091,28 @@ class OnlineSwingFootTrajectory:
         parameters: VerticalSwingQPParameters,
     ) -> VerticalSwingSample:
         """
-        Regenerate the vertical swing-foot polynomial.
+        Online ninth-order vertical trajectory.
 
         Paper Eq. (21):
 
             minimize
-                || z(T/2) - z_des ||^2
+                (z(T/2) - z_des)^2
 
-            subject to
-                0 <= z(t) <= z_max
+        subject to
 
-                z(0)       = 0
-                z(t_k-1)   = z_k-1
-                z(T)       = 0
+            0 <= z(t) <= z_max
 
-                z_dot(0)     = 0
-                z_dot(t_k-1) = z_dot_k-1
-                z_dot(T)     = 0
+            z(0)       = 0
+            zdot(0)    = 0
+            zddot(0)   = 0
 
-                z_ddot(0)     = 0
-                z_ddot(t_k-1) = z_ddot_k-1
-                z_ddot(T)     = 0
+            z(t_prev)       = z_prev
+            zdot(t_prev)    = zdot_prev
+            zddot(t_prev)   = zddot_prev
 
-        A ninth-order polynomial is used:
-
-            z(r) = sum_{i=0}^9 c_i r^i
-
-        with normalized phase
-
-            r = t / T.
-
-        This normalized representation is mathematically
-        equivalent to a ninth-order polynomial in physical time
-        but has much better numerical conditioning.
-
-        The paper writes the height bound continuously in time.
-        The QP starts with uniformly sampled linear inequalities.
-        After each solve, all real extrema of the polynomial are
-        checked. Any violating extremum is added as a cutting
-        constraint and the QP is solved again. This refinement
-        enforces the continuous bound to the configured numerical
-        tolerance.
-
-        A very small coefficient regularization is added only to
-        remove numerical non-uniqueness, especially at the first
-        sample where t_(k-1) = 0 duplicates the initial boundary
-        conditions.
+            z(T)       = 0
+            zdot(T)    = 0
+            zddot(T)   = 0
         """
 
         self._require_vertical_initialized()
@@ -1070,8 +1129,14 @@ class OnlineSwingFootTrajectory:
             landing_time
         )
 
+        tolerance = (
+            1.0e-12
+        )
+
         if (
-            not math.isfinite(t_current)
+            not math.isfinite(
+                t_current
+            )
             or
             t_current < 0.0
         ):
@@ -1081,7 +1146,9 @@ class OnlineSwingFootTrajectory:
             )
 
         if (
-            not math.isfinite(T)
+            not math.isfinite(
+                T
+            )
             or
             T <= 0.0
         ):
@@ -1089,8 +1156,6 @@ class OnlineSwingFootTrajectory:
             raise ValueError(
                 "landing_time must be finite and positive."
             )
-
-        tolerance = 1.0e-12
 
         if (
             t_current
@@ -1101,8 +1166,7 @@ class OnlineSwingFootTrajectory:
         ):
 
             raise ValueError(
-                "current_time must be >= previous vertical "
-                "sample time."
+                "current_time must not move backwards."
             )
 
         if (
@@ -1117,9 +1181,9 @@ class OnlineSwingFootTrajectory:
                 "landing_time must be >= current_time."
             )
 
-        # ----------------------------------------------------
-        # Exact touchdown state.
-        # ----------------------------------------------------
+        # ====================================================
+        # TOUCHDOWN
+        # ====================================================
 
         if (
             T
@@ -1134,25 +1198,56 @@ class OnlineSwingFootTrajectory:
                 dtype=float,
             )
 
-            self._vertical_previous_time = t_current
+            self._vertical_previous_time = (
+                t_current
+            )
 
-            self._vertical_height = 0.0
-            self._vertical_velocity = 0.0
-            self._vertical_acceleration = 0.0
+            self._vertical_height = (
+                0.0
+            )
+
+            self._vertical_velocity = (
+                0.0
+            )
+
+            self._vertical_acceleration = (
+                0.0
+            )
+
+            self._vertical_coefficients = (
+                coefficients.copy()
+            )
 
             return VerticalSwingSample(
-                time=t_current,
+                time=(
+                    t_current
+                ),
+
                 height=0.0,
                 velocity=0.0,
                 acceleration=0.0,
-                landing_time=T,
-                coefficients=coefficients,
+
+                landing_time=(
+                    T
+                ),
+
+                coefficients=(
+                    coefficients
+                ),
+
                 midpoint_height=0.0,
+
                 continuous_min_height=0.0,
                 continuous_max_height=0.0,
+
                 max_boundary_residual=0.0,
+
                 refinement_iterations=0,
             )
+
+        # ====================================================
+        # PREVIOUS DESIRED STATE
+        # ====================================================
 
         t_previous = float(
             self._vertical_previous_time
@@ -1167,7 +1262,8 @@ class OnlineSwingFootTrajectory:
         ):
 
             raise RuntimeError(
-                "Remaining vertical swing horizon is too small."
+                "Remaining vertical swing horizon "
+                "is too small."
             )
 
         previous_state = np.array(
@@ -1180,14 +1276,14 @@ class OnlineSwingFootTrajectory:
         )
 
         # ====================================================
-        # EQ. (21) EQUALITY CONSTRAINTS
+        # EQUALITY CONSTRAINTS
         # ====================================================
 
         equality_rows = []
         equality_values = []
 
         # ----------------------------------------------------
-        # Start of the complete step: t = 0.
+        # Lift-off: t = 0
         # ----------------------------------------------------
 
         for derivative_order in range(
@@ -1197,8 +1293,12 @@ class OnlineSwingFootTrajectory:
             equality_rows.append(
                 self._vertical_basis(
                     normalized_time=0.0,
-                    derivative_order=derivative_order,
-                    landing_time=T,
+                    derivative_order=(
+                        derivative_order
+                    ),
+                    landing_time=(
+                        T
+                    ),
                 )
             )
 
@@ -1207,10 +1307,10 @@ class OnlineSwingFootTrajectory:
             )
 
         # ----------------------------------------------------
-        # Previous desired sample: t = t_(k-1).
+        # Previous online sample
         # ----------------------------------------------------
 
-        normalized_previous_time = (
+        previous_phase = (
             t_previous
             /
             T
@@ -1223,12 +1323,16 @@ class OnlineSwingFootTrajectory:
             equality_rows.append(
                 self._vertical_basis(
                     normalized_time=(
-                        normalized_previous_time
+                        previous_phase
                     ),
+
                     derivative_order=(
                         derivative_order
                     ),
-                    landing_time=T,
+
+                    landing_time=(
+                        T
+                    ),
                 )
             )
 
@@ -1239,7 +1343,7 @@ class OnlineSwingFootTrajectory:
             )
 
         # ----------------------------------------------------
-        # Touchdown: t = T.
+        # Touchdown
         # ----------------------------------------------------
 
         for derivative_order in range(
@@ -1249,8 +1353,12 @@ class OnlineSwingFootTrajectory:
             equality_rows.append(
                 self._vertical_basis(
                     normalized_time=1.0,
-                    derivative_order=derivative_order,
-                    landing_time=T,
+                    derivative_order=(
+                        derivative_order
+                    ),
+                    landing_time=(
+                        T
+                    ),
                 )
             )
 
@@ -1275,6 +1383,7 @@ class OnlineSwingFootTrajectory:
             matrix=(
                 equality_matrix_full
             ),
+
             vector=(
                 equality_vector_full
             ),
@@ -1287,11 +1396,18 @@ class OnlineSwingFootTrajectory:
         midpoint_basis = self._vertical_basis(
             normalized_time=0.5,
             derivative_order=0,
-            landing_time=T,
+            landing_time=(
+                T
+            ),
         )
 
-        regularization = float(
-            parameters.coefficient_regularization
+        # A small strictly-positive regularization makes
+        # the Hessian numerically better conditioned.
+        regularization = max(
+            float(
+                parameters.coefficient_regularization
+            ),
+            1.0e-10,
         )
 
         H = (
@@ -1323,10 +1439,10 @@ class OnlineSwingFootTrajectory:
         )
 
         # ====================================================
-        # INITIAL HEIGHT-BOUND SAMPLE LOCATIONS
+        # HEIGHT CONSTRAINT LOCATIONS
         # ====================================================
 
-        height_constraint_locations = list(
+        height_locations = list(
             np.linspace(
                 0.0,
                 1.0,
@@ -1339,13 +1455,20 @@ class OnlineSwingFootTrajectory:
 
         coefficients = None
 
-        continuous_min_height = math.nan
-        continuous_max_height = math.nan
+        continuous_min_height = (
+            math.nan
+        )
 
-        refinement_iterations = 0
+        continuous_max_height = (
+            math.nan
+        )
+
+        refinement_iterations = (
+            0
+        )
 
         # ====================================================
-        # CUTTING-PLANE REFINEMENT OF CONTINUOUS HEIGHT BOUNDS
+        # CUTTING-PLANE LOOP
         # ====================================================
 
         for refinement_iteration in range(
@@ -1366,11 +1489,16 @@ class OnlineSwingFootTrajectory:
                         normalized_time=(
                             location
                         ),
+
                         derivative_order=0,
-                        landing_time=T,
+
+                        landing_time=(
+                            T
+                        ),
                     )
+
                     for location
-                    in height_constraint_locations
+                    in height_locations
                 ]
             )
 
@@ -1381,13 +1509,13 @@ class OnlineSwingFootTrajectory:
                 ]
             )
 
-            number_equalities = (
+            number_equalities = int(
                 equality_matrix.shape[
                     0
                 ]
             )
 
-            number_height_constraints = (
+            number_height_constraints = int(
                 height_matrix.shape[
                     0
                 ]
@@ -1396,6 +1524,7 @@ class OnlineSwingFootTrajectory:
             constraint_lower = np.concatenate(
                 [
                     equality_vector,
+
                     np.zeros(
                         number_height_constraints,
                         dtype=float,
@@ -1406,6 +1535,7 @@ class OnlineSwingFootTrajectory:
             constraint_upper = np.concatenate(
                 [
                     equality_vector,
+
                     np.full(
                         number_height_constraints,
                         float(
@@ -1417,14 +1547,22 @@ class OnlineSwingFootTrajectory:
             )
 
             coefficients = self._solve_vertical_qp(
-                H=H,
-                g=g,
+                H=(
+                    H
+                ),
+
+                g=(
+                    g
+                ),
+
                 constraint_matrix=(
                     constraint_matrix
                 ),
+
                 constraint_lower=(
                     constraint_lower
                 ),
+
                 constraint_upper=(
                     constraint_upper
                 ),
@@ -1436,9 +1574,7 @@ class OnlineSwingFootTrajectory:
                 minimum_location,
                 maximum_location,
             ) = self._continuous_vertical_extrema(
-                coefficients=(
-                    coefficients
-                ),
+                coefficients
             )
 
             lower_violation = (
@@ -1478,36 +1614,35 @@ class OnlineSwingFootTrajectory:
             ):
 
                 raise RuntimeError(
-                    "Vertical swing QP could not enforce the "
-                    "continuous height bounds within the "
-                    "configured refinement limit."
+                    "Vertical swing QP could not enforce "
+                    "continuous height bounds."
                 )
 
             if lower_violation:
 
                 self._append_unique_location(
-                    height_constraint_locations,
+                    height_locations,
                     minimum_location,
                 )
 
             if upper_violation:
 
                 self._append_unique_location(
-                    height_constraint_locations,
+                    height_locations,
                     maximum_location,
                 )
 
         if coefficients is None:
 
             raise RuntimeError(
-                "Vertical swing QP did not return coefficients."
+                "Vertical swing QP returned no solution."
             )
 
         # ====================================================
-        # CURRENT DESIRED STATE
+        # EVALUATE CURRENT SAMPLE
         # ====================================================
 
-        normalized_current_time = (
+        current_phase = (
             t_current
             /
             T
@@ -1516,10 +1651,14 @@ class OnlineSwingFootTrajectory:
         current_height = float(
             self._vertical_basis(
                 normalized_time=(
-                    normalized_current_time
+                    current_phase
                 ),
+
                 derivative_order=0,
-                landing_time=T,
+
+                landing_time=(
+                    T
+                ),
             )
             @
             coefficients
@@ -1528,10 +1667,14 @@ class OnlineSwingFootTrajectory:
         current_velocity = float(
             self._vertical_basis(
                 normalized_time=(
-                    normalized_current_time
+                    current_phase
                 ),
+
                 derivative_order=1,
-                landing_time=T,
+
+                landing_time=(
+                    T
+                ),
             )
             @
             coefficients
@@ -1540,10 +1683,14 @@ class OnlineSwingFootTrajectory:
         current_acceleration = float(
             self._vertical_basis(
                 normalized_time=(
-                    normalized_current_time
+                    current_phase
                 ),
+
                 derivative_order=2,
-                landing_time=T,
+
+                landing_time=(
+                    T
+                ),
             )
             @
             coefficients
@@ -1570,11 +1717,11 @@ class OnlineSwingFootTrajectory:
         ):
 
             raise RuntimeError(
-                "Non-finite vertical swing state generated."
+                "Non-finite vertical swing trajectory."
             )
 
         # ====================================================
-        # DIAGNOSTICS
+        # RESIDUAL OF FULL PAPER BOUNDARY CONDITIONS
         # ====================================================
 
         boundary_residual = (
@@ -1594,7 +1741,7 @@ class OnlineSwingFootTrajectory:
         )
 
         # ====================================================
-        # STORE DESIRED STATE FOR NEXT REGENERATION
+        # STORE FOR NEXT ONLINE REGENERATION
         # ====================================================
 
         self._vertical_previous_time = (
@@ -1613,33 +1760,59 @@ class OnlineSwingFootTrajectory:
             current_acceleration
         )
 
+        self._vertical_coefficients = (
+            coefficients.copy()
+        )
+
         return VerticalSwingSample(
-            time=t_current,
-            height=current_height,
-            velocity=current_velocity,
-            acceleration=current_acceleration,
-            landing_time=T,
+            time=(
+                t_current
+            ),
+
+            height=(
+                current_height
+            ),
+
+            velocity=(
+                current_velocity
+            ),
+
+            acceleration=(
+                current_acceleration
+            ),
+
+            landing_time=(
+                T
+            ),
+
             coefficients=(
                 coefficients.copy()
             ),
-            midpoint_height=midpoint_height,
+
+            midpoint_height=(
+                midpoint_height
+            ),
+
             continuous_min_height=float(
                 continuous_min_height
             ),
+
             continuous_max_height=float(
                 continuous_max_height
             ),
+
             max_boundary_residual=(
                 max_boundary_residual
             ),
-            refinement_iterations=int(
+
+            refinement_iterations=(
                 refinement_iterations
             ),
         )
 
 
     # ========================================================
-    # VERTICAL QP SOLVER
+    # ROBUST VERTICAL QP
     # ========================================================
 
     def _solve_vertical_qp(
@@ -1650,16 +1823,39 @@ class OnlineSwingFootTrajectory:
         constraint_lower,
         constraint_upper,
     ) -> np.ndarray:
+        """
+        Solve the convex vertical swing QP.
+
+        Numerical strategy:
+
+            1. CasADi QRQP
+            2. CasADi qpOASES
+            3. SciPy SLSQP
+
+        The mathematical QP remains unchanged.
+        """
 
         H = np.asarray(
             H,
             dtype=float,
         )
 
+        H = (
+            0.5
+            *
+            (
+                H
+                +
+                H.T
+            )
+        )
+
         g = np.asarray(
             g,
             dtype=float,
-        ).reshape(-1)
+        ).reshape(
+            -1
+        )
 
         A = np.asarray(
             constraint_matrix,
@@ -1669,12 +1865,16 @@ class OnlineSwingFootTrajectory:
         lba = np.asarray(
             constraint_lower,
             dtype=float,
-        ).reshape(-1)
+        ).reshape(
+            -1
+        )
 
         uba = np.asarray(
             constraint_upper,
             dtype=float,
-        ).reshape(-1)
+        ).reshape(
+            -1
+        )
 
         if H.shape != (
             10,
@@ -1696,145 +1896,544 @@ class OnlineSwingFootTrajectory:
         if (
             A.ndim != 2
             or
-            A.shape[
-                1
-            ]
-            !=
-            10
+            A.shape[1] != 10
         ):
 
             raise ValueError(
-                "Vertical QP constraint matrix must have "
-                "10 columns."
+                "Vertical QP constraint matrix must "
+                "have 10 columns."
             )
 
         if (
-            lba.shape[
-                0
-            ]
+            lba.shape[0]
             !=
-            A.shape[
-                0
-            ]
+            A.shape[0]
             or
-            uba.shape[
-                0
-            ]
+            uba.shape[0]
             !=
-            A.shape[
-                0
-            ]
+            A.shape[0]
         ):
 
             raise ValueError(
-                "Vertical QP constraint bounds have "
-                "inconsistent dimensions."
+                "Vertical QP constraint dimensions "
+                "are inconsistent."
             )
-
-        self._vertical_solver_counter += 1
-
-        solver_name = (
-            "vertical_swing_qp_"
-            f"{id(self)}_"
-            f"{self._vertical_solver_counter}"
-        )
 
         qp_structure = {
             "h": ca.Sparsity.dense(
                 10,
                 10,
             ),
+
             "a": ca.Sparsity.dense(
-                A.shape[
-                    0
-                ],
+                A.shape[0],
                 10,
             ),
         }
 
-        solver = ca.conic(
-            solver_name,
-            "qrqp",
-            qp_structure,
-            {
-                "print_header": False,
-                "print_iter": False,
-                "print_info": False,
-                "error_on_fail": False,
-                "max_iter": 1000,
-            },
+        lbx = np.full(
+            10,
+            -np.inf,
+            dtype=float,
         )
 
-        result = solver(
-            h=ca.DM(
-                H
-            ),
-            g=ca.DM(
-                g
-            ),
-            a=ca.DM(
-                A
-            ),
-            lba=ca.DM(
-                lba
-            ),
-            uba=ca.DM(
-                uba
-            ),
-            lbx=ca.DM(
-                np.full(
-                    10,
-                    -np.inf,
-                    dtype=float,
-                )
-            ),
-            ubx=ca.DM(
-                np.full(
-                    10,
-                    +np.inf,
-                    dtype=float,
-                )
-            ),
+        ubx = np.full(
+            10,
+            +np.inf,
+            dtype=float,
         )
 
-        stats = (
-            solver.stats()
-        )
+        solver_messages = []
 
-        if not bool(
-            stats.get(
-                "success",
-                False,
-            )
+        # ====================================================
+        # SOLVER HELPER
+        # ====================================================
+
+        def run_casadi_solver(
+            plugin,
+            options,
         ):
 
-            raise RuntimeError(
-                "Vertical swing QP failed.\n"
-                f"status = "
+            self._vertical_solver_counter += (
+                1
+            )
+
+            solver_name = (
+                "vertical_swing_"
+                f"{plugin}_"
+                f"{id(self)}_"
+                f"{self._vertical_solver_counter}"
+            )
+
+            solver = ca.conic(
+                solver_name,
+                plugin,
+                qp_structure,
+                options,
+            )
+
+            result = solver(
+                h=ca.DM(
+                    H
+                ),
+
+                g=ca.DM(
+                    g
+                ),
+
+                a=ca.DM(
+                    A
+                ),
+
+                lba=ca.DM(
+                    lba
+                ),
+
+                uba=ca.DM(
+                    uba
+                ),
+
+                lbx=ca.DM(
+                    lbx
+                ),
+
+                ubx=ca.DM(
+                    ubx
+                ),
+            )
+
+            stats = (
+                solver.stats()
+            )
+
+            return (
+                result,
+                stats,
+            )
+
+        # ====================================================
+        # 1. QRQP
+        # ====================================================
+
+        try:
+
+            (
+                result,
+                stats,
+            ) = run_casadi_solver(
+                "qrqp",
+                {
+                    "print_header": False,
+                    "print_iter": False,
+                    "print_info": False,
+                    "error_on_fail": False,
+                    "max_iter": 1000,
+                },
+            )
+
+            if bool(
+                stats.get(
+                    "success",
+                    False,
+                )
+            ):
+
+                coefficients = np.asarray(
+                    result[
+                        "x"
+                    ],
+                    dtype=float,
+                ).reshape(
+                    10
+                )
+
+                if self._qp_solution_is_valid(
+                    coefficients=(
+                        coefficients
+                    ),
+
+                    A=(
+                        A
+                    ),
+
+                    lba=(
+                        lba
+                    ),
+
+                    uba=(
+                        uba
+                    ),
+                ):
+
+                    return (
+                        coefficients
+                    )
+
+            solver_messages.append(
+                "QRQP: "
                 f"{stats.get('return_status', 'unknown')}"
             )
 
-        coefficients = np.asarray(
-            result[
-                "x"
-            ],
+        except Exception as error:
+
+            solver_messages.append(
+                "QRQP exception: "
+                f"{error}"
+            )
+
+        # ====================================================
+        # 2. qpOASES
+        # ====================================================
+
+        try:
+
+            qpoases_available = bool(
+                ca.has_conic(
+                    "qpoases"
+                )
+            )
+
+        except Exception:
+
+            qpoases_available = (
+                False
+            )
+
+        if qpoases_available:
+
+            try:
+
+                (
+                    result,
+                    stats,
+                ) = run_casadi_solver(
+                    "qpoases",
+                    {
+                        "error_on_fail": False,
+                        "print_time": False,
+                    },
+                )
+
+                if bool(
+                    stats.get(
+                        "success",
+                        False,
+                    )
+                ):
+
+                    coefficients = np.asarray(
+                        result[
+                            "x"
+                        ],
+                        dtype=float,
+                    ).reshape(
+                        10
+                    )
+
+                    if self._qp_solution_is_valid(
+                        coefficients=(
+                            coefficients
+                        ),
+
+                        A=(
+                            A
+                        ),
+
+                        lba=(
+                            lba
+                        ),
+
+                        uba=(
+                            uba
+                        ),
+                    ):
+
+                        return (
+                            coefficients
+                        )
+
+                solver_messages.append(
+                    "qpOASES: "
+                    f"{stats.get('return_status', 'unknown')}"
+                )
+
+            except Exception as error:
+
+                solver_messages.append(
+                    "qpOASES exception: "
+                    f"{error}"
+                )
+
+        else:
+
+            solver_messages.append(
+                "qpOASES unavailable"
+            )
+
+        # ====================================================
+        # 3. SCIPY SLSQP FALLBACK
+        # ====================================================
+
+        try:
+
+            from scipy.optimize import (
+                LinearConstraint,
+                minimize,
+            )
+
+            # -----------------------------------------------
+            # Warm start
+            # -----------------------------------------------
+
+            if (
+                self._vertical_coefficients
+                is not None
+                and
+                np.all(
+                    np.isfinite(
+                        self._vertical_coefficients
+                    )
+                )
+            ):
+
+                x0 = (
+                    self._vertical_coefficients
+                    .copy()
+                )
+
+            else:
+
+                # Use least-squares solution of equality rows.
+
+                equality_mask = np.isclose(
+                    lba,
+                    uba,
+                    rtol=0.0,
+                    atol=1.0e-10,
+                )
+
+                if np.any(
+                    equality_mask
+                ):
+
+                    Aeq = (
+                        A[
+                            equality_mask,
+                            :
+                        ]
+                    )
+
+                    beq = (
+                        0.5
+                        *
+                        (
+                            lba[
+                                equality_mask
+                            ]
+                            +
+                            uba[
+                                equality_mask
+                            ]
+                        )
+                    )
+
+                    x0 = np.linalg.lstsq(
+                        Aeq,
+                        beq,
+                        rcond=None,
+                    )[0]
+
+                else:
+
+                    x0 = np.zeros(
+                        10,
+                        dtype=float,
+                    )
+
+            linear_constraint = (
+                LinearConstraint(
+                    A,
+                    lba,
+                    uba,
+                )
+            )
+
+            def objective(
+                x,
+            ):
+
+                return float(
+                    0.5
+                    *
+                    x
+                    @
+                    H
+                    @
+                    x
+                    +
+                    g
+                    @
+                    x
+                )
+
+            def gradient(
+                x,
+            ):
+
+                return (
+                    H
+                    @
+                    x
+                    +
+                    g
+                )
+
+            scipy_result = minimize(
+                objective,
+                x0,
+                jac=(
+                    gradient
+                ),
+
+                constraints=[
+                    linear_constraint
+                ],
+
+                method="SLSQP",
+
+                options={
+                    "ftol": 1.0e-12,
+                    "maxiter": 1000,
+                    "disp": False,
+                },
+            )
+
+            coefficients = np.asarray(
+                scipy_result.x,
+                dtype=float,
+            ).reshape(
+                10
+            )
+
+            if (
+                scipy_result.success
+                and
+                self._qp_solution_is_valid(
+                    coefficients=(
+                        coefficients
+                    ),
+
+                    A=(
+                        A
+                    ),
+
+                    lba=(
+                        lba
+                    ),
+
+                    uba=(
+                        uba
+                    ),
+
+                    tolerance=1.0e-6,
+                )
+            ):
+
+                return (
+                    coefficients
+                )
+
+            solver_messages.append(
+                "SLSQP: "
+                f"{scipy_result.message}"
+            )
+
+        except Exception as error:
+
+            solver_messages.append(
+                "SLSQP exception: "
+                f"{error}"
+            )
+
+        # ====================================================
+        # ALL SOLVERS FAILED
+        # ====================================================
+
+        raise RuntimeError(
+            "Vertical swing QP failed with all solvers.\n"
+            +
+            "\n".join(
+                solver_messages
+            )
+        )
+
+
+    # ========================================================
+    # QP SOLUTION VALIDATION
+    # ========================================================
+
+    @staticmethod
+    def _qp_solution_is_valid(
+        coefficients,
+        A,
+        lba,
+        uba,
+        tolerance: float = 1.0e-7,
+    ) -> bool:
+
+        x = np.asarray(
+            coefficients,
             dtype=float,
         ).reshape(
-            10
+            -1
         )
 
         if not np.all(
             np.isfinite(
-                coefficients
+                x
             )
         ):
 
-            raise RuntimeError(
-                "Vertical swing QP returned non-finite "
-                "coefficients."
-            )
+            return False
 
-        return coefficients
+        values = (
+            A
+            @
+            x
+        )
+
+        lower_violation = np.max(
+            np.maximum(
+                lba
+                -
+                values,
+                0.0,
+            )
+        )
+
+        upper_violation = np.max(
+            np.maximum(
+                values
+                -
+                uba,
+                0.0,
+            )
+        )
+
+        max_violation = max(
+            float(
+                lower_violation
+            ),
+            float(
+                upper_violation
+            ),
+        )
+
+        return bool(
+            max_violation
+            <=
+            tolerance
+        )
 
 
     # ========================================================
@@ -1857,9 +2456,13 @@ class OnlineSwingFootTrajectory:
         )
 
         if (
-            not math.isfinite(r)
+            not math.isfinite(
+                r
+            )
             or
-            not math.isfinite(T)
+            not math.isfinite(
+                T
+            )
             or
             T <= 0.0
         ):
@@ -1875,7 +2478,7 @@ class OnlineSwingFootTrajectory:
         ):
 
             raise ValueError(
-                "derivative_order must be 0, 1, or 2."
+                "derivative_order must be 0, 1 or 2."
             )
 
         basis = np.zeros(
@@ -1943,39 +2546,40 @@ class OnlineSwingFootTrajectory:
                     )
                 )
 
-        return basis
+        return (
+            basis
+        )
 
 
     # ========================================================
-    # VERTICAL CONTINUOUS EXTREMA
+    # CONTINUOUS VERTICAL EXTREMA
     # ========================================================
 
     @staticmethod
     def _continuous_vertical_extrema(
         coefficients,
-    ) -> tuple[float, float, float, float]:
+    ) -> tuple[
+        float,
+        float,
+        float,
+        float,
+    ]:
 
         c = np.asarray(
             coefficients,
             dtype=float,
-        ).reshape(-1)
+        ).reshape(
+            10
+        )
 
-        if c.shape != (
-            10,
-        ):
-
-            raise ValueError(
-                "Vertical coefficients must contain 10 values."
-            )
-
-        # dz/dr has degree <= 8.
-        derivative_coefficients_ascending = np.array(
+        derivative_ascending = np.array(
             [
                 power
                 *
                 c[
                     power
                 ]
+
                 for power in range(
                     1,
                     10,
@@ -1984,21 +2588,20 @@ class OnlineSwingFootTrajectory:
             dtype=float,
         )
 
-        # np.roots expects descending powers.
-        derivative_coefficients_descending = (
-            derivative_coefficients_ascending[
+        derivative_descending = (
+            derivative_ascending[
                 ::-1
             ]
         )
 
-        # Remove numerically zero leading coefficients.
+        # Remove insignificant leading terms.
         while (
-            derivative_coefficients_descending.size
+            derivative_descending.size
             >
             1
             and
             abs(
-                derivative_coefficients_descending[
+                derivative_descending[
                     0
                 ]
             )
@@ -2006,27 +2609,27 @@ class OnlineSwingFootTrajectory:
             1.0e-14
         ):
 
-            derivative_coefficients_descending = (
-                derivative_coefficients_descending[
+            derivative_descending = (
+                derivative_descending[
                     1:
                 ]
             )
 
-        candidate_locations = [
+        candidates = [
             0.0,
             1.0,
         ]
 
         if np.any(
             np.abs(
-                derivative_coefficients_descending
+                derivative_descending
             )
             >
             1.0e-14
         ):
 
             roots = np.roots(
-                derivative_coefficients_descending
+                derivative_descending
             )
 
             for root in roots:
@@ -2050,21 +2653,19 @@ class OnlineSwingFootTrajectory:
                     )
 
                     if (
-                        location
-                        >
                         0.0
-                        and
+                        <
                         location
                         <
                         1.0
                     ):
 
-                        candidate_locations.append(
+                        candidates.append(
                             location
                         )
 
-        candidate_locations = np.asarray(
-            candidate_locations,
+        candidates = np.asarray(
+            candidates,
             dtype=float,
         )
 
@@ -2074,8 +2675,9 @@ class OnlineSwingFootTrajectory:
                     location,
                     c,
                 )
+
                 for location
-                in candidate_locations
+                in candidates
             ],
             dtype=float,
         )
@@ -2098,18 +2700,21 @@ class OnlineSwingFootTrajectory:
                     minimum_index
                 ]
             ),
+
             float(
                 heights[
                     maximum_index
                 ]
             ),
+
             float(
-                candidate_locations[
+                candidates[
                     minimum_index
                 ]
             ),
+
             float(
-                candidate_locations[
+                candidates[
                     maximum_index
                 ]
             ),
@@ -2117,14 +2722,17 @@ class OnlineSwingFootTrajectory:
 
 
     # ========================================================
-    # VERTICAL EQUALITY REDUCTION
+    # REMOVE REDUNDANT EQUALITIES
     # ========================================================
 
     @staticmethod
     def _remove_redundant_equalities(
         matrix,
         vector,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+    ]:
 
         A = np.asarray(
             matrix,
@@ -2134,18 +2742,16 @@ class OnlineSwingFootTrajectory:
         b = np.asarray(
             vector,
             dtype=float,
-        ).reshape(-1)
+        ).reshape(
+            -1
+        )
 
         if (
             A.ndim != 2
             or
-            A.shape[
-                0
-            ]
+            A.shape[0]
             !=
-            b.shape[
-                0
-            ]
+            b.shape[0]
         ):
 
             raise ValueError(
@@ -2154,12 +2760,12 @@ class OnlineSwingFootTrajectory:
 
         selected_indices = []
 
-        current_rank = 0
+        current_rank = (
+            0
+        )
 
         for row_index in range(
-            A.shape[
-                0
-            ]
+            A.shape[0]
         ):
 
             candidate_indices = (
@@ -2198,207 +2804,67 @@ class OnlineSwingFootTrajectory:
                     candidate_rank
                 )
 
-                continue
+        if len(
+            selected_indices
+        ) == 0:
 
-            # Redundant row: verify that its RHS is consistent
-            # with the already selected equalities.
-            if selected_indices:
+            return (
+                np.zeros(
+                    (
+                        0,
+                        A.shape[1],
+                    ),
+                    dtype=float,
+                ),
 
-                selected_matrix = (
-                    A[
-                        selected_indices,
-                        :
-                    ]
-                )
-
-                selected_vector = (
-                    b[
-                        selected_indices
-                    ]
-                )
-
-                least_squares_solution = np.linalg.lstsq(
-                    selected_matrix,
-                    selected_vector,
-                    rcond=None,
-                )[
-                    0
-                ]
-
-                redundant_residual = abs(
-                    float(
-                        A[
-                            row_index,
-                            :
-                        ]
-                        @
-                        least_squares_solution
-                        -
-                        b[
-                            row_index
-                        ]
-                    )
-                )
-
-                if (
-                    redundant_residual
-                    >
-                    1.0e-8
-                ):
-
-                    raise RuntimeError(
-                        "Vertical swing equality constraints "
-                        "are inconsistent."
-                    )
-
-        if not selected_indices:
-
-            raise RuntimeError(
-                "No independent vertical equality constraints."
+                np.zeros(
+                    0,
+                    dtype=float,
+                ),
             )
 
         return (
             A[
                 selected_indices,
                 :
-            ],
+            ].copy(),
+
             b[
                 selected_indices
-            ],
+            ].copy(),
         )
 
 
     # ========================================================
-    # VERTICAL PARAMETER VALIDATION
+    # ADD CUTTING-PLANE LOCATION
     # ========================================================
-
-    @staticmethod
-    def _validate_vertical_parameters(
-        parameters: VerticalSwingQPParameters,
-    ) -> None:
-
-        desired_height = float(
-            parameters.desired_height
-        )
-
-        maximum_height = float(
-            parameters.maximum_height
-        )
-
-        regularization = float(
-            parameters.coefficient_regularization
-        )
-
-        bound_tolerance = float(
-            parameters.bound_tolerance
-        )
-
-        constraint_samples = int(
-            parameters.constraint_samples
-        )
-
-        max_refinements = int(
-            parameters.max_refinements
-        )
-
-        for name, value in (
-            ("desired_height", desired_height),
-            ("maximum_height", maximum_height),
-            ("coefficient_regularization", regularization),
-            ("bound_tolerance", bound_tolerance),
-        ):
-
-            if not math.isfinite(
-                value
-            ):
-
-                raise ValueError(
-                    f"{name} must be finite."
-                )
-
-        if desired_height <= 0.0:
-
-            raise ValueError(
-                "desired_height must be positive."
-            )
-
-        if maximum_height <= 0.0:
-
-            raise ValueError(
-                "maximum_height must be positive."
-            )
-
-        if (
-            desired_height
-            >
-            maximum_height
-        ):
-
-            raise ValueError(
-                "desired_height must be <= maximum_height."
-            )
-
-        if constraint_samples < 3:
-
-            raise ValueError(
-                "constraint_samples must be >= 3."
-            )
-
-        if regularization <= 0.0:
-
-            raise ValueError(
-                "coefficient_regularization must be positive."
-            )
-
-        if bound_tolerance <= 0.0:
-
-            raise ValueError(
-                "bound_tolerance must be positive."
-            )
-
-        if max_refinements < 0:
-
-            raise ValueError(
-                "max_refinements must be >= 0."
-            )
-
-
-    # ========================================================
-    # VERTICAL HELPERS
-    # ========================================================
-
-    def _require_vertical_initialized(
-        self,
-    ) -> None:
-
-        if not self._vertical_initialized:
-
-            raise RuntimeError(
-                "Vertical swing trajectory has not been "
-                "initialized. Call reset_vertical() first."
-            )
-
 
     @staticmethod
     def _append_unique_location(
         locations,
-        new_location: float,
+        new_location,
     ) -> None:
 
         value = float(
-            np.clip(
-                new_location,
-                0.0,
-                1.0,
-            )
+            new_location
         )
 
-        for existing in locations:
+        if not (
+            0.0
+            <=
+            value
+            <=
+            1.0
+        ):
+
+            return
+
+        for old_location in locations:
 
             if (
                 abs(
                     float(
-                        existing
+                        old_location
                     )
                     -
                     value
@@ -2426,34 +2892,21 @@ class OnlineSwingFootTrajectory:
         final_position: float,
         horizon: float,
     ) -> np.ndarray:
-        """
-        Solve:
-
-            X(0)   = X0
-            X'(0)  = V0
-            X''(0) = A0
-
-            X(H)   = Xf
-            X'(H)  = 0
-            X''(H) = 0
-
-        for:
-
-            X(s) = c0 + c1*s + ... + c5*s^5.
-        """
 
         H = float(
             horizon
         )
 
         if (
-            not math.isfinite(H)
+            not math.isfinite(
+                H
+            )
             or
             H <= 0.0
         ):
 
             raise ValueError(
-                "horizon must be finite and positive."
+                "Quintic horizon must be positive."
             )
 
         p0 = float(
@@ -2472,26 +2925,21 @@ class OnlineSwingFootTrajectory:
             final_position
         )
 
-        for name, value in (
-            ("initial_position", p0),
-            ("initial_velocity", v0),
-            ("initial_acceleration", a0),
-            ("final_position", pf),
-        ):
+        c0 = (
+            p0
+        )
 
-            if not math.isfinite(
-                value
-            ):
+        c1 = (
+            v0
+        )
 
-                raise ValueError(
-                    f"{name} must be finite."
-                )
+        c2 = (
+            0.5
+            *
+            a0
+        )
 
-        c0 = p0
-        c1 = v0
-        c2 = 0.5 * a0
-
-        matrix = np.array(
+        M = np.array(
             [
                 [
                     H**3,
@@ -2527,11 +2975,17 @@ class OnlineSwingFootTrajectory:
                 -(
                     c1
                     +
-                    2.0 * c2 * H
+                    2.0
+                    *
+                    c2
+                    *
+                    H
                 ),
 
                 -(
-                    2.0 * c2
+                    2.0
+                    *
+                    c2
                 ),
             ],
             dtype=float,
@@ -2539,32 +2993,25 @@ class OnlineSwingFootTrajectory:
 
         try:
 
-            c3_c4_c5 = np.linalg.solve(
-                matrix,
+            c3_to_c5 = np.linalg.solve(
+                M,
                 rhs,
             )
 
-        except np.linalg.LinAlgError as exc:
+        except np.linalg.LinAlgError as error:
 
             raise RuntimeError(
-                "Failed to solve horizontal swing "
-                "quintic polynomial."
-            ) from exc
+                "Horizontal quintic solve failed."
+            ) from error
 
         coefficients = np.array(
             [
                 c0,
                 c1,
                 c2,
-                c3_c4_c5[
-                    0
-                ],
-                c3_c4_c5[
-                    1
-                ],
-                c3_c4_c5[
-                    2
-                ],
+                c3_to_c5[0],
+                c3_to_c5[1],
+                c3_to_c5[2],
             ],
             dtype=float,
         )
@@ -2576,10 +3023,13 @@ class OnlineSwingFootTrajectory:
         ):
 
             raise RuntimeError(
-                "Non-finite quintic coefficients generated."
+                "Horizontal quintic coefficients "
+                "became non-finite."
             )
 
-        return coefficients
+        return (
+            coefficients
+        )
 
 
     # ========================================================
@@ -2590,80 +3040,78 @@ class OnlineSwingFootTrajectory:
     def _evaluate_quintic(
         coefficients,
         local_time: float,
-    ) -> tuple[float, float, float]:
+    ) -> tuple[
+        float,
+        float,
+        float,
+    ]:
 
         c = np.asarray(
             coefficients,
             dtype=float,
-        ).reshape(-1)
-
-        if c.shape != (6,):
-
-            raise ValueError(
-                "Quintic coefficients must contain 6 values."
-            )
-
-        s = float(
-            local_time
+        ).reshape(
+            6
         )
 
-        if not math.isfinite(
-            s
-        ):
-
-            raise ValueError(
-                "local_time must be finite."
-            )
+        t = float(
+            local_time
+        )
 
         position = (
             c[0]
             +
-            c[1] * s
+            c[1] * t
             +
-            c[2] * s**2
+            c[2] * t**2
             +
-            c[3] * s**3
+            c[3] * t**3
             +
-            c[4] * s**4
+            c[4] * t**4
             +
-            c[5] * s**5
+            c[5] * t**5
         )
 
         velocity = (
             c[1]
             +
-            2.0 * c[2] * s
+            2.0 * c[2] * t
             +
-            3.0 * c[3] * s**2
+            3.0 * c[3] * t**2
             +
-            4.0 * c[4] * s**3
+            4.0 * c[4] * t**3
             +
-            5.0 * c[5] * s**4
+            5.0 * c[5] * t**4
         )
 
         acceleration = (
             2.0 * c[2]
             +
-            6.0 * c[3] * s
+            6.0 * c[3] * t
             +
-            12.0 * c[4] * s**2
+            12.0 * c[4] * t**2
             +
-            20.0 * c[5] * s**3
+            20.0 * c[5] * t**3
         )
 
         return (
-            float(position),
-            float(velocity),
-            float(acceleration),
+            float(
+                position
+            ),
+            float(
+                velocity
+            ),
+            float(
+                acceleration
+            ),
         )
 
 
     # ========================================================
-    # DIAGNOSTIC
+    # QUINTIC BOUNDARY CHECK
     # ========================================================
 
     @classmethod
-    def _compute_boundary_residual(
+    def _compute_quintic_boundary_residual(
         cls,
         coefficients,
         horizon: float,
@@ -2674,24 +3122,26 @@ class OnlineSwingFootTrajectory:
     ) -> float:
 
         (
-            p_start,
-            v_start,
-            a_start,
+            p_initial,
+            v_initial,
+            a_initial,
         ) = cls._evaluate_quintic(
             coefficients=(
                 coefficients
             ),
+
             local_time=0.0,
         )
 
         (
-            p_end,
-            v_end,
-            a_end,
+            p_final,
+            v_final,
+            a_final,
         ) = cls._evaluate_quintic(
             coefficients=(
                 coefficients
             ),
+
             local_time=(
                 horizon
             ),
@@ -2699,25 +3149,25 @@ class OnlineSwingFootTrajectory:
 
         residuals = np.array(
             [
-                p_start
+                p_initial
                 -
                 initial_position,
 
-                v_start
+                v_initial
                 -
                 initial_velocity,
 
-                a_start
+                a_initial
                 -
                 initial_acceleration,
 
-                p_end
+                p_final
                 -
                 final_position,
 
-                v_end,
+                v_final,
 
-                a_end,
+                a_final,
             ],
             dtype=float,
         )
@@ -2732,7 +3182,187 @@ class OnlineSwingFootTrajectory:
 
 
     # ========================================================
-    # HELPERS
+    # PARAMETER VALIDATION
+    # ========================================================
+
+    @staticmethod
+    def _validate_vertical_parameters(
+        parameters: VerticalSwingQPParameters,
+    ) -> None:
+
+        desired_height = float(
+            parameters.desired_height
+        )
+
+        maximum_height = float(
+            parameters.maximum_height
+        )
+
+        regularization = float(
+            parameters.coefficient_regularization
+        )
+
+        bound_tolerance = float(
+            parameters.bound_tolerance
+        )
+
+        constraint_samples = int(
+            parameters.constraint_samples
+        )
+
+        max_refinements = int(
+            parameters.max_refinements
+        )
+
+        if (
+            not math.isfinite(
+                desired_height
+            )
+            or
+            desired_height < 0.0
+        ):
+
+            raise ValueError(
+                "desired_height must be finite and >= 0."
+            )
+
+        if (
+            not math.isfinite(
+                maximum_height
+            )
+            or
+            maximum_height <= 0.0
+        ):
+
+            raise ValueError(
+                "maximum_height must be finite and positive."
+            )
+
+        if (
+            desired_height
+            >
+            maximum_height
+        ):
+
+            raise ValueError(
+                "desired_height must not exceed maximum_height."
+            )
+
+        if (
+            not math.isfinite(
+                regularization
+            )
+            or
+            regularization < 0.0
+        ):
+
+            raise ValueError(
+                "coefficient_regularization must be >= 0."
+            )
+
+        if (
+            not math.isfinite(
+                bound_tolerance
+            )
+            or
+            bound_tolerance < 0.0
+        ):
+
+            raise ValueError(
+                "bound_tolerance must be >= 0."
+            )
+
+        if constraint_samples < 3:
+
+            raise ValueError(
+                "constraint_samples must be >= 3."
+            )
+
+        if max_refinements < 0:
+
+            raise ValueError(
+                "max_refinements must be >= 0."
+            )
+
+
+    # ========================================================
+    # VECTOR UTILITIES
+    # ========================================================
+
+    @staticmethod
+    def _as_vector2(
+        value,
+        name,
+    ) -> np.ndarray:
+
+        result = np.asarray(
+            value,
+            dtype=float,
+        ).reshape(
+            -1
+        )
+
+        if result.shape != (
+            2,
+        ):
+
+            raise ValueError(
+                f"{name} must contain exactly 2 values."
+            )
+
+        if not np.all(
+            np.isfinite(
+                result
+            )
+        ):
+
+            raise ValueError(
+                f"{name} must contain finite values."
+            )
+
+        return (
+            result.copy()
+        )
+
+
+    @staticmethod
+    def _as_vector3(
+        value,
+        name,
+    ) -> np.ndarray:
+
+        result = np.asarray(
+            value,
+            dtype=float,
+        ).reshape(
+            -1
+        )
+
+        if result.shape != (
+            3,
+        ):
+
+            raise ValueError(
+                f"{name} must contain exactly 3 values."
+            )
+
+        if not np.all(
+            np.isfinite(
+                result
+            )
+        ):
+
+            raise ValueError(
+                f"{name} must contain finite values."
+            )
+
+        return (
+            result.copy()
+        )
+
+
+    # ========================================================
+    # STATE CHECKS
     # ========================================================
 
     def _require_initialized(
@@ -2742,60 +3372,16 @@ class OnlineSwingFootTrajectory:
         if not self._initialized:
 
             raise RuntimeError(
-                "Swing trajectory has not been initialized. "
-                "Call reset_horizontal() first."
+                "Horizontal swing trajectory is not initialized."
             )
 
 
-    @staticmethod
-    def _as_vector3(
-        value,
-        name: str,
-    ) -> np.ndarray:
+    def _require_vertical_initialized(
+        self,
+    ) -> None:
 
-        vector = np.asarray(
-            value,
-            dtype=float,
-        ).reshape(-1)
+        if not self._vertical_initialized:
 
-        if vector.shape != (3,):
-            raise ValueError(
-                f"{name} must contain exactly 3 values."
+            raise RuntimeError(
+                "Vertical swing trajectory is not initialized."
             )
-
-        if not np.all(np.isfinite(vector)):
-            raise ValueError(
-                f"{name} must be finite."
-            )
-
-        return vector
-
-
-    @staticmethod
-    def _as_vector2(
-        value,
-        name: str,
-    ) -> np.ndarray:
-
-        vector = np.asarray(
-            value,
-            dtype=float,
-        ).reshape(-1)
-
-        if vector.shape != (2,):
-
-            raise ValueError(
-                f"{name} must contain exactly 2 values."
-            )
-
-        if not np.all(
-            np.isfinite(
-                vector
-            )
-        ):
-
-            raise ValueError(
-                f"{name} must be finite."
-            )
-
-        return vector

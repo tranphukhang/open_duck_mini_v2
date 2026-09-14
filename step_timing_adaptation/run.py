@@ -175,8 +175,8 @@ SWING_SIDE = (
 # NO rigid-body dynamics.
 # ============================================================
 
-DT = 0.01
-# 100 Hz differential IK / set-state
+DT = 0.0005
+# 2000 Hz differential IK / set-state
 
 
 # ============================================================
@@ -242,15 +242,9 @@ STEP_TIMING_GAP = 0.02
 # PLANNER RATE
 # ============================================================
 
-PLANNER_UPDATE_FREQUENCY = (
-    100.0
-)
+PLANNER_UPDATE_FREQUENCY = 1.0 / DT
 
-PLANNER_UPDATE_PERIOD = (
-    1.0
-    /
-    PLANNER_UPDATE_FREQUENCY
-)
+PLANNER_UPDATE_PERIOD = DT
 
 
 # ============================================================
@@ -266,7 +260,7 @@ SWING_VERTICAL_CONSTRAINT_SAMPLES = (
 )
 
 SWING_VERTICAL_COEFFICIENT_REGULARIZATION = (
-    1.0e-8
+    1.0e-6
 )
 
 SWING_VERTICAL_BOUND_TOLERANCE = (
@@ -386,7 +380,7 @@ TRUNK_ORIENTATION_KP = 10.0
 # rather than only faking a planner measurement.
 # ============================================================
 
-ENABLE_DISTURBANCE = True
+ENABLE_DISTURBANCE = False
 
 DISTURBANCE_TIME = 0.10
 # time from beginning of SINGLE SUPPORT
