@@ -55,6 +55,7 @@ if __package__:
     from .whole_body_qp import (
         WholeBodyHQPConfig,
         WholeBodyHierarchicalInverseDynamics,
+        DoubleSupportPreparationHierarchicalInverseDynamics,
     )
 
 
@@ -78,6 +79,7 @@ else:
     from whole_body_qp import (
         WholeBodyHQPConfig,
         WholeBodyHierarchicalInverseDynamics,
+        DoubleSupportPreparationHierarchicalInverseDynamics,
     )
 
 
@@ -237,6 +239,32 @@ TOUCHDOWN_CONTACT_WINDOW = 0.02
 
 # Keep final landing target for a short settling interval.
 TOUCHDOWN_SETTLE_TIME = 0.0
+
+
+# ============================================================
+# DOUBLE-SUPPORT PREPARATION
+# ============================================================
+
+PREPARE_DURATION = 2.00
+PREPARE_HOLD_TIME = 0.50
+
+# CoM target is placed slightly toward the inside
+# of the future LEFT stance foot.
+PREPARE_LEFT_INNER_OFFSET = 0.010
+
+PREPARE_COM_KP = 40.0
+PREPARE_COM_KD = 12.0
+
+# Desired final load distribution before lift-off.
+PREPARE_LEFT_LOAD_FRACTION = 0.90
+
+# Transition conditions.
+PREPARE_RIGHT_LOAD_MAX = 0.15
+PREPARE_DCM_MARGIN = 0.003
+PREPARE_VELOCITY_Y_MAX = 0.04
+PREPARE_MAX_TILT_DEG = 8.0
+
+PREPARE_STATUS_PRINT_PERIOD = 0.10
 
 
 # ============================================================
@@ -962,6 +990,776 @@ def compute_com_jdot_v(
         @
         qvel
     )
+
+
+def run_double_support_preparation(
+    model,
+    data,
+    dynamics,
+    controller,
+
+    actuated_qpos_indices,
+    posture_reference,
+
+    home_torque,
+
+    torque_lower,
+    torque_upper,
+
+    left_support_bounds,
+    right_support_bounds,
+
+    planner,
+
+    viewer=None,
+):
+
+    dt = float(
+        model.opt.timestep
+    )
+
+    control_decimation = int(
+        round(
+            (
+                1.0
+                /
+                CONTROL_FREQUENCY
+            )
+            /
+            dt
+        )
+    )
+
+    if control_decimation < 1:
+
+        raise RuntimeError(
+            "Invalid preparation control decimation."
+        )
+
+    base_body_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_BODY,
+        ROBOT_ROOT_BODY,
+    )
+
+    left_geom_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        LEFT_FOOT_GEOM,
+    )
+
+    right_geom_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        RIGHT_FOOT_GEOM,
+    )
+
+    floor_geom_id = require_object_id(
+        model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        FLOOR_GEOM,
+    )
+
+    floor_z = float(
+        data.geom_xpos[
+            floor_geom_id,
+            2
+        ]
+    )
+
+    mujoco.mj_forward(
+        model,
+        data,
+    )
+
+    initial_com = dynamics.get_com_kinematics(
+        data,
+        ROBOT_ROOT_BODY,
+    )
+
+    initial_left = dynamics.get_site_kinematics(
+        data,
+        LEFT_FOOT_SITE,
+    )
+
+    initial_right = dynamics.get_site_kinematics(
+        data,
+        RIGHT_FOOT_SITE,
+    )
+
+    initial_com_y = float(
+        initial_com.position[
+            1
+        ]
+    )
+
+    target_com_y = float(
+        initial_left.position[
+            1
+        ]
+        -
+        PREPARE_LEFT_INNER_OFFSET
+    )
+
+    delta_y = (
+        target_com_y
+        -
+        initial_com_y
+    )
+
+    robot_weight = (
+        initial_com.mass
+        *
+        np.linalg.norm(
+            model.opt.gravity
+        )
+    )
+
+    scratch_plus = mujoco.MjData(
+        model
+    )
+
+    scratch_minus = mujoco.MjData(
+        model
+    )
+
+    phase_start_time = float(
+        data.time
+    )
+
+    last_tau = (
+        home_torque.copy()
+    )
+
+    last_solution = None
+
+    step_index = 0
+
+    next_print_time = 0.0
+
+    total_duration = (
+        PREPARE_DURATION
+        +
+        PREPARE_HOLD_TIME
+    )
+
+    print()
+
+    separator()
+
+    print(
+        "DOUBLE-SUPPORT PREPARATION"
+    )
+
+    separator()
+
+    print(
+        f"initial CoM-y = "
+        f"{initial_com_y:+.6f} m"
+    )
+
+    print(
+        f"left foot y   = "
+        f"{initial_left.position[1]:+.6f} m"
+    )
+
+    print(
+        f"target CoM-y  = "
+        f"{target_com_y:+.6f} m"
+    )
+
+    while True:
+
+        mujoco.mj_step1(
+            model,
+            data,
+        )
+
+        current_time = float(
+            data.time
+        )
+
+        elapsed_time = (
+            current_time
+            -
+            phase_start_time
+        )
+
+        com = dynamics.get_com_kinematics(
+            data,
+            ROBOT_ROOT_BODY,
+        )
+
+        left = dynamics.get_site_kinematics(
+            data,
+            LEFT_FOOT_SITE,
+        )
+
+        right = dynamics.get_site_kinematics(
+            data,
+            RIGHT_FOOT_SITE,
+        )
+
+        left_contact = has_geom_contact(
+            data,
+            left_geom_id,
+            floor_geom_id,
+        )
+
+        right_contact = has_geom_contact(
+            data,
+            right_geom_id,
+            floor_geom_id,
+        )
+
+        tilt = get_base_tilt_deg(
+            data,
+            base_body_id,
+        )
+
+        if (
+            not left_contact
+            or
+            not right_contact
+        ):
+
+            raise RuntimeError(
+                "A foot lost contact during "
+                "double-support preparation."
+            )
+
+        # --------------------------------------------
+        # Quintic preparation profile
+        # --------------------------------------------
+
+        if (
+            elapsed_time
+            <
+            PREPARE_DURATION
+        ):
+
+            r = float(
+                np.clip(
+                    elapsed_time
+                    /
+                    PREPARE_DURATION,
+                    0.0,
+                    1.0,
+                )
+            )
+
+            s = (
+                10.0 * r**3
+                -
+                15.0 * r**4
+                +
+                6.0 * r**5
+            )
+
+            s_dot = (
+                (
+                    30.0 * r**2
+                    -
+                    60.0 * r**3
+                    +
+                    30.0 * r**4
+                )
+                /
+                PREPARE_DURATION
+            )
+
+            s_ddot = (
+                (
+                    60.0 * r
+                    -
+                    180.0 * r**2
+                    +
+                    120.0 * r**3
+                )
+                /
+                PREPARE_DURATION**2
+            )
+
+        else:
+
+            s = 1.0
+            s_dot = 0.0
+            s_ddot = 0.0
+
+        desired_y = (
+            initial_com_y
+            +
+            delta_y * s
+        )
+
+        desired_vy = (
+            delta_y
+            *
+            s_dot
+        )
+
+        desired_ay_ff = (
+            delta_y
+            *
+            s_ddot
+        )
+
+        desired_com_acceleration_y = (
+            desired_ay_ff
+
+            +
+            PREPARE_COM_KP
+            *
+            (
+                desired_y
+                -
+                com.position[1]
+            )
+
+            +
+            PREPARE_COM_KD
+            *
+            (
+                desired_vy
+                -
+                com.velocity[1]
+            )
+        )
+
+        desired_left_fraction = (
+            0.5
+            +
+            (
+                PREPARE_LEFT_LOAD_FRACTION
+                -
+                0.5
+            )
+            *
+            s
+        )
+
+        desired_right_fraction = (
+            1.0
+            -
+            desired_left_fraction
+        )
+
+        if (
+            step_index
+            %
+            control_decimation
+            ==
+            0
+        ):
+
+            terms = dynamics.compute(
+                data,
+                forward=False,
+            )
+
+            com_jdot_v = compute_com_jdot_v(
+                model=model,
+                data=data,
+                root_body_id=base_body_id,
+                scratch_plus=scratch_plus,
+                scratch_minus=scratch_minus,
+                epsilon=COM_JDOT_EPSILON,
+            )
+
+            desired_com_acceleration_z = (
+                COM_HEIGHT_KP
+                *
+                (
+                    COM_HEIGHT_REFERENCE
+                    -
+                    com.position[2]
+                )
+                -
+                COM_HEIGHT_KD
+                *
+                com.velocity[2]
+            )
+
+            q_actuated = (
+                data.qpos[
+                    actuated_qpos_indices
+                ]
+            )
+
+            v_actuated = (
+                data.qvel[
+                    dynamics.actuated_dof_indices
+                ]
+            )
+
+            desired_posture_acceleration = (
+                POSTURE_KP
+                *
+                (
+                    posture_reference
+                    -
+                    q_actuated
+                )
+                -
+                POSTURE_KD
+                *
+                v_actuated
+            )
+
+            last_solution = (
+                controller.solve_prepare(
+                    mass_matrix=(
+                        terms.mass_matrix
+                    ),
+
+                    effective_bias=(
+                        terms.effective_bias
+                    ),
+
+                    selection_matrix=(
+                        terms.selection_matrix
+                    ),
+
+                    left_jacobian=(
+                        left.jacobian
+                    ),
+
+                    left_jdot_v=(
+                        left.jacobian_dot_velocity
+                    ),
+
+                    right_jacobian=(
+                        right.jacobian
+                    ),
+
+                    right_jdot_v=(
+                        right.jacobian_dot_velocity
+                    ),
+
+                    com_jacobian=(
+                        com.jacobian
+                    ),
+
+                    com_jdot_v_y=(
+                        com_jdot_v[1]
+                    ),
+
+                    com_jdot_v_z=(
+                        com_jdot_v[2]
+                    ),
+
+                    desired_com_acceleration_y=(
+                        desired_com_acceleration_y
+                    ),
+
+                    desired_com_acceleration_z=(
+                        desired_com_acceleration_z
+                    ),
+
+                    desired_left_fz=(
+                        desired_left_fraction
+                        *
+                        robot_weight
+                    ),
+
+                    desired_right_fz=(
+                        desired_right_fraction
+                        *
+                        robot_weight
+                    ),
+
+                    desired_posture_acceleration=(
+                        desired_posture_acceleration
+                    ),
+
+                    left_support_bounds=(
+                        left_support_bounds
+                    ),
+
+                    right_support_bounds=(
+                        right_support_bounds
+                    ),
+
+                    left_contact_height=(
+                        left.position[2]
+                        -
+                        floor_z
+                    ),
+
+                    right_contact_height=(
+                        right.position[2]
+                        -
+                        floor_z
+                    ),
+
+                    torque_lower=(
+                        torque_lower
+                    ),
+
+                    torque_upper=(
+                        torque_upper
+                    ),
+                )
+            )
+
+            last_tau = (
+                last_solution.torque.copy()
+            )
+
+        data.ctrl[:] = (
+            last_tau
+        )
+
+        # --------------------------------------------
+        # Status
+        # --------------------------------------------
+
+        if (
+            elapsed_time
+            >=
+            next_print_time
+            -
+            0.5 * dt
+        ):
+
+            dcm_y = float(
+                com.position[1]
+                +
+                com.velocity[1]
+                /
+                planner.omega
+            )
+
+            if last_solution is None:
+
+                left_fraction = np.nan
+                right_fraction = np.nan
+
+                r2 = 0.0
+                r3 = 0.0
+                r4 = 0.0
+
+            else:
+
+                left_fraction = (
+                    last_solution.left_wrench[2]
+                    /
+                    robot_weight
+                )
+
+                right_fraction = (
+                    last_solution.right_wrench[2]
+                    /
+                    robot_weight
+                )
+
+                r2 = (
+                    last_solution.rank2_residual
+                )
+
+                r3 = (
+                    last_solution.rank3_residual
+                )
+
+                r4 = (
+                    last_solution.rank4_residual
+                )
+
+            print(
+                f"prepare t={elapsed_time:5.2f}"
+                f" | CoMy={com.position[1]:+.4f}"
+                f" | DCM_y={dcm_y:+.4f}"
+                f" | yref={desired_y:+.4f}"
+                f" | Vy={com.velocity[1]:+.4f}"
+                f" | load L/R="
+                f"{100.0 * left_fraction:5.1f}/"
+                f"{100.0 * right_fraction:5.1f}%"
+                f" | tilt={tilt:.2f}"
+                f" | R2={r2:.2e}"
+                f" | R3={r3:.2e}"
+                f" | R4={r4:.2e}"
+            )
+
+            next_print_time += (
+                PREPARE_STATUS_PRINT_PERIOD
+            )
+
+        if (
+            viewer is not None
+        ):
+
+            viewer.sync()
+
+        mujoco.mj_step2(
+            model,
+            data,
+        )
+
+        step_index += 1
+
+        if (
+            elapsed_time
+            >=
+            total_duration
+        ):
+
+            break
+
+    # ========================================================
+    # READINESS
+    # ========================================================
+
+    mujoco.mj_forward(
+        model,
+        data,
+    )
+
+    final_com = dynamics.get_com_kinematics(
+        data,
+        ROBOT_ROOT_BODY,
+    )
+
+    final_left = dynamics.get_site_kinematics(
+        data,
+        LEFT_FOOT_SITE,
+    )
+
+    final_dcm_y = float(
+        final_com.position[1]
+        +
+        final_com.velocity[1]
+        /
+        planner.omega
+    )
+
+    left_support_y_min = (
+        final_left.position[1]
+        +
+        left_support_bounds[2]
+        +
+        PREPARE_DCM_MARGIN
+    )
+
+    left_support_y_max = (
+        final_left.position[1]
+        +
+        left_support_bounds[3]
+        -
+        PREPARE_DCM_MARGIN
+    )
+
+    if last_solution is None:
+
+        raise RuntimeError(
+            "Preparation produced no HQP solution."
+        )
+
+    final_right_load_fraction = (
+        last_solution.right_wrench[2]
+        /
+        robot_weight
+    )
+
+    final_tilt = get_base_tilt_deg(
+        data,
+        base_body_id,
+    )
+
+    ready = (
+        left_support_y_min
+        <=
+        final_dcm_y
+        <=
+        left_support_y_max
+
+        and
+
+        abs(
+            final_com.velocity[1]
+        )
+        <=
+        PREPARE_VELOCITY_Y_MAX
+
+        and
+
+        final_right_load_fraction
+        <=
+        PREPARE_RIGHT_LOAD_MAX
+
+        and
+
+        final_tilt
+        <=
+        PREPARE_MAX_TILT_DEG
+    )
+
+    print()
+
+    separator()
+
+    print(
+        "DOUBLE-SUPPORT PREPARATION RESULT"
+    )
+
+    separator()
+
+    print(
+        f"final CoM-y       = "
+        f"{final_com.position[1]:+.6f} m"
+    )
+
+    print(
+        f"final DCM-y       = "
+        f"{final_dcm_y:+.6f} m"
+    )
+
+    print(
+        f"LEFT support y    = "
+        f"[{left_support_y_min:+.6f}, "
+        f"{left_support_y_max:+.6f}] m"
+    )
+
+    print(
+        f"final Vy          = "
+        f"{final_com.velocity[1]:+.6f} m/s"
+    )
+
+    print(
+        f"right load        = "
+        f"{100.0 * final_right_load_fraction:.2f}%"
+    )
+
+    print(
+        f"final tilt        = "
+        f"{final_tilt:.3f} deg"
+    )
+
+    print(
+        f"Rank-2 residual   = "
+        f"{last_solution.rank2_residual:.6e}"
+    )
+
+    print(
+        f"Rank-3 residual   = "
+        f"{last_solution.rank3_residual:.6e}"
+    )
+
+    print(
+        f"Rank-4 residual   = "
+        f"{last_solution.rank4_residual:.6e}"
+    )
+
+    print(
+        f"ready LEFT SS     = "
+        f"{ready}"
+    )
+
+    if not ready:
+
+        raise RuntimeError(
+            "Double-support preparation did not "
+            "reach a valid LEFT single-support state."
+        )
 
 
 # ============================================================
@@ -3053,6 +3851,26 @@ def main():
         )
     )
 
+    prepare_controller = (
+        DoubleSupportPreparationHierarchicalInverseDynamics(
+            nv=(
+                model.nv
+            ),
+
+            nu=(
+                model.nu
+            ),
+
+            actuated_dof_indices=(
+                dynamics.actuated_dof_indices
+            ),
+
+            config=(
+                wbc_config
+            ),
+        )
+    )
+
     # ========================================================
     # RUN
     # ========================================================
@@ -3063,6 +3881,45 @@ def main():
             model,
             data,
         ) as viewer:
+
+            run_double_support_preparation(
+                model=model,
+                data=data,
+                dynamics=dynamics,
+                controller=prepare_controller,
+
+                actuated_qpos_indices=(
+                    actuated_qpos_indices
+                ),
+
+                posture_reference=(
+                    posture_reference
+                ),
+
+                home_torque=(
+                    home_torque
+                ),
+
+                torque_lower=(
+                    torque_lower
+                ),
+
+                torque_upper=(
+                    torque_upper
+                ),
+
+                left_support_bounds=(
+                    left_support_bounds
+                ),
+
+                right_support_bounds=(
+                    right_support_bounds
+                ),
+
+                planner=planner,
+
+                viewer=viewer,
+            )
 
             run_single_support_step_validation(
 
@@ -3110,6 +3967,45 @@ def main():
             )
 
     else:
+
+        run_double_support_preparation(
+            model=model,
+            data=data,
+            dynamics=dynamics,
+            controller=prepare_controller,
+
+            actuated_qpos_indices=(
+                actuated_qpos_indices
+            ),
+
+            posture_reference=(
+                posture_reference
+            ),
+
+            home_torque=(
+                home_torque
+            ),
+
+            torque_lower=(
+                torque_lower
+            ),
+
+            torque_upper=(
+                torque_upper
+            ),
+
+            left_support_bounds=(
+                left_support_bounds
+            ),
+
+            right_support_bounds=(
+                right_support_bounds
+            ),
+
+            planner=planner,
+
+            viewer=viewer,
+        )
 
         run_single_support_step_validation(
 
