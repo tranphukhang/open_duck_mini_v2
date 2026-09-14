@@ -50,11 +50,13 @@ def build_adaptive_support_preview(
     foot_half_width: float,
 
     zmp_scale: float,
+
+    single_support_zmp_half_width: float,
 ) -> SupportPreview:
     """
-    Support preview for one adaptive step.
+    Build the future support preview for one adaptive step.
 
-    Architecture:
+    Phase sequence:
 
         INITIAL DOUBLE SUPPORT
                 |
@@ -63,15 +65,42 @@ def build_adaptive_support_preview(
         duration = adaptive T
                 |
                 v
-        DOUBLE SUPPORT after touchdown
+        DOUBLE SUPPORT AFTER TOUCHDOWN
 
-    The landing location and single-support duration are supplied
-    online by AdaptiveStepPlanner.
 
-    Unlike lipm_mpc.build_support_preview(), this function does
-    not depend on WalkingFSM because the current step location
-    and timing are optimization variables.
+    IMPORTANT MODEL CONSISTENCY
+    ---------------------------
+
+    During DOUBLE SUPPORT:
+
+        ZMP is allowed to move inside the support polygon.
+
+    During SINGLE SUPPORT:
+
+        ZMP is constrained to a very small box around
+        the stance-foot reference point u0:
+
+            u0_x - eps <= ZMP_x <= u0_x + eps
+            u0_y - eps <= ZMP_y <= u0_y + eps
+
+    Therefore approximately:
+
+        p_ZMP = u0
+
+    and the LIPM DCM dynamics become:
+
+        xi_dot = omega * (xi - u0)
+
+    which is consistent with the model used by the
+    Step Timing Adaptation planner.
+
+    The true support polygon is still stored in
+    SupportPreview.polygons for diagnostics / visualization.
     """
+
+    # ========================================================
+    # INPUTS
+    # ========================================================
 
     phase = str(
         current_phase
@@ -109,58 +138,143 @@ def build_adaptive_support_preview(
         horizon_steps
     )
 
+    zmp_scale = float(
+        zmp_scale
+    )
+
+    single_support_zmp_half_width = float(
+        single_support_zmp_half_width
+    )
+
     if phase_time < 0.0:
+
         raise ValueError(
             "phase_time must be >= 0."
         )
 
     if initial_double_support_duration < 0.0:
+
         raise ValueError(
             "initial_double_support_duration must be >= 0."
         )
 
     if single_support_duration <= 0.0:
+
         raise ValueError(
             "single_support_duration must be positive."
         )
 
     if timestep <= 0.0:
+
         raise ValueError(
             "timestep must be positive."
         )
 
     if horizon_steps < 1:
+
         raise ValueError(
             "horizon_steps must be >= 1."
         )
 
+    if not (
+        0.0
+        <
+        zmp_scale
+        <=
+        1.0
+    ):
+
+        raise ValueError(
+            "zmp_scale must satisfy 0 < zmp_scale <= 1."
+        )
+
+    if (
+        single_support_zmp_half_width
+        <=
+        0.0
+    ):
+
+        raise ValueError(
+            "single_support_zmp_half_width "
+            "must be positive."
+        )
+
+    # ========================================================
+    # POSES
+    # ========================================================
+
     left_initial_position = np.asarray(
         left_initial_position,
         dtype=float,
-    ).reshape(3)
+    ).reshape(
+        3
+    )
 
     right_initial_position = np.asarray(
         right_initial_position,
         dtype=float,
-    ).reshape(3)
+    ).reshape(
+        3
+    )
 
     landing_position = np.asarray(
         landing_position,
         dtype=float,
-    ).reshape(3)
+    ).reshape(
+        3
+    )
 
     left_rotation = np.asarray(
         left_rotation,
         dtype=float,
-    ).reshape(3, 3)
+    ).reshape(
+        3,
+        3,
+    )
 
     right_rotation = np.asarray(
         right_rotation,
         dtype=float,
-    ).reshape(3, 3)
+    ).reshape(
+        3,
+        3,
+    )
 
     # ========================================================
-    # STORAGE
+    # STANCE POINT u0
+    #
+    # This is the same support point supplied to:
+    #
+    #     AdaptiveStepPlanner.solve_adaptive_step(...)
+    #
+    # ========================================================
+
+    if stance_side == "left":
+
+        stance_position = (
+            left_initial_position
+        )
+
+    else:
+
+        stance_position = (
+            right_initial_position
+        )
+
+    stance_xy = (
+        stance_position[
+            0:2
+        ].copy()
+    )
+
+    # ========================================================
+    # TIME VECTOR
+    #
+    # preview[k] corresponds to:
+    #
+    #     t_current + (k + 1) * timestep
+    #
+    # exactly like lipm_mpc.support_preview.
     # ========================================================
 
     times = (
@@ -175,6 +289,10 @@ def build_adaptive_support_preview(
         *
         timestep
     )
+
+    # ========================================================
+    # STORAGE
+    # ========================================================
 
     x_min_values = np.zeros(
         horizon_steps,
@@ -197,7 +315,9 @@ def build_adaptive_support_preview(
     )
 
     phase_values = []
+
     support_values = []
+
     polygons = []
 
     # ========================================================
@@ -218,9 +338,9 @@ def build_adaptive_support_preview(
             timestep
         )
 
-        # ----------------------------------------------------
-        # Determine future walking phase.
-        # ----------------------------------------------------
+        # ====================================================
+        # FUTURE PHASE
+        # ====================================================
 
         if (
             phase
@@ -233,6 +353,10 @@ def build_adaptive_support_preview(
                 +
                 future_time
             )
+
+            # ------------------------------------------------
+            # Still in initial DS
+            # ------------------------------------------------
 
             if (
                 future_initial_ds_time
@@ -256,6 +380,10 @@ def build_adaptive_support_preview(
                     right_initial_position
                 )
 
+            # ------------------------------------------------
+            # Initial DS has ended
+            # ------------------------------------------------
+
             else:
 
                 future_ss_time = (
@@ -263,6 +391,10 @@ def build_adaptive_support_preview(
                     -
                     initial_double_support_duration
                 )
+
+                # --------------------------------------------
+                # Future sample lies inside SS
+                # --------------------------------------------
 
                 if (
                     future_ss_time
@@ -285,6 +417,10 @@ def build_adaptive_support_preview(
                     future_right_position = (
                         right_initial_position
                     )
+
+                # --------------------------------------------
+                # Future sample lies after touchdown
+                # --------------------------------------------
 
                 else:
 
@@ -316,6 +452,10 @@ def build_adaptive_support_preview(
                             right_initial_position
                         )
 
+        # ====================================================
+        # CURRENTLY IN SINGLE SUPPORT
+        # ====================================================
+
         elif (
             phase
             ==
@@ -327,6 +467,10 @@ def build_adaptive_support_preview(
                 +
                 future_time
             )
+
+            # ------------------------------------------------
+            # Still in current SS
+            # ------------------------------------------------
 
             if (
                 future_ss_time
@@ -349,6 +493,10 @@ def build_adaptive_support_preview(
                 future_right_position = (
                     right_initial_position
                 )
+
+            # ------------------------------------------------
+            # After touchdown
+            # ------------------------------------------------
 
             else:
 
@@ -383,73 +531,158 @@ def build_adaptive_support_preview(
         else:
 
             raise ValueError(
-                f"Unsupported current_phase: {phase}"
+                f"Unsupported current_phase: "
+                f"{phase}"
             )
 
-        # ----------------------------------------------------
-        # Existing support-polygon implementation.
-        # ----------------------------------------------------
+        # ====================================================
+        # TRUE SUPPORT POLYGON
+        #
+        # Keep this even during SS for diagnostics and future
+        # visualization.
+        # ====================================================
 
-        polygon = compute_support_polygon(
-            left_position=(
-                future_left_position
-            ),
-            left_rotation=(
-                left_rotation
-            ),
+        polygon = (
+            compute_support_polygon(
+                left_position=(
+                    future_left_position
+                ),
 
-            right_position=(
-                future_right_position
-            ),
-            right_rotation=(
-                right_rotation
-            ),
+                left_rotation=(
+                    left_rotation
+                ),
 
-            phase=(
-                future_phase
-            ),
-            support_side=(
-                future_support_side
-            ),
+                right_position=(
+                    future_right_position
+                ),
 
-            foot_toe=(
-                foot_toe
-            ),
-            foot_heel=(
-                foot_heel
-            ),
-            foot_half_width=(
-                foot_half_width
-            ),
+                right_rotation=(
+                    right_rotation
+                ),
+
+                phase=(
+                    future_phase
+                ),
+
+                support_side=(
+                    future_support_side
+                ),
+
+                foot_toe=(
+                    foot_toe
+                ),
+
+                foot_heel=(
+                    foot_heel
+                ),
+
+                foot_half_width=(
+                    foot_half_width
+                ),
+            )
         )
 
-        (
-            x_min,
-            x_max,
-            y_min,
-            y_max,
-        ) = compute_support_bounds(
-            polygon=(
-                polygon
-            ),
-            zmp_scale=(
-                zmp_scale
-            ),
-        )
+        # ====================================================
+        # MPC ZMP BOUNDS
+        # ====================================================
 
-        x_min_values[k] = (
+        if (
+            future_phase
+            ==
+            SINGLE_SUPPORT
+        ):
+
+            # ------------------------------------------------
+            # Khadiv-compatible SS model:
+            #
+            #       p_ZMP ~= u0
+            #
+            # LIPMMPC1D requires strict:
+            #
+            #       lower < upper
+            #
+            # so a tiny interval is used instead of an exact
+            # equality constraint.
+            # ------------------------------------------------
+
+            epsilon = (
+                single_support_zmp_half_width
+            )
+
+            x_min = (
+                stance_xy[0]
+                -
+                epsilon
+            )
+
+            x_max = (
+                stance_xy[0]
+                +
+                epsilon
+            )
+
+            y_min = (
+                stance_xy[1]
+                -
+                epsilon
+            )
+
+            y_max = (
+                stance_xy[1]
+                +
+                epsilon
+            )
+
+        else:
+
+            # ------------------------------------------------
+            # Double support:
+            #
+            # MPC may exploit the physical support region.
+            # ------------------------------------------------
+
+            (
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+            ) = (
+                compute_support_bounds(
+                    polygon=(
+                        polygon
+                    ),
+
+                    zmp_scale=(
+                        zmp_scale
+                    ),
+                )
+            )
+
+        # ====================================================
+        # STORE
+        # ====================================================
+
+        x_min_values[
+            k
+        ] = (
             x_min
         )
 
-        x_max_values[k] = (
+        x_max_values[
+            k
+        ] = (
             x_max
         )
 
-        y_min_values[k] = (
+        y_min_values[
+            k
+        ] = (
             y_min
         )
 
-        y_max_values[k] = (
+        y_max_values[
+            k
+        ] = (
             y_max
         )
 
@@ -477,6 +710,7 @@ def build_adaptive_support_preview(
         x_min=(
             x_min_values
         ),
+
         x_max=(
             x_max_values
         ),
@@ -484,6 +718,7 @@ def build_adaptive_support_preview(
         y_min=(
             y_min_values
         ),
+
         y_max=(
             y_max_values
         ),

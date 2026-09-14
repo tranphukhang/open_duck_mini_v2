@@ -318,6 +318,33 @@ FOOT_HALF_WIDTH = 0.02065
 
 
 # ============================================================
+# SINGLE-SUPPORT ZMP
+#
+# Step Timing Adaptation assumes:
+#
+#     xi_dot = omega * (xi - u0)
+#
+# where u0 is fixed during single support.
+#
+# Therefore LIPM-MPC is constrained to keep its ZMP
+# very close to the stance-foot reference point u0.
+#
+# Exact equality cannot be used because LIPMMPC1D requires:
+#
+#     lower_bound < upper_bound
+#
+# Hence:
+#
+#     u0 - epsilon <= ZMP <= u0 + epsilon
+#
+# 0.5 mm is sufficiently small for the reduced-order
+# validation while remaining numerically well defined.
+# ============================================================
+
+SINGLE_SUPPORT_ZMP_HALF_WIDTH = 0.0005
+
+
+# ============================================================
 # DIFFERENTIAL IK
 #
 # Same structure as lipm_mpc.
@@ -692,6 +719,10 @@ def solve_mpc_segment(
 
             zmp_scale=(
                 ZMP_SUPPORT_SCALE
+            ),
+
+            single_support_zmp_half_width=(
+                SINGLE_SUPPORT_ZMP_HALF_WIDTH
             ),
         )
     )
