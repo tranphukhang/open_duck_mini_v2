@@ -1,4 +1,4 @@
-﻿# step_timing_adaptation/single_support_qp.py
+﻿# step_timing_adaptation/whole_body_qp.py
 
 from __future__ import annotations
 
@@ -40,6 +40,31 @@ class WholeBodyHQPSolution:
     qacc: np.ndarray
 
     stance_wrench: np.ndarray
+
+    torque: np.ndarray
+
+    rank2_residual: float
+    rank3_residual: float
+    rank4_residual: float
+    rank5_residual: float
+
+    rank5_used: bool
+
+    max_constraint_violation: float
+
+    solve_time_rank2: float
+    solve_time_rank3: float
+    solve_time_rank4: float
+    solve_time_rank5: float
+
+
+@dataclass(frozen=True)
+class DoubleSupportPreparationSolution:
+
+    qacc: np.ndarray
+
+    left_wrench: np.ndarray
+    right_wrench: np.ndarray
 
     torque: np.ndarray
 
@@ -2608,4 +2633,1037 @@ class WholeBodyHierarchicalInverseDynamics:
             solve_time_rank5=(
                 solve_time_rank5
             ),
+        )
+
+
+# ============================================================
+# DOUBLE-SUPPORT PREPARATION
+# ============================================================
+
+class DoubleSupportPreparationHierarchicalInverseDynamics(
+    WholeBodyHierarchicalInverseDynamics
+):
+    """
+    Double-support preparation before entering single support.
+
+    Decision:
+
+        y = [qddot, lambda_L, lambda_R]
+
+    Hierarchy:
+
+        Rank 1:
+            rigid-body dynamics
+            torque limits
+            unilateral contact
+            friction
+            CoP feasibility
+
+        Rank 2:
+            left foot 6D
+            right foot 6D
+
+        Rank 3:
+            CoM-y
+            CoM-z
+
+        Rank 4:
+            vertical load distribution
+
+        Rank 5:
+            posture
+    """
+
+    def __init__(
+        self,
+        nv,
+        nu,
+        actuated_dof_indices,
+        config,
+    ):
+
+        super().__init__(
+            nv=nv,
+            nu=nu,
+            actuated_dof_indices=actuated_dof_indices,
+            config=config,
+        )
+
+        self.left_wrench_start = self.nv
+        self.right_wrench_start = self.nv + 6
+
+        self.left_wrench_slice = slice(
+            self.left_wrench_start,
+            self.left_wrench_start + 6,
+        )
+
+        self.right_wrench_slice = slice(
+            self.right_wrench_start,
+            self.right_wrench_start + 6,
+        )
+
+        self.nvar = self.nv + 12
+
+        self._solver_cache = {}
+
+
+    # ========================================================
+    # CONTACT INEQUALITIES
+    # ========================================================
+
+    def _append_contact_friction(
+        self,
+        rows,
+        lower,
+        upper,
+        wrench_start,
+    ):
+
+        mu = float(
+            self.config.friction_coefficient
+        )
+
+        fx = wrench_start + 0
+        fy = wrench_start + 1
+        fz = wrench_start + 2
+
+        for sx, sy in (
+            (+1.0, +1.0),
+            (+1.0, -1.0),
+            (-1.0, +1.0),
+            (-1.0, -1.0),
+        ):
+
+            row = np.zeros(
+                self.nvar,
+                dtype=float,
+            )
+
+            row[fx] = sx
+            row[fy] = sy
+            row[fz] = -mu
+
+            rows.append(row)
+            lower.append(-np.inf)
+            upper.append(0.0)
+
+        # Fz >= 0
+
+        row = np.zeros(
+            self.nvar,
+            dtype=float,
+        )
+
+        row[fz] = 1.0
+
+        rows.append(row)
+        lower.append(0.0)
+        upper.append(np.inf)
+
+
+    def _append_contact_cop(
+        self,
+        rows,
+        lower,
+        upper,
+        wrench_start,
+        support_bounds,
+        contact_height,
+    ):
+
+        xmin, xmax, ymin, ymax = np.asarray(
+            support_bounds,
+            dtype=float,
+        )
+
+        h = float(
+            contact_height
+        )
+
+        fx = wrench_start + 0
+        fy = wrench_start + 1
+        fz = wrench_start + 2
+        mx = wrench_start + 3
+        my = wrench_start + 4
+
+        # x_cop >= xmin
+
+        row = np.zeros(
+            self.nvar,
+            dtype=float,
+        )
+
+        row[fx] = h
+        row[fz] = xmin
+        row[my] = 1.0
+
+        rows.append(row)
+        lower.append(-np.inf)
+        upper.append(0.0)
+
+        # x_cop <= xmax
+
+        row = np.zeros(
+            self.nvar,
+            dtype=float,
+        )
+
+        row[fx] = -h
+        row[fz] = -xmax
+        row[my] = -1.0
+
+        rows.append(row)
+        lower.append(-np.inf)
+        upper.append(0.0)
+
+        # y_cop >= ymin
+
+        row = np.zeros(
+            self.nvar,
+            dtype=float,
+        )
+
+        row[fy] = h
+        row[fz] = ymin
+        row[mx] = -1.0
+
+        rows.append(row)
+        lower.append(-np.inf)
+        upper.append(0.0)
+
+        # y_cop <= ymax
+
+        row = np.zeros(
+            self.nvar,
+            dtype=float,
+        )
+
+        row[fy] = -h
+        row[fz] = -ymax
+        row[mx] = 1.0
+
+        rows.append(row)
+        lower.append(-np.inf)
+        upper.append(0.0)
+
+
+    # ========================================================
+    # RANK 1
+    # ========================================================
+
+    def _build_prepare_physical_model(
+        self,
+        mass_matrix,
+        effective_bias,
+        selection_matrix,
+        left_jacobian,
+        right_jacobian,
+        left_support_bounds,
+        right_support_bounds,
+        left_contact_height,
+        right_contact_height,
+        torque_lower,
+        torque_upper,
+    ):
+
+        M = np.asarray(
+            mass_matrix,
+            dtype=float,
+        )
+
+        h = np.asarray(
+            effective_bias,
+            dtype=float,
+        )
+
+        S = np.asarray(
+            selection_matrix,
+            dtype=float,
+        )
+
+        JL = np.asarray(
+            left_jacobian,
+            dtype=float,
+        )
+
+        JR = np.asarray(
+            right_jacobian,
+            dtype=float,
+        )
+
+        base_indices = (
+            self.unactuated_dof_indices
+        )
+
+        # ----------------------------------------------------
+        # Floating-base dynamics
+        # ----------------------------------------------------
+
+        B1 = np.zeros(
+            (
+                6,
+                self.nvar,
+            ),
+            dtype=float,
+        )
+
+        B1[
+            :,
+            self.qacc_slice
+        ] = M[
+            base_indices,
+            :
+        ]
+
+        B1[
+            :,
+            self.left_wrench_slice
+        ] = -JL[
+            :,
+            base_indices
+        ].T
+
+        B1[
+            :,
+            self.right_wrench_slice
+        ] = -JR[
+            :,
+            base_indices
+        ].T
+
+        d1 = -h[
+            base_indices
+        ]
+
+        # ----------------------------------------------------
+        # Torque recovery
+        # ----------------------------------------------------
+
+        actuated_indices = (
+            self.actuated_dof_indices
+        )
+
+        E = S.T[
+            actuated_indices,
+            :
+        ]
+
+        E_inv = np.linalg.inv(
+            E
+        )
+
+        A_tau = np.zeros(
+            (
+                self.nu,
+                self.nvar,
+            ),
+            dtype=float,
+        )
+
+        A_tau[
+            :,
+            self.qacc_slice
+        ] = M[
+            actuated_indices,
+            :
+        ]
+
+        A_tau[
+            :,
+            self.left_wrench_slice
+        ] = -JL[
+            :,
+            actuated_indices
+        ].T
+
+        A_tau[
+            :,
+            self.right_wrench_slice
+        ] = -JR[
+            :,
+            actuated_indices
+        ].T
+
+        A_tau = (
+            E_inv
+            @
+            A_tau
+        )
+
+        b_tau = (
+            E_inv
+            @
+            h[
+                actuated_indices
+            ]
+        )
+
+        tau_lower = np.asarray(
+            torque_lower,
+            dtype=float,
+        )
+
+        tau_upper = np.asarray(
+            torque_upper,
+            dtype=float,
+        )
+
+        rows = []
+        lower = []
+        upper = []
+
+        # Torque limits
+
+        for actuator_id in range(
+            self.nu
+        ):
+
+            rows.append(
+                A_tau[
+                    actuator_id,
+                    :
+                ]
+            )
+
+            lower.append(
+                tau_lower[
+                    actuator_id
+                ]
+                -
+                b_tau[
+                    actuator_id
+                ]
+            )
+
+            upper.append(
+                tau_upper[
+                    actuator_id
+                ]
+                -
+                b_tau[
+                    actuator_id
+                ]
+            )
+
+        # Both contacts
+
+        self._append_contact_friction(
+            rows,
+            lower,
+            upper,
+            self.left_wrench_start,
+        )
+
+        self._append_contact_friction(
+            rows,
+            lower,
+            upper,
+            self.right_wrench_start,
+        )
+
+        self._append_contact_cop(
+            rows,
+            lower,
+            upper,
+            self.left_wrench_start,
+            left_support_bounds,
+            left_contact_height,
+        )
+
+        self._append_contact_cop(
+            rows,
+            lower,
+            upper,
+            self.right_wrench_start,
+            right_support_bounds,
+            right_contact_height,
+        )
+
+        return (
+            B1,
+            d1,
+            np.vstack(rows),
+            np.asarray(
+                lower,
+                dtype=float,
+            ),
+            np.asarray(
+                upper,
+                dtype=float,
+            ),
+            A_tau,
+            b_tau,
+        )
+
+
+    # ========================================================
+    # RANK 2 — BOTH FEET RIGID
+    # ========================================================
+
+    def _build_prepare_rank2(
+        self,
+        left_jacobian,
+        left_jdot_v,
+        right_jacobian,
+        right_jdot_v,
+    ):
+
+        B2 = np.zeros(
+            (
+                12,
+                self.nvar,
+            ),
+            dtype=float,
+        )
+
+        d2 = np.zeros(
+            12,
+            dtype=float,
+        )
+
+        B2[
+            0:6,
+            self.qacc_slice
+        ] = left_jacobian
+
+        d2[
+            0:6
+        ] = -np.asarray(
+            left_jdot_v,
+            dtype=float,
+        )
+
+        B2[
+            6:12,
+            self.qacc_slice
+        ] = right_jacobian
+
+        d2[
+            6:12
+        ] = -np.asarray(
+            right_jdot_v,
+            dtype=float,
+        )
+
+        return B2, d2
+
+
+    # ========================================================
+    # RANK 3 — COM Y/Z
+    # ========================================================
+
+    def _build_prepare_rank3(
+        self,
+        com_jacobian,
+        com_jdot_v_y,
+        com_jdot_v_z,
+        desired_com_acceleration_y,
+        desired_com_acceleration_z,
+    ):
+
+        Jcom = np.asarray(
+            com_jacobian,
+            dtype=float,
+        )
+
+        B3 = np.zeros(
+            (
+                2,
+                self.nvar,
+            ),
+            dtype=float,
+        )
+
+        d3 = np.zeros(
+            2,
+            dtype=float,
+        )
+
+        B3[
+            0,
+            self.qacc_slice
+        ] = Jcom[
+            1,
+            :
+        ]
+
+        d3[0] = (
+            desired_com_acceleration_y
+            -
+            com_jdot_v_y
+        )
+
+        B3[
+            1,
+            self.qacc_slice
+        ] = Jcom[
+            2,
+            :
+        ]
+
+        d3[1] = (
+            desired_com_acceleration_z
+            -
+            com_jdot_v_z
+        )
+
+        return B3, d3
+
+
+    # ========================================================
+    # RANK 4 — VERTICAL LOAD DISTRIBUTION
+    # ========================================================
+
+    def _build_prepare_rank4(
+        self,
+        desired_left_fz,
+        desired_right_fz,
+    ):
+
+        B4 = np.zeros(
+            (
+                2,
+                self.nvar,
+            ),
+            dtype=float,
+        )
+
+        B4[
+            0,
+            self.left_wrench_start + 2
+        ] = 1.0
+
+        B4[
+            1,
+            self.right_wrench_start + 2
+        ] = 1.0
+
+        d4 = np.array(
+            [
+                desired_left_fz,
+                desired_right_fz,
+            ],
+            dtype=float,
+        )
+
+        return B4, d4
+
+
+    # ========================================================
+    # RANK 5 — POSTURE
+    # ========================================================
+
+    def _build_prepare_rank5(
+        self,
+        desired_posture_acceleration,
+    ):
+
+        desired = np.asarray(
+            desired_posture_acceleration,
+            dtype=float,
+        )
+
+        B5 = np.zeros(
+            (
+                self.nu,
+                self.nvar,
+            ),
+            dtype=float,
+        )
+
+        for actuator_id, dof_index in enumerate(
+            self.actuated_dof_indices
+        ):
+
+            B5[
+                actuator_id,
+                dof_index
+            ] = 1.0
+
+        return B5, desired
+
+
+    # ========================================================
+    # SOLVE PREPARATION
+    # ========================================================
+
+    def solve_prepare(
+        self,
+        *,
+        mass_matrix,
+        effective_bias,
+        selection_matrix,
+
+        left_jacobian,
+        left_jdot_v,
+
+        right_jacobian,
+        right_jdot_v,
+
+        com_jacobian,
+        com_jdot_v_y,
+        com_jdot_v_z,
+
+        desired_com_acceleration_y,
+        desired_com_acceleration_z,
+
+        desired_left_fz,
+        desired_right_fz,
+
+        desired_posture_acceleration,
+
+        left_support_bounds,
+        right_support_bounds,
+
+        left_contact_height,
+        right_contact_height,
+
+        torque_lower,
+        torque_upper,
+    ):
+
+        (
+            B1,
+            d1,
+            A_ineq,
+            lower_ineq,
+            upper_ineq,
+            A_tau,
+            b_tau,
+        ) = self._build_prepare_physical_model(
+
+            mass_matrix,
+            effective_bias,
+            selection_matrix,
+
+            left_jacobian,
+            right_jacobian,
+
+            left_support_bounds,
+            right_support_bounds,
+
+            left_contact_height,
+            right_contact_height,
+
+            torque_lower,
+            torque_upper,
+        )
+
+        y1 = self._particular_solution(
+            B1,
+            d1,
+        )
+
+        Z1 = self._nullspace(
+            B1
+        )
+
+        # ----------------------------------------------------
+        # Rank 2
+        # ----------------------------------------------------
+
+        B2, d2 = self._build_prepare_rank2(
+            left_jacobian,
+            left_jdot_v,
+            right_jacobian,
+            right_jdot_v,
+        )
+
+        start = time.perf_counter()
+
+        y2, violation2 = self._solve_reduced_qp(
+            name="prepare_rank2",
+            y_base=y1,
+            Z=Z1,
+            B=B2,
+            desired=d2,
+            A_ineq=A_ineq,
+            lower_ineq=lower_ineq,
+            upper_ineq=upper_ineq,
+        )
+
+        solve_time_rank2 = (
+            time.perf_counter()
+            -
+            start
+        )
+
+        rank2_residual = float(
+            np.linalg.norm(
+                B2 @ y2 - d2
+            )
+        )
+
+        Z2 = self._nullspace(
+            np.vstack(
+                (
+                    B1,
+                    B2,
+                )
+            )
+        )
+
+        # ----------------------------------------------------
+        # Rank 3
+        # ----------------------------------------------------
+
+        B3, d3 = self._build_prepare_rank3(
+            com_jacobian,
+            com_jdot_v_y,
+            com_jdot_v_z,
+            desired_com_acceleration_y,
+            desired_com_acceleration_z,
+        )
+
+        start = time.perf_counter()
+
+        y3, violation3 = self._solve_reduced_qp(
+            name="prepare_rank3",
+            y_base=y2,
+            Z=Z2,
+            B=B3,
+            desired=d3,
+            A_ineq=A_ineq,
+            lower_ineq=lower_ineq,
+            upper_ineq=upper_ineq,
+        )
+
+        solve_time_rank3 = (
+            time.perf_counter()
+            -
+            start
+        )
+
+        rank3_residual = float(
+            np.linalg.norm(
+                B3 @ y3 - d3
+            )
+        )
+
+        Z3 = self._nullspace(
+            np.vstack(
+                (
+                    B1,
+                    B2,
+                    B3,
+                )
+            )
+        )
+
+        # ----------------------------------------------------
+        # Rank 4
+        # ----------------------------------------------------
+
+        B4, d4 = self._build_prepare_rank4(
+            desired_left_fz,
+            desired_right_fz,
+        )
+
+        start = time.perf_counter()
+
+        try:
+
+            y4, violation4 = self._solve_reduced_qp(
+                name="prepare_rank4",
+                y_base=y3,
+                Z=Z3,
+                B=B4,
+                desired=d4,
+                A_ineq=A_ineq,
+                lower_ineq=lower_ineq,
+                upper_ineq=upper_ineq,
+            )
+
+            rank4_used = True
+
+        except RuntimeError:
+
+            y4 = y3.copy()
+            violation4 = violation3
+            rank4_used = False
+
+        solve_time_rank4 = (
+            time.perf_counter()
+            -
+            start
+        )
+
+        rank4_residual = float(
+            np.linalg.norm(
+                B4 @ y4 - d4
+            )
+        )
+
+        if rank4_used:
+
+            Z4 = self._nullspace(
+                np.vstack(
+                    (
+                        B1,
+                        B2,
+                        B3,
+                        B4,
+                    )
+                )
+            )
+
+        else:
+
+            Z4 = Z3.copy()
+
+        # ----------------------------------------------------
+        # Rank 5
+        # ----------------------------------------------------
+
+        B5, d5 = self._build_prepare_rank5(
+            desired_posture_acceleration
+        )
+
+        start = time.perf_counter()
+
+        rank5_used = False
+
+        if Z4.shape[1] > 0:
+
+            try:
+
+                y5, violation5 = self._solve_reduced_qp(
+                    name="prepare_rank5",
+                    y_base=y4,
+                    Z=Z4,
+                    B=B5,
+                    desired=d5,
+                    A_ineq=A_ineq,
+                    lower_ineq=lower_ineq,
+                    upper_ineq=upper_ineq,
+                )
+
+                rank5_used = True
+
+            except RuntimeError:
+
+                y5 = y4.copy()
+                violation5 = violation4
+
+        else:
+
+            y5 = y4.copy()
+            violation5 = violation4
+
+        solve_time_rank5 = (
+            time.perf_counter()
+            -
+            start
+        )
+
+        rank5_residual = float(
+            np.linalg.norm(
+                B5 @ y5 - d5
+            )
+        )
+
+        # ----------------------------------------------------
+        # Extract
+        # ----------------------------------------------------
+
+        qacc = y5[
+            self.qacc_slice
+        ].copy()
+
+        left_wrench = y5[
+            self.left_wrench_slice
+        ].copy()
+
+        right_wrench = y5[
+            self.right_wrench_slice
+        ].copy()
+
+        torque = (
+            A_tau @ y5
+            +
+            b_tau
+        )
+
+        tau_lower = np.asarray(
+            torque_lower,
+            dtype=float,
+        )
+
+        tau_upper = np.asarray(
+            torque_upper,
+            dtype=float,
+        )
+
+        torque_violation = max(
+            float(
+                np.max(
+                    np.maximum(
+                        tau_lower - torque,
+                        0.0,
+                    )
+                )
+            ),
+            float(
+                np.max(
+                    np.maximum(
+                        torque - tau_upper,
+                        0.0,
+                    )
+                )
+            ),
+        )
+
+        rank1_lock_error = float(
+            np.linalg.norm(
+                B1 @ y5 - d1,
+                ord=np.inf,
+            )
+        )
+
+        rank2_lock_error = float(
+            np.linalg.norm(
+                B2 @ y5 - B2 @ y2,
+                ord=np.inf,
+            )
+        )
+
+        rank3_lock_error = float(
+            np.linalg.norm(
+                B3 @ y5 - B3 @ y3,
+                ord=np.inf,
+            )
+        )
+
+        max_violation = max(
+            violation2,
+            violation3,
+            violation4,
+            violation5,
+            torque_violation,
+            rank1_lock_error,
+            rank2_lock_error,
+            rank3_lock_error,
+        )
+
+        return DoubleSupportPreparationSolution(
+            qacc=qacc,
+
+            left_wrench=left_wrench,
+            right_wrench=right_wrench,
+
+            torque=torque,
+
+            rank2_residual=rank2_residual,
+            rank3_residual=rank3_residual,
+            rank4_residual=rank4_residual,
+            rank5_residual=rank5_residual,
+
+            rank5_used=rank5_used,
+
+            max_constraint_violation=max_violation,
+
+            solve_time_rank2=solve_time_rank2,
+            solve_time_rank3=solve_time_rank3,
+            solve_time_rank4=solve_time_rank4,
+            solve_time_rank5=solve_time_rank5,
         )
