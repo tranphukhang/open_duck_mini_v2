@@ -154,7 +154,7 @@ INITIAL_DESIRED_VELOCITY_Y = 0.0
 
 
 # ============================================================
-# KEYBOARD COMMAND STEP
+# KEYBOARD VELOCITY STEP
 # ============================================================
 
 VELOCITY_X_STEP = 0.05
@@ -166,7 +166,39 @@ VELOCITY_Y_STEP = 0.05
 # ============================================================
 
 GRAVITY = 9.81
+
 COM_HEIGHT = 0.2044
+
+
+# ============================================================
+# MANUAL COM PUSH
+#
+# A push is triggered ONLY when SPACE is pressed.
+#
+# Force is expressed in WORLD coordinates:
+#
+#     +X : forward
+#     -X : backward
+#     +Y : left
+#     -Y : right
+#
+# This is a reduced-order external force applied to the
+# point-foot LIPM:
+#
+#     c_ddot
+#       =
+#       omega^2(c-u0)
+#       +
+#       F_push / m
+#
+# It is NOT a MuJoCo rigid-body external force because walking
+# execution is kinematic set-state.
+# ============================================================
+
+PUSH_FORCE_X = +2.5
+PUSH_FORCE_Y = +2.5
+
+PUSH_DURATION = 0.05
 
 
 # ============================================================
@@ -217,8 +249,11 @@ VELOCITY_Y_MAX = (
 # ============================================================
 
 STEP_QP_ALPHA_LOCATION = 1.0
+
 STEP_QP_ALPHA_TIMING = 5.0
+
 STEP_QP_ALPHA_DCM = 1000.0
+
 STEP_QP_ALPHA_VIABILITY = 1.0e6
 
 
@@ -250,30 +285,22 @@ TRUNK_ORIENTATION_KP = 10.0
 
 
 # ============================================================
-# OPTIONAL SYNTHETIC DCM DISTURBANCE
-# ============================================================
-
-ENABLE_DISTURBANCE = False
-
-DISTURBANCE_TIME = 0.10
-
-DISTURBANCE_DCM_X = +0.010
-DISTURBANCE_DCM_Y = 0.000
-
-
-# ============================================================
 # GUI / TERMINAL
 # ============================================================
 
 SHOW_VIEWER = True
+
 REALTIME_PLAYBACK = True
 
 VIEWER_SYNC_PERIOD = 0.02
+
 STATUS_PRINT_PERIOD = 0.10
 
 
 # ============================================================
 # VISUAL HISTORY
+#
+# Keep the value currently used in the GitHub version.
 # ============================================================
 
 VISUAL_HISTORY_DURATION = 2.0
@@ -288,44 +315,14 @@ TIME_TOLERANCE = 1.0e-10
 
 # ============================================================
 # VELOCITY ARROW VISUALIZATION
-#
-# MuJoCo native rendering-only geometry:
-#
-#     mjGEOM_ARROW
-#
-# Both arrows have exactly the same origin.
-#
-# Blue:
-#     commanded velocity
-#
-# Red:
-#     actual robot CoM velocity
-#
-# Arrow vector:
-#
-#     Delta p =
-#         VELOCITY_ARROW_SCALE
-#         *
-#         [vx, vy, 0]
 # ============================================================
 
 VELOCITY_ARROW_HEIGHT_OFFSET = 0.16
 
-# Displayed metres per m/s.
 VELOCITY_ARROW_SCALE = 0.45
 
 VELOCITY_ARROW_MIN_NORM = 1.0e-5
 
-
-# ------------------------------------------------------------
-# IMPORTANT:
-#
-# For mjGEOM_ARROW, width is a geometric width rather than
-# the pixel-width convention of mjGEOM_LINE.
-#
-# Command is thicker.
-# Actual velocity is thinner and drawn afterwards.
-# ------------------------------------------------------------
 
 COMMAND_ARROW_WIDTH = 0.008
 
@@ -356,10 +353,6 @@ CURRENT_VELOCITY_ARROW_RGBA = np.array(
 
 # ============================================================
 # ZMP VISUALIZATION
-#
-# Built-in long history is disabled.
-#
-# A custom timestamped 4-second trail is drawn below.
 # ============================================================
 
 ZMP_VISUALIZATION_CONFIG = (
@@ -456,7 +449,9 @@ RECENT_ZMP_TRAIL_RGBA = np.array(
 # ============================================================
 
 COM_GROUND_Z = 0.012
+
 COM_GROUND_RADIUS = 0.006
+
 
 COM_GROUND_RGBA = np.array(
     [
@@ -470,7 +465,9 @@ COM_GROUND_RGBA = np.array(
 
 
 DCM_GROUND_Z = 0.014
+
 DCM_RADIUS = 0.007
+
 
 DCM_RGBA = np.array(
     [
@@ -484,7 +481,9 @@ DCM_RGBA = np.array(
 
 
 PLANNER_TARGET_Z = 0.016
+
 PLANNER_TARGET_RADIUS = 0.006
+
 
 PLANNER_TARGET_RGBA = np.array(
     [
@@ -499,6 +498,7 @@ PLANNER_TARGET_RGBA = np.array(
 
 COM_VERTICAL_LINE_WIDTH = 2.5
 
+
 COM_VERTICAL_RGBA = np.array(
     [
         0.10,
@@ -512,6 +512,7 @@ COM_VERTICAL_RGBA = np.array(
 
 COM_DCM_LINE_WIDTH = 3.0
 
+
 COM_DCM_LINE_RGBA = np.array(
     [
         1.00,
@@ -524,33 +525,46 @@ COM_DCM_LINE_RGBA = np.array(
 
 
 # ============================================================
-# VELOCITY COMMAND
+# KEYBOARD INPUT
 # ============================================================
 
 @dataclass(frozen=True)
 class VelocityCommandSnapshot:
 
     x: float
+
     y: float
+
     version: int
+
+    push_request_count: int
 
 
 class VelocityCommand:
     """
-    Coordinate convention:
+    Keyboard input state.
 
-        +x : forward
-        -x : backward
+    Arrow keys:
 
-        +y : left
-        -y : right
+        UP
+            vx += 0.05 m/s
 
-    Keys:
+        DOWN
+            vx -= 0.05 m/s
 
-        UP    -> vx += 0.05
-        DOWN  -> vx -= 0.05
-        LEFT  -> vy += 0.05
-        RIGHT -> vy -= 0.05
+        LEFT
+            vy += 0.05 m/s
+
+        RIGHT
+            vy -= 0.05 m/s
+
+        SPACE
+            request one finite-duration CoM push
+
+    The SPACE callback only creates a request.
+
+    The actual force is applied inside the deterministic
+    walking loop using logical simulation time.
     """
 
     def __init__(
@@ -582,6 +596,8 @@ class VelocityCommand:
 
         self._version = 0
 
+        self._push_request_count = 0
+
 
     def snapshot(
         self,
@@ -602,6 +618,10 @@ class VelocityCommand:
                 version=int(
                     self._version
                 ),
+
+                push_request_count=int(
+                    self._push_request_count
+                ),
             )
 
 
@@ -619,6 +639,20 @@ class VelocityCommand:
             old_y = (
                 self._y
             )
+
+            # =================================================
+            # MANUAL PUSH
+            # =================================================
+
+            if keycode == glfw.KEY_SPACE:
+
+                self._push_request_count += 1
+
+                return
+
+            # =================================================
+            # VELOCITY COMMAND
+            # =================================================
 
             if keycode == glfw.KEY_UP:
 
@@ -703,6 +737,7 @@ class VelocityCommand:
             )
 
             if changed:
+
                 self._version += 1
 
 
@@ -714,6 +749,7 @@ class VelocityCommand:
 class VisualWalkingState:
 
     phase: WalkingPhase
+
     support_side: str
 
 
@@ -725,6 +761,7 @@ class VisualWalkingState:
 class TimedFootstep:
 
     time: float
+
     footstep: PlannedFootstep
 
 
@@ -751,9 +788,13 @@ class RecentVisualHistory:
             )
 
         self.left_trail = deque()
+
         self.right_trail = deque()
+
         self.com_trail = deque()
+
         self.zmp_trail = deque()
+
         self.footsteps = deque()
 
 
@@ -814,7 +855,9 @@ class RecentVisualHistory:
         )
 
         while (
-            len(self.footsteps) > 0
+            len(
+                self.footsteps
+            ) > 0
             and
             self.footsteps[0].time
             <
@@ -886,12 +929,21 @@ class RecentVisualHistory:
         self.footsteps.append(
             TimedFootstep(
 
-                time=current_time,
+                time=(
+                    current_time
+                ),
 
                 footstep=PlannedFootstep(
+
                     side="left",
-                    position=p_left.copy(),
-                    rotation=R_left.copy(),
+
+                    position=(
+                        p_left.copy()
+                    ),
+
+                    rotation=(
+                        R_left.copy()
+                    ),
                 ),
             )
         )
@@ -899,12 +951,21 @@ class RecentVisualHistory:
         self.footsteps.append(
             TimedFootstep(
 
-                time=current_time,
+                time=(
+                    current_time
+                ),
 
                 footstep=PlannedFootstep(
+
                     side="right",
-                    position=p_right.copy(),
-                    rotation=R_right.copy(),
+
+                    position=(
+                        p_right.copy()
+                    ),
+
+                    rotation=(
+                        R_right.copy()
+                    ),
                 ),
             )
         )
@@ -978,11 +1039,15 @@ class RecentVisualHistory:
         self.footsteps.append(
             TimedFootstep(
 
-                time=current_time,
+                time=(
+                    current_time
+                ),
 
                 footstep=PlannedFootstep(
 
-                    side=side,
+                    side=(
+                        side
+                    ),
 
                     position=np.asarray(
                         position,
@@ -1052,9 +1117,11 @@ def opposite_side(
 ):
 
     if side == "left":
+
         return "right"
 
     if side == "right":
+
         return "left"
 
     raise ValueError(
@@ -1067,9 +1134,11 @@ def stance_leg_from_side(
 ):
 
     if side == "left":
+
         return StanceLeg.LEFT
 
     if side == "right":
+
         return StanceLeg.RIGHT
 
     raise ValueError(
@@ -1084,9 +1153,11 @@ def get_contact_position(
 ):
 
     if side == "left":
+
         return left_contact
 
     if side == "right":
+
         return right_contact
 
     raise ValueError(
@@ -1111,17 +1182,41 @@ def update_mujoco_from_pinocchio(
         q_mj
     )
 
-    # --------------------------------------------------------
-    # Kinematic set-state execution.
-    # No mj_step() during walking.
-    # --------------------------------------------------------
-
     mj_data.qvel[:] = 0.0
 
     mujoco.mj_forward(
         mj_model,
         mj_data,
     )
+
+
+# ============================================================
+# ROBOT MASS
+# ============================================================
+
+def compute_robot_mass(
+    mj_model,
+):
+
+    mass = float(
+        np.sum(
+            mj_model.body_mass
+        )
+    )
+
+    if (
+        not np.isfinite(
+            mass
+        )
+        or
+        mass <= 0.0
+    ):
+
+        raise RuntimeError(
+            f"Invalid robot mass: {mass}"
+        )
+
+    return mass
 
 
 # ============================================================
@@ -1133,31 +1228,14 @@ def configure_step_timing_viewer(
     viewer,
     walking_visualizer,
 ):
-    """
-    Configure only what is explicitly needed.
-
-    IMPORTANT:
-        viewer.opt.frame is NEVER touched here.
-
-    Therefore:
-        Rendering -> Frame
-
-    remains at MuJoCo's default setting.
-
-    Enabled Model Elements:
-        Contact Force
-        Transparent
-    """
 
     with viewer.lock():
 
-        # ====================================================
-        # KEEP THE EXISTING TRACKING CAMERA BEHAVIOR
+        # ----------------------------------------------------
+        # Camera tracking only.
         #
-        # This changes camera only.
-        #
-        # Rendering -> Frame is intentionally untouched.
-        # ====================================================
+        # viewer.opt.frame is intentionally NOT modified.
+        # ----------------------------------------------------
 
         viewer.cam.type = (
             mujoco.mjtCamera
@@ -1169,9 +1247,9 @@ def configure_step_timing_viewer(
             .base_body_id
         )
 
-        # ====================================================
-        # MODEL ELEMENTS
-        # ====================================================
+        # ----------------------------------------------------
+        # Model Elements
+        # ----------------------------------------------------
 
         viewer.opt.flags[
             mujoco.mjtVisFlag
@@ -1227,7 +1305,9 @@ def compute_nominal_steps(
     nominal_left = (
         compute_nominal_step(
 
-            planner=planner,
+            planner=(
+                planner
+            ),
 
             stance_side="left",
 
@@ -1244,7 +1324,9 @@ def compute_nominal_steps(
     nominal_right = (
         compute_nominal_step(
 
-            planner=planner,
+            planner=(
+                planner
+            ),
 
             stance_side="right",
 
@@ -1503,7 +1585,7 @@ def draw_adaptive_overlay(
         )
 
         # ====================================================
-        # CURRENT ADAPTIVE FOOTHOLD uT
+        # CURRENT ADAPTIVE FOOTHOLD
         # ====================================================
 
         if swing_side == "left":
@@ -1570,7 +1652,10 @@ def draw_recent_zmp_trail(
         .get_zmp_points()
     )
 
-    if len(points) < 2:
+    if len(
+        points
+    ) < 2:
+
         return
 
     with viewer.lock():
@@ -1588,7 +1673,7 @@ def draw_recent_zmp_trail(
 
 
 # ============================================================
-# USER SCENE GEOMETRY ALLOCATION
+# USER-SCENE GEOMETRY
 # ============================================================
 
 def allocate_user_geom(
@@ -1615,7 +1700,7 @@ def allocate_user_geom(
 
 
 # ============================================================
-# MUJOCO-NATIVE ARROW
+# NATIVE MUJOCO ARROW
 # ============================================================
 
 def add_mujoco_arrow(
@@ -1626,23 +1711,6 @@ def add_mujoco_arrow(
     width,
     rgba,
 ):
-    """
-    Add a native MuJoCo rendering arrow.
-
-    This uses:
-
-        mjGEOM_ARROW
-
-    together with:
-
-        mjv_connector()
-
-    rather than manually constructing an arrow from line
-    segments.
-
-    This is the same rendering-only arrow primitive used by
-    MuJoCo's abstract visualization for vector decorations.
-    """
 
     start = np.asarray(
         start,
@@ -1658,15 +1726,11 @@ def add_mujoco_arrow(
         3
     )
 
-    vector = (
-        end
-        -
-        start
-    )
-
     if (
         np.linalg.norm(
-            vector
+            end
+            -
+            start
         )
         <
         1.0e-10
@@ -1681,11 +1745,8 @@ def add_mujoco_arrow(
     )
 
     if geom is None:
-        return
 
-    # ========================================================
-    # INITIALIZE RENDERING-ONLY GEOMETRY
-    # ========================================================
+        return
 
     mujoco.mjv_initGeom(
 
@@ -1719,10 +1780,6 @@ def add_mujoco_arrow(
         ),
     )
 
-    # ========================================================
-    # CONNECT START -> END
-    # ========================================================
-
     if hasattr(
         mujoco,
         "mjv_connector",
@@ -1754,8 +1811,6 @@ def add_mujoco_arrow(
 
     else:
 
-        # Compatibility fallback for older MuJoCo versions.
-
         mujoco.mjv_makeConnector(
 
             geom,
@@ -1767,18 +1822,34 @@ def add_mujoco_arrow(
                 width
             ),
 
-            float(start[0]),
-            float(start[1]),
-            float(start[2]),
+            float(
+                start[0]
+            ),
 
-            float(end[0]),
-            float(end[1]),
-            float(end[2]),
+            float(
+                start[1]
+            ),
+
+            float(
+                start[2]
+            ),
+
+            float(
+                end[0]
+            ),
+
+            float(
+                end[1]
+            ),
+
+            float(
+                end[2]
+            ),
         )
 
 
 # ============================================================
-# DRAW ONE VELOCITY ARROW
+# VELOCITY ARROW
 # ============================================================
 
 def draw_velocity_arrow(
@@ -1818,15 +1889,12 @@ def draw_velocity_arrow(
         )
     )
 
-    # --------------------------------------------------------
-    # Zero velocity:
-    #
-    # simply no visible arrow.
-    #
-    # This has absolutely no effect on planner behaviour.
-    # --------------------------------------------------------
+    if (
+        speed
+        <
+        VELOCITY_ARROW_MIN_NORM
+    ):
 
-    if speed < VELOCITY_ARROW_MIN_NORM:
         return
 
     velocity_world = np.array(
@@ -1871,7 +1939,7 @@ def draw_velocity_arrow(
 
 
 # ============================================================
-# COMMAND + CURRENT VELOCITY ARROWS
+# COMMAND + ACTUAL VELOCITY ARROWS
 # ============================================================
 
 def draw_velocity_arrows(
@@ -1881,26 +1949,6 @@ def draw_velocity_arrows(
     command_velocity,
     current_velocity,
 ):
-    """
-    Both arrows:
-
-        - have exactly the same origin;
-        - are horizontal world-frame velocity vectors;
-        - change direction with velocity direction;
-        - change length with velocity magnitude.
-
-    BLUE:
-        command [vx_cmd, vy_cmd]
-
-    RED:
-        actual robot CoM velocity [vx, vy]
-
-    The blue arrow is thicker.
-    The red arrow is drawn afterwards and is thinner.
-
-    Therefore if the two vectors are exactly coincident,
-    the red arrow is visible inside the blue arrow.
-    """
 
     (
         trunk_position,
@@ -1919,30 +1967,13 @@ def draw_velocity_arrows(
         VELOCITY_ARROW_HEIGHT_OFFSET
     )
 
-    command_velocity = np.asarray(
-        command_velocity,
-        dtype=float,
-    ).reshape(
-        2
-    )
-
-    current_velocity = np.asarray(
-        current_velocity,
-        dtype=float,
-    ).reshape(
-        2
-    )
-
     with viewer.lock():
 
         scene = (
             viewer.user_scn
         )
 
-        # ====================================================
-        # BLUE COMMAND ARROW
-        # ====================================================
-
+        # Blue command arrow.
         draw_velocity_arrow(
 
             scene=(
@@ -1966,10 +1997,7 @@ def draw_velocity_arrows(
             ),
         )
 
-        # ====================================================
-        # RED ACTUAL VELOCITY ARROW
-        # ====================================================
-
+        # Red actual CoM velocity arrow.
         draw_velocity_arrow(
 
             scene=(
@@ -2044,10 +2072,6 @@ def start_new_step(
         )
     )
 
-    # ========================================================
-    # STEP LOCATION / TIMING QP
-    # ========================================================
-
     planner_result = (
         solve_adaptive_step(
 
@@ -2070,10 +2094,6 @@ def start_new_step(
             elapsed_time=0.0,
         )
     )
-
-    # ========================================================
-    # CURRENT SWING FOOT
-    # ========================================================
 
     if swing_side == "left":
 
@@ -2101,10 +2121,6 @@ def start_new_step(
             right_contact_position[2]
         )
 
-    # ========================================================
-    # LANDING TARGET
-    # ========================================================
-
     landing_position = (
         swing_start.copy()
     )
@@ -2122,10 +2138,6 @@ def start_new_step(
     landing_position[2] = (
         landing_z
     )
-
-    # ========================================================
-    # ONLINE SWING RESET
-    # ========================================================
 
     swing_trajectory.reset(
 
@@ -2156,7 +2168,104 @@ def start_new_step(
 
 
 # ============================================================
-# WALK
+# ADVANCE LIPM WITH OPTIONAL MANUAL PUSH
+# ============================================================
+
+def advance_lipm(
+    *,
+    lipm,
+    dt,
+    robot_mass,
+    push_time_remaining,
+):
+    """
+    Advance the LIPM for exactly dt.
+
+    If a manual push is active, apply the configured constant
+    force for as much of this interval as remains.
+
+    If the push ends inside the current DT, split the interval:
+
+        [forced part] + [nominal part]
+
+    so PUSH_DURATION is respected exactly.
+    """
+
+    dt = float(
+        dt
+    )
+
+    push_time_remaining = max(
+        0.0,
+        float(
+            push_time_remaining
+        ),
+    )
+
+    if (
+        push_time_remaining
+        <=
+        TIME_TOLERANCE
+    ):
+
+        lipm.advance(
+            dt
+        )
+
+        return 0.0
+
+    push_dt = min(
+        dt,
+        push_time_remaining,
+    )
+
+    force_xy = np.array(
+        [
+            PUSH_FORCE_X,
+            PUSH_FORCE_Y,
+        ],
+        dtype=float,
+    )
+
+    lipm.advance(
+
+        push_dt,
+
+        external_force_xy=(
+            force_xy
+        ),
+
+        mass=(
+            robot_mass
+        ),
+    )
+
+    remaining_dt = (
+        dt
+        -
+        push_dt
+    )
+
+    if (
+        remaining_dt
+        >
+        TIME_TOLERANCE
+    ):
+
+        lipm.advance(
+            remaining_dt
+        )
+
+    return max(
+        0.0,
+        push_time_remaining
+        -
+        push_dt,
+    )
+
+
+# ============================================================
+# RUN WALK
 # ============================================================
 
 def run_walk(
@@ -2169,6 +2278,16 @@ def run_walk(
     velocity_command,
     viewer,
 ):
+
+    # ========================================================
+    # ROBOT MASS FOR REDUCED-ORDER PUSH MODEL
+    # ========================================================
+
+    robot_mass = (
+        compute_robot_mass(
+            mj_model
+        )
+    )
 
     # ========================================================
     # INITIAL SETTLED CONFIGURATION
@@ -2264,7 +2383,7 @@ def run_walk(
     )
 
     # ========================================================
-    # INITIAL VELOCITY COMMAND
+    # INITIAL INPUT STATE
     # ========================================================
 
     command = (
@@ -2275,6 +2394,12 @@ def run_walk(
     command_version = (
         command.version
     )
+
+    processed_push_request_count = (
+        command.push_request_count
+    )
+
+    push_time_remaining = 0.0
 
     # ========================================================
     # INITIAL NOMINAL GAIT
@@ -2396,7 +2521,11 @@ def run_walk(
         )
     )
 
-    if initial_dcm_error > 1.0e-10:
+    if (
+        initial_dcm_error
+        >
+        1.0e-10
+    ):
 
         raise RuntimeError(
             "Initial DCM mismatch: "
@@ -2476,21 +2605,6 @@ def run_walk(
         robot
     )
 
-    # ========================================================
-    # IMPORTANT:
-    #
-    # DO NOT CALL:
-    #
-    #     walking_visualizer.configure_viewer(viewer)
-    #
-    # because that old function forces:
-    #
-    #     Rendering -> Frame -> Site
-    #
-    # Instead use our configuration below, which does NOT
-    # touch viewer.opt.frame.
-    # ========================================================
-
     configure_step_timing_viewer(
 
         viewer=(
@@ -2553,7 +2667,7 @@ def run_walk(
     )
 
     # ========================================================
-    # 4-SECOND VISUAL HISTORY
+    # RECENT VISUAL HISTORY
     # ========================================================
 
     visual_history = (
@@ -2584,12 +2698,12 @@ def run_walk(
     # ========================================================
 
     phase_time = 0.0
+
     kinematic_time = 0.0
 
     step_index = 1
 
     planner_frozen = False
-    disturbance_applied = False
 
     previous_com_actual = (
         initial_com_actual.copy()
@@ -2601,6 +2715,7 @@ def run_walk(
     )
 
     next_print_time = 0.0
+
     next_viewer_sync_time = 0.0
 
     wall_start = (
@@ -2643,6 +2758,23 @@ def run_walk(
         "  RIGHT : vy -0.05 m/s"
     )
 
+    print(
+        "  SPACE : apply one CoM push"
+    )
+
+    print()
+
+    print(
+        "Manual CoM push:"
+    )
+
+    print(
+        f"  F=({PUSH_FORCE_X:+.2f}, "
+        f"{PUSH_FORCE_Y:+.2f}) N"
+        f" | duration={PUSH_DURATION:.3f} s"
+        f" | robot mass={robot_mass:.3f} kg"
+    )
+
     print()
 
     print(
@@ -2666,16 +2798,21 @@ def run_walk(
     while True:
 
         if not viewer.is_running():
+
             break
 
         # ====================================================
-        # READ CURRENT COMMAND
+        # READ KEYBOARD INPUT
         # ====================================================
 
         latest_command = (
             velocity_command
             .snapshot()
         )
+
+        # ====================================================
+        # VELOCITY COMMAND CHANGED
+        # ====================================================
 
         if (
             latest_command.version
@@ -2718,6 +2855,29 @@ def run_walk(
                 current_nominal_step = (
                     nominal_right_step
                 )
+
+        # ====================================================
+        # SPACE PRESSED
+        #
+        # Start/restart one finite-duration push.
+        #
+        # No wall-clock timing is used.
+        # ====================================================
+
+        if (
+            latest_command.push_request_count
+            !=
+            processed_push_request_count
+        ):
+
+            processed_push_request_count = (
+                latest_command
+                .push_request_count
+            )
+
+            push_time_remaining = (
+                PUSH_DURATION
+            )
 
         # ====================================================
         # CURRENT LIPM
@@ -2785,10 +2945,6 @@ def run_walk(
                     right_rotation.copy()
                 )
 
-            # =================================================
-            # SAVE COMPLETED FOOTSTEP
-            # =================================================
-
             visual_history.add_footstep(
 
                 current_time=(
@@ -2811,7 +2967,10 @@ def run_walk(
             # =================================================
             # SUPPORT SWITCH
             #
-            # u0(k+1) = uT(k)
+            # The manual push is NOT reset here.
+            #
+            # If its 50 ms interval crosses touchdown,
+            # it continues across the support switch.
             # =================================================
 
             stance_side = (
@@ -2835,7 +2994,6 @@ def run_walk(
             phase_time = 0.0
 
             planner_frozen = False
-            disturbance_applied = False
 
             (
                 swing_side,
@@ -2882,33 +3040,6 @@ def run_walk(
                         lipm_sample.dcm
                     ),
                 )
-            )
-
-        # ====================================================
-        # OPTIONAL DCM DISTURBANCE
-        # ====================================================
-
-        if (
-            ENABLE_DISTURBANCE
-            and
-            not disturbance_applied
-            and
-            phase_time
-            >=
-            DISTURBANCE_TIME
-            -
-            TIME_TOLERANCE
-        ):
-
-            lipm.apply_dcm_disturbance(
-                DISTURBANCE_DCM_X,
-                DISTURBANCE_DCM_Y,
-            )
-
-            disturbance_applied = True
-
-            lipm_sample = (
-                lipm.sample()
             )
 
         # ====================================================
@@ -3043,7 +3174,7 @@ def run_walk(
         )
 
         # ====================================================
-        # ONLINE SWING REFERENCE
+        # ONLINE SWING
         # ====================================================
 
         swing_sample = (
@@ -3120,11 +3251,6 @@ def run_walk(
 
         # ====================================================
         # DIFFERENTIAL IK
-        #
-        # P1: support foot
-        # P2: CoM
-        # P3: swing foot
-        # P4: full trunk orientation
         # ====================================================
 
         (
@@ -3289,7 +3415,7 @@ def run_walk(
         )
 
         # ====================================================
-        # TERMINAL
+        # TERMINAL STATUS
         # ====================================================
 
         if (
@@ -3299,6 +3425,18 @@ def run_walk(
             -
             TIME_TOLERANCE
         ):
+
+            if (
+                push_time_remaining
+                >
+                TIME_TOLERANCE
+            ):
+
+                push_text = "ON"
+
+            else:
+
+                push_text = "OFF"
 
             print(
                 f"t={kinematic_time:7.3f}"
@@ -3313,6 +3451,7 @@ def run_walk(
                 f" | vCoM="
                 f"({com_velocity_actual[0]:+.4f},"
                 f"{com_velocity_actual[1]:+.4f}) m/s"
+                f" | push={push_text}"
             )
 
             next_print_time += (
@@ -3330,10 +3469,6 @@ def run_walk(
             -
             TIME_TOLERANCE
         ):
-
-            # =================================================
-            # 4-SECOND HISTORY
-            # =================================================
 
             visual_history.record(
 
@@ -3355,10 +3490,6 @@ def run_walk(
                 walking_visualizer
             )
 
-            # =================================================
-            # GAIT STATE
-            # =================================================
-
             visual_state = (
                 VisualWalkingState(
 
@@ -3373,10 +3504,6 @@ def run_walk(
                 )
             )
 
-            # =================================================
-            # STANDARD WALKING VISUALIZATION
-            # =================================================
-
             walking_visualizer.update(
 
                 viewer,
@@ -3385,10 +3512,6 @@ def run_walk(
 
                 visual_state,
             )
-
-            # =================================================
-            # RECENT ZMP
-            # =================================================
 
             draw_recent_zmp_trail(
 
@@ -3400,10 +3523,6 @@ def run_walk(
                     visual_history
                 ),
             )
-
-            # =================================================
-            # LIPM COM / DCM / uT
-            # =================================================
 
             draw_adaptive_overlay(
 
@@ -3440,18 +3559,6 @@ def run_walk(
                 ),
             )
 
-            # =================================================
-            # NATIVE MUJOCO VELOCITY ARROWS
-            #
-            # Both originate from the same point above trunk.
-            #
-            # BLUE:
-            #     command
-            #
-            # RED:
-            #     actual robot CoM velocity
-            # =================================================
-
             draw_velocity_arrows(
 
                 viewer=(
@@ -3479,12 +3586,6 @@ def run_walk(
                 ),
             )
 
-            # =================================================
-            # CURRENT ZMP
-            #
-            # This function calls viewer.sync().
-            # =================================================
-
             zmp_visualizer.draw_overlay(
                 viewer
             )
@@ -3495,10 +3596,30 @@ def run_walk(
 
         # ====================================================
         # EXACT LIPM PROPAGATION
+        #
+        # If SPACE was pressed, the configured push force is
+        # applied during this propagation interval.
         # ====================================================
 
-        lipm.advance(
-            DT
+        push_time_remaining = (
+            advance_lipm(
+
+                lipm=(
+                    lipm
+                ),
+
+                dt=(
+                    DT
+                ),
+
+                robot_mass=(
+                    robot_mass
+                ),
+
+                push_time_remaining=(
+                    push_time_remaining
+                ),
+            )
         )
 
         # ====================================================
@@ -3597,7 +3718,7 @@ def main():
     )
 
     # ========================================================
-    # INITIAL PHYSICAL SETTLING ONLY
+    # INITIAL PHYSICAL SETTLING
     # ========================================================
 
     settle_robot(
@@ -3729,7 +3850,7 @@ def main():
     )
 
     # ========================================================
-    # KEYBOARD VELOCITY COMMAND
+    # KEYBOARD INPUT
     # ========================================================
 
     velocity_command = (
