@@ -141,7 +141,7 @@ DT = 0.0005
 FIRST_STANCE_SIDE = "left"
 
 DESIRED_VELOCITY_X = 0.10
-DESIRED_VELOCITY_Y = 0.00
+DESIRED_VELOCITY_Y = 0.05
 
 
 # ============================================================
