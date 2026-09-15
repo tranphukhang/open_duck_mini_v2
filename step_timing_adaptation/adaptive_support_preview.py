@@ -21,207 +21,275 @@ DOUBLE_SUPPORT = "DOUBLE_SUPPORT"
 
 
 # ============================================================
-# ADAPTIVE ONE-STEP SUPPORT PREVIEW
+# HELPERS
+# ============================================================
+
+def _opposite_side(
+    side: str,
+) -> str:
+
+    if side == "left":
+        return "right"
+
+    if side == "right":
+        return "left"
+
+    raise ValueError(
+        f"Invalid side: {side}"
+    )
+
+
+def _get_contact(
+    side,
+    left_contact,
+    right_contact,
+):
+
+    if side == "left":
+        return left_contact
+
+    if side == "right":
+        return right_contact
+
+    raise ValueError(
+        f"Invalid side: {side}"
+    )
+
+
+def _compute_nominal_target(
+    *,
+    stance_side,
+    left_contact,
+    right_contact,
+    nominal_left_step_displacement,
+    nominal_right_step_displacement,
+):
+
+    if stance_side == "left":
+
+        support = (
+            left_contact
+        )
+
+        swing_contact = (
+            right_contact
+        )
+
+        displacement = (
+            nominal_left_step_displacement
+        )
+
+    elif stance_side == "right":
+
+        support = (
+            right_contact
+        )
+
+        swing_contact = (
+            left_contact
+        )
+
+        displacement = (
+            nominal_right_step_displacement
+        )
+
+    else:
+
+        raise ValueError(
+            f"Invalid stance_side: {stance_side}"
+        )
+
+    target = (
+        swing_contact.copy()
+    )
+
+    target[0] = (
+        support[0]
+        +
+        displacement[0]
+    )
+
+    target[1] = (
+        support[1]
+        +
+        displacement[1]
+    )
+
+    # Flat ground:
+    # retain the swing-foot contact height.
+    target[2] = (
+        swing_contact[2]
+    )
+
+    return target
+
+
+def _nominal_step_time(
+    stance_side,
+    nominal_left_step_time,
+    nominal_right_step_time,
+):
+
+    if stance_side == "left":
+
+        return float(
+            nominal_left_step_time
+        )
+
+    if stance_side == "right":
+
+        return float(
+            nominal_right_step_time
+        )
+
+    raise ValueError(
+        f"Invalid stance_side: {stance_side}"
+    )
+
+
+# ============================================================
+# MULTI-STEP ADAPTIVE SUPPORT PREVIEW
 # ============================================================
 
 def build_adaptive_support_preview(
     *,
-    current_phase: str,
-    phase_time: float,
+    current_phase,
+    phase_time,
 
-    initial_double_support_duration: float,
-    single_support_duration: float,
+    initial_double_support_duration,
+    double_support_duration,
 
-    stance_side: str,
+    current_single_support_duration,
 
-    left_initial_position,
-    right_initial_position,
+    stance_side,
+    swing_side,
 
-    landing_position,
+    left_contact_position,
+    right_contact_position,
+
+    current_landing_position,
+
+    nominal_left_step_displacement,
+    nominal_right_step_displacement,
+
+    nominal_left_step_time,
+    nominal_right_step_time,
 
     left_rotation,
     right_rotation,
 
-    timestep: float,
-    horizon_steps: int,
+    timestep,
+    horizon_steps,
 
-    foot_toe: float,
-    foot_heel: float,
-    foot_half_width: float,
+    foot_toe,
+    foot_heel,
+    foot_half_width,
 
-    zmp_scale: float,
+    zmp_scale,
 
-    single_support_zmp_half_width: float,
+    single_support_zmp_half_width,
 ) -> SupportPreview:
     """
-    Build the future support preview for one adaptive step.
+    Multi-step support preview for adaptive walking.
 
-    Phase sequence:
+    Current adaptive step:
+        uses current_landing_position
+        and current_single_support_duration.
 
-        INITIAL DOUBLE SUPPORT
-                |
-                v
-        SINGLE SUPPORT
-        duration = adaptive T
-                |
-                v
-        DOUBLE SUPPORT AFTER TOUCHDOWN
+    Future steps:
+        use nominal step displacement and nominal timing.
 
+    Sequence:
 
-    IMPORTANT MODEL CONSISTENCY
-    ---------------------------
+        INITIAL DS
+            ->
+        SS
+            ->
+        DS
+            ->
+        SS
+            ->
+        DS
+            -> ...
 
-    During DOUBLE SUPPORT:
+    During SS:
 
-        ZMP is allowed to move inside the support polygon.
+        p_ZMP ~= stance foot
 
-    During SINGLE SUPPORT:
-
-        ZMP is constrained to a very small box around
-        the stance-foot reference point u0:
-
-            u0_x - eps <= ZMP_x <= u0_x + eps
-            u0_y - eps <= ZMP_y <= u0_y + eps
-
-    Therefore approximately:
-
-        p_ZMP = u0
-
-    and the LIPM DCM dynamics become:
-
-        xi_dot = omega * (xi - u0)
-
-    which is consistent with the model used by the
+    to remain consistent with the DCM model used by the
     Step Timing Adaptation planner.
-
-    The true support polygon is still stored in
-    SupportPreview.polygons for diagnostics / visualization.
     """
 
     # ========================================================
-    # INPUTS
+    # INPUT CONVERSION
     # ========================================================
 
     phase = str(
         current_phase
     )
 
-    stance_side = str(
-        stance_side
-    ).strip().lower()
-
-    if stance_side not in (
-        "left",
-        "right",
-    ):
-        raise ValueError(
-            "stance_side must be 'left' or 'right'."
-        )
-
-    phase_time = float(
+    elapsed = float(
         phase_time
     )
 
-    initial_double_support_duration = float(
-        initial_double_support_duration
-    )
+    stance = str(
+        stance_side
+    ).lower()
 
-    single_support_duration = float(
-        single_support_duration
-    )
+    swing = str(
+        swing_side
+    ).lower()
 
-    timestep = float(
-        timestep
-    )
-
-    horizon_steps = int(
-        horizon_steps
-    )
-
-    zmp_scale = float(
-        zmp_scale
-    )
-
-    single_support_zmp_half_width = float(
-        single_support_zmp_half_width
-    )
-
-    if phase_time < 0.0:
-
-        raise ValueError(
-            "phase_time must be >= 0."
-        )
-
-    if initial_double_support_duration < 0.0:
-
-        raise ValueError(
-            "initial_double_support_duration must be >= 0."
-        )
-
-    if single_support_duration <= 0.0:
-
-        raise ValueError(
-            "single_support_duration must be positive."
-        )
-
-    if timestep <= 0.0:
-
-        raise ValueError(
-            "timestep must be positive."
-        )
-
-    if horizon_steps < 1:
-
-        raise ValueError(
-            "horizon_steps must be >= 1."
-        )
-
-    if not (
-        0.0
-        <
-        zmp_scale
-        <=
-        1.0
+    if stance not in (
+        "left",
+        "right",
     ):
 
         raise ValueError(
-            "zmp_scale must satisfy 0 < zmp_scale <= 1."
+            "stance_side must be left or right."
         )
 
-    if (
-        single_support_zmp_half_width
-        <=
-        0.0
+    if swing != _opposite_side(
+        stance
     ):
 
         raise ValueError(
-            "single_support_zmp_half_width "
-            "must be positive."
+            "swing_side must be opposite stance_side."
         )
 
-    # ========================================================
-    # POSES
-    # ========================================================
-
-    left_initial_position = np.asarray(
-        left_initial_position,
+    left_contact = np.asarray(
+        left_contact_position,
         dtype=float,
     ).reshape(
         3
+    ).copy()
+
+    right_contact = np.asarray(
+        right_contact_position,
+        dtype=float,
+    ).reshape(
+        3
+    ).copy()
+
+    landing = np.asarray(
+        current_landing_position,
+        dtype=float,
+    ).reshape(
+        3
+    ).copy()
+
+    nominal_left_disp = np.asarray(
+        nominal_left_step_displacement,
+        dtype=float,
+    ).reshape(
+        2
     )
 
-    right_initial_position = np.asarray(
-        right_initial_position,
+    nominal_right_disp = np.asarray(
+        nominal_right_step_displacement,
         dtype=float,
     ).reshape(
-        3
-    )
-
-    landing_position = np.asarray(
-        landing_position,
-        dtype=float,
-    ).reshape(
-        3
+        2
     )
 
     left_rotation = np.asarray(
@@ -240,458 +308,520 @@ def build_adaptive_support_preview(
         3,
     )
 
-    # ========================================================
-    # STANCE POINT u0
-    #
-    # This is the same support point supplied to:
-    #
-    #     AdaptiveStepPlanner.solve_adaptive_step(...)
-    #
-    # ========================================================
-
-    if stance_side == "left":
-
-        stance_position = (
-            left_initial_position
-        )
-
-    else:
-
-        stance_position = (
-            right_initial_position
-        )
-
-    stance_xy = (
-        stance_position[
-            0:2
-        ].copy()
+    dt = float(
+        timestep
     )
 
+    N = int(
+        horizon_steps
+    )
+
+    initial_ds_duration = float(
+        initial_double_support_duration
+    )
+
+    ds_duration = float(
+        double_support_duration
+    )
+
+    ss_duration = float(
+        current_single_support_duration
+    )
+
+    epsilon = float(
+        single_support_zmp_half_width
+    )
+
+    if phase not in (
+        INITIAL_DOUBLE_SUPPORT,
+        SINGLE_SUPPORT,
+        DOUBLE_SUPPORT,
+    ):
+
+        raise ValueError(
+            f"Unsupported phase: {phase}"
+        )
+
+    if elapsed < 0.0:
+
+        raise ValueError(
+            "phase_time must be >= 0."
+        )
+
+    if initial_ds_duration <= 0.0:
+
+        raise ValueError(
+            "initial_double_support_duration "
+            "must be positive."
+        )
+
+    if ds_duration <= 0.0:
+
+        raise ValueError(
+            "double_support_duration "
+            "must be positive."
+        )
+
+    if ss_duration <= 0.0:
+
+        raise ValueError(
+            "current_single_support_duration "
+            "must be positive."
+        )
+
+    if dt <= 0.0:
+
+        raise ValueError(
+            "timestep must be positive."
+        )
+
+    if N < 1:
+
+        raise ValueError(
+            "horizon_steps must be >= 1."
+        )
+
+    if epsilon <= 0.0:
+
+        raise ValueError(
+            "single_support_zmp_half_width "
+            "must be positive."
+        )
+
     # ========================================================
-    # TIME VECTOR
-    #
-    # preview[k] corresponds to:
-    #
-    #     t_current + (k + 1) * timestep
-    #
-    # exactly like lipm_mpc.support_preview.
+    # STORAGE
     # ========================================================
 
     times = (
         (
             np.arange(
-                horizon_steps,
+                N,
                 dtype=float,
             )
             +
             1.0
         )
         *
-        timestep
+        dt
     )
 
-    # ========================================================
-    # STORAGE
-    # ========================================================
-
     x_min_values = np.zeros(
-        horizon_steps,
+        N,
         dtype=float,
     )
 
     x_max_values = np.zeros(
-        horizon_steps,
+        N,
         dtype=float,
     )
 
     y_min_values = np.zeros(
-        horizon_steps,
+        N,
         dtype=float,
     )
 
     y_max_values = np.zeros(
-        horizon_steps,
+        N,
         dtype=float,
     )
 
     phase_values = []
-
     support_values = []
-
     polygons = []
+
+    # ========================================================
+    # SIMULATED PREVIEW STATE
+    # ========================================================
+
+    preview_phase = (
+        phase
+    )
+
+    preview_phase_time = (
+        elapsed
+    )
+
+    preview_stance = (
+        stance
+    )
+
+    preview_swing = (
+        swing
+    )
+
+    preview_ss_duration = (
+        ss_duration
+    )
+
+    preview_landing = (
+        landing.copy()
+    )
+
+    tolerance = (
+        1.0e-12
+    )
 
     # ========================================================
     # PREVIEW LOOP
     # ========================================================
 
     for k in range(
-        horizon_steps
+        N
     ):
 
-        future_time = (
-            (
-                k
-                +
-                1
-            )
-            *
-            timestep
+        remaining_dt = (
+            dt
         )
 
-        # ====================================================
-        # FUTURE PHASE
-        # ====================================================
+        # ----------------------------------------------------
+        # Advance phase state by one MPC preview timestep.
+        # ----------------------------------------------------
 
-        if (
-            phase
-            ==
-            INITIAL_DOUBLE_SUPPORT
+        while (
+            remaining_dt
+            >
+            tolerance
         ):
 
-            future_initial_ds_time = (
-                phase_time
-                +
-                future_time
-            )
-
-            # ------------------------------------------------
-            # Still in initial DS
-            # ------------------------------------------------
-
             if (
-                future_initial_ds_time
-                <
-                initial_double_support_duration
+                preview_phase
+                ==
+                INITIAL_DOUBLE_SUPPORT
             ):
 
-                future_phase = (
-                    DOUBLE_SUPPORT
+                phase_duration = (
+                    initial_ds_duration
                 )
 
-                future_support_side = (
-                    "both"
+            elif (
+                preview_phase
+                ==
+                SINGLE_SUPPORT
+            ):
+
+                phase_duration = (
+                    preview_ss_duration
                 )
 
-                future_left_position = (
-                    left_initial_position
-                )
+            elif (
+                preview_phase
+                ==
+                DOUBLE_SUPPORT
+            ):
 
-                future_right_position = (
-                    right_initial_position
+                phase_duration = (
+                    ds_duration
                 )
-
-            # ------------------------------------------------
-            # Initial DS has ended
-            # ------------------------------------------------
 
             else:
 
-                future_ss_time = (
-                    future_initial_ds_time
-                    -
-                    initial_double_support_duration
+                raise RuntimeError(
+                    "Invalid preview phase."
                 )
 
-                # --------------------------------------------
-                # Future sample lies inside SS
-                # --------------------------------------------
-
-                if (
-                    future_ss_time
-                    <
-                    single_support_duration
-                ):
-
-                    future_phase = (
-                        SINGLE_SUPPORT
-                    )
-
-                    future_support_side = (
-                        stance_side
-                    )
-
-                    future_left_position = (
-                        left_initial_position
-                    )
-
-                    future_right_position = (
-                        right_initial_position
-                    )
-
-                # --------------------------------------------
-                # Future sample lies after touchdown
-                # --------------------------------------------
-
-                else:
-
-                    future_phase = (
-                        DOUBLE_SUPPORT
-                    )
-
-                    future_support_side = (
-                        "both"
-                    )
-
-                    if stance_side == "left":
-
-                        future_left_position = (
-                            left_initial_position
-                        )
-
-                        future_right_position = (
-                            landing_position
-                        )
-
-                    else:
-
-                        future_left_position = (
-                            landing_position
-                        )
-
-                        future_right_position = (
-                            right_initial_position
-                        )
-
-        # ====================================================
-        # CURRENTLY IN SINGLE SUPPORT
-        # ====================================================
-
-        elif (
-            phase
-            ==
-            SINGLE_SUPPORT
-        ):
-
-            future_ss_time = (
-                phase_time
-                +
-                future_time
+            time_to_transition = (
+                phase_duration
+                -
+                preview_phase_time
             )
 
             # ------------------------------------------------
-            # Still in current SS
+            # Still inside current phase.
             # ------------------------------------------------
 
             if (
-                future_ss_time
+                remaining_dt
                 <
-                single_support_duration
+                time_to_transition
+                -
+                tolerance
             ):
 
-                future_phase = (
+                preview_phase_time += (
+                    remaining_dt
+                )
+
+                remaining_dt = (
+                    0.0
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # Reach phase boundary.
+            # ------------------------------------------------
+
+            remaining_dt -= max(
+                time_to_transition,
+                0.0,
+            )
+
+            preview_phase_time = (
+                0.0
+            )
+
+            # =================================================
+            # INITIAL DS -> FIRST SS
+            # =================================================
+
+            if (
+                preview_phase
+                ==
+                INITIAL_DOUBLE_SUPPORT
+            ):
+
+                preview_phase = (
                     SINGLE_SUPPORT
                 )
 
-                future_support_side = (
-                    stance_side
-                )
+                # Keep:
+                #
+                #   preview_landing
+                #   preview_ss_duration
+                #
+                # supplied by the current runtime state.
 
-                future_left_position = (
-                    left_initial_position
-                )
+            # =================================================
+            # SS -> DS
+            # =================================================
 
-                future_right_position = (
-                    right_initial_position
-                )
+            elif (
+                preview_phase
+                ==
+                SINGLE_SUPPORT
+            ):
 
-            # ------------------------------------------------
-            # After touchdown
-            # ------------------------------------------------
+                # Commit predicted touchdown.
 
-            else:
+                if (
+                    preview_swing
+                    ==
+                    "left"
+                ):
 
-                future_phase = (
-                    DOUBLE_SUPPORT
-                )
-
-                future_support_side = (
-                    "both"
-                )
-
-                if stance_side == "left":
-
-                    future_left_position = (
-                        left_initial_position
-                    )
-
-                    future_right_position = (
-                        landing_position
+                    left_contact = (
+                        preview_landing.copy()
                     )
 
                 else:
 
-                    future_left_position = (
-                        landing_position
+                    right_contact = (
+                        preview_landing.copy()
                     )
 
-                    future_right_position = (
-                        right_initial_position
+                # Landed foot becomes next stance.
+
+                preview_stance = (
+                    preview_swing
+                )
+
+                preview_swing = (
+                    _opposite_side(
+                        preview_stance
                     )
+                )
 
-        else:
+                # Create nominal NEXT landing target.
 
-            raise ValueError(
-                f"Unsupported current_phase: "
-                f"{phase}"
-            )
+                preview_landing = (
+                    _compute_nominal_target(
+                        stance_side=(
+                            preview_stance
+                        ),
+
+                        left_contact=(
+                            left_contact
+                        ),
+
+                        right_contact=(
+                            right_contact
+                        ),
+
+                        nominal_left_step_displacement=(
+                            nominal_left_disp
+                        ),
+
+                        nominal_right_step_displacement=(
+                            nominal_right_disp
+                        ),
+                    )
+                )
+
+                preview_ss_duration = (
+                    _nominal_step_time(
+                        preview_stance,
+                        nominal_left_step_time,
+                        nominal_right_step_time,
+                    )
+                )
+
+                preview_phase = (
+                    DOUBLE_SUPPORT
+                )
+
+            # =================================================
+            # DS -> NEXT SS
+            # =================================================
+
+            elif (
+                preview_phase
+                ==
+                DOUBLE_SUPPORT
+            ):
+
+                preview_phase = (
+                    SINGLE_SUPPORT
+                )
 
         # ====================================================
-        # TRUE SUPPORT POLYGON
-        #
-        # Keep this even during SS for diagnostics and future
-        # visualization.
-        # ====================================================
-
-        polygon = (
-            compute_support_polygon(
-                left_position=(
-                    future_left_position
-                ),
-
-                left_rotation=(
-                    left_rotation
-                ),
-
-                right_position=(
-                    future_right_position
-                ),
-
-                right_rotation=(
-                    right_rotation
-                ),
-
-                phase=(
-                    future_phase
-                ),
-
-                support_side=(
-                    future_support_side
-                ),
-
-                foot_toe=(
-                    foot_toe
-                ),
-
-                foot_heel=(
-                    foot_heel
-                ),
-
-                foot_half_width=(
-                    foot_half_width
-                ),
-            )
-        )
-
-        # ====================================================
-        # MPC ZMP BOUNDS
+        # SUPPORT POLYGON AT THIS PREVIEW SAMPLE
         # ====================================================
 
         if (
-            future_phase
+            preview_phase
             ==
             SINGLE_SUPPORT
         ):
 
-            # ------------------------------------------------
-            # Khadiv-compatible SS model:
-            #
-            #       p_ZMP ~= u0
-            #
-            # LIPMMPC1D requires strict:
-            #
-            #       lower < upper
-            #
-            # so a tiny interval is used instead of an exact
-            # equality constraint.
-            # ------------------------------------------------
+            support_side = (
+                preview_stance
+            )
 
-            epsilon = (
-                single_support_zmp_half_width
+        else:
+
+            support_side = (
+                "both"
+            )
+
+        polygon = compute_support_polygon(
+            left_position=(
+                left_contact
+            ),
+
+            left_rotation=(
+                left_rotation
+            ),
+
+            right_position=(
+                right_contact
+            ),
+
+            right_rotation=(
+                right_rotation
+            ),
+
+            phase=(
+                preview_phase
+                if
+                preview_phase
+                ==
+                SINGLE_SUPPORT
+                else
+                DOUBLE_SUPPORT
+            ),
+
+            support_side=(
+                support_side
+            ),
+
+            foot_toe=(
+                foot_toe
+            ),
+
+            foot_heel=(
+                foot_heel
+            ),
+
+            foot_half_width=(
+                foot_half_width
+            ),
+        )
+
+        # ====================================================
+        # ZMP CONSTRAINTS
+        # ====================================================
+
+        if (
+            preview_phase
+            ==
+            SINGLE_SUPPORT
+        ):
+
+            stance_contact = (
+                _get_contact(
+                    preview_stance,
+                    left_contact,
+                    right_contact,
+                )
             )
 
             x_min = (
-                stance_xy[0]
+                stance_contact[0]
                 -
                 epsilon
             )
 
             x_max = (
-                stance_xy[0]
+                stance_contact[0]
                 +
                 epsilon
             )
 
             y_min = (
-                stance_xy[1]
+                stance_contact[1]
                 -
                 epsilon
             )
 
             y_max = (
-                stance_xy[1]
+                stance_contact[1]
                 +
                 epsilon
             )
 
         else:
-
-            # ------------------------------------------------
-            # Double support:
-            #
-            # MPC may exploit the physical support region.
-            # ------------------------------------------------
 
             (
                 x_min,
                 x_max,
                 y_min,
                 y_max,
-            ) = (
-                compute_support_bounds(
-                    polygon=(
-                        polygon
-                    ),
+            ) = compute_support_bounds(
+                polygon=(
+                    polygon
+                ),
 
-                    zmp_scale=(
-                        zmp_scale
-                    ),
-                )
+                zmp_scale=(
+                    zmp_scale
+                ),
             )
 
         # ====================================================
         # STORE
         # ====================================================
 
-        x_min_values[
-            k
-        ] = (
+        x_min_values[k] = (
             x_min
         )
 
-        x_max_values[
-            k
-        ] = (
+        x_max_values[k] = (
             x_max
         )
 
-        y_min_values[
-            k
-        ] = (
+        y_min_values[k] = (
             y_min
         )
 
-        y_max_values[
-            k
-        ] = (
+        y_max_values[k] = (
             y_max
         )
 
         phase_values.append(
-            future_phase
+            preview_phase
         )
 
         support_values.append(
-            future_support_side
+            support_side
         )
 
         polygons.append(

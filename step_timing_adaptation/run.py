@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-import math
 import time
 from pathlib import Path
 
@@ -26,28 +25,28 @@ ROOT_DIR = (
     CURRENT_DIR.parent
 )
 
-if str(ROOT_DIR) not in sys.path:
+if str(
+    ROOT_DIR
+) not in sys.path:
 
     sys.path.insert(
         0,
-        str(ROOT_DIR),
+        str(
+            ROOT_DIR
+        ),
     )
 
 
 ROBOT_XML = (
     ROOT_DIR
-    /
-    "xmls"
-    /
-    "open_duck_mini_v2.xml"
+    / "xmls"
+    / "open_duck_mini_v2.xml"
 )
 
 SCENE_XML = (
     ROOT_DIR
-    /
-    "xmls"
-    /
-    "scene_flat_terrain.xml"
+    / "xmls"
+    / "scene_flat_terrain.xml"
 )
 
 
@@ -63,15 +62,15 @@ if __package__:
         StanceLeg,
     )
 
-    from .swing_trajectory import (
-        OnlineSwingFootTrajectory,
-        VerticalSwingQPParameters,
-    )
-
     from .adaptive_support_preview import (
         INITIAL_DOUBLE_SUPPORT,
         SINGLE_SUPPORT,
+        DOUBLE_SUPPORT,
         build_adaptive_support_preview,
+    )
+
+    from .online_swing_trajectory import (
+        OnlineQuinticSwingTrajectory,
     )
 
 else:
@@ -82,20 +81,20 @@ else:
         StanceLeg,
     )
 
-    from swing_trajectory import (
-        OnlineSwingFootTrajectory,
-        VerticalSwingQPParameters,
-    )
-
     from adaptive_support_preview import (
         INITIAL_DOUBLE_SUPPORT,
         SINGLE_SUPPORT,
+        DOUBLE_SUPPORT,
         build_adaptive_support_preview,
+    )
+
+    from online_swing_trajectory import (
+        OnlineQuinticSwingTrajectory,
     )
 
 
 # ============================================================
-# REUSE EXISTING LIPM-MPC
+# REUSE LIPM-MPC
 # ============================================================
 
 from lipm_mpc.lipm_model import (
@@ -112,7 +111,7 @@ from lipm_mpc.com_trajectory import (
 
 
 # ============================================================
-# REUSE EXISTING WHOLE-BODY KINEMATICS
+# REUSE WHOLE-BODY KINEMATICS
 # ============================================================
 
 from footstep_planning.pinocchio_model import (
@@ -126,10 +125,6 @@ from footstep_planning.differential_ik import (
 )
 
 
-# ============================================================
-# NUMPY
-# ============================================================
-
 np.set_printoptions(
     precision=6,
     suppress=True,
@@ -137,65 +132,36 @@ np.set_printoptions(
 
 
 # ============================================================
-# TEST
-#
-# Current scope:
-#
-#       INITIAL DS
-#           |
-#           v
-#       LEFT SUPPORT
-#       RIGHT SWING
-#           |
-#           v
-#       TOUCHDOWN
-#
-# One adaptive step only.
+# WALKING TEST
 # ============================================================
 
-STANCE_LEG = (
-    StanceLeg.LEFT
-)
+WALK_DURATION = 5.0
 
-STANCE_SIDE = (
-    "left"
-)
-
-SWING_SIDE = (
-    "right"
-)
+FIRST_STANCE_SIDE = "left"
 
 
 # ============================================================
 # EXECUTOR
-#
-# Pure kinematic execution.
-#
-# NO mj_step().
-# NO rigid-body dynamics.
 # ============================================================
 
 DT = 0.0005
-# 2000 Hz differential IK / set-state
 
 
 # ============================================================
-# INITIAL DOUBLE SUPPORT
-#
-# Same purpose as lipm_mpc:
-# allow MPC to move the CoM toward the future support foot
-# before single support begins.
-#
-# This phase is still purely kinematic.
+# GAIT TIMING
 # ============================================================
 
 INITIAL_DOUBLE_SUPPORT_DURATION = (
     0.36
 )
 
+DOUBLE_SUPPORT_DURATION = (
+    0.27
+)
+
 
 # ============================================================
-# LIPM / PLANNER
+# LIPM / STEP PLANNER
 # ============================================================
 
 GRAVITY = 9.81
@@ -203,7 +169,6 @@ GRAVITY = 9.81
 COM_HEIGHT = 0.2044
 
 DESIRED_VELOCITY_X = 0.05
-
 DESIRED_VELOCITY_Y = 0.0
 
 DEFAULT_STEP_WIDTH = 0.16
@@ -224,58 +189,26 @@ STEP_TIME_MAX = 0.30
 
 
 # ============================================================
-# STEP QP
+# STEP ADAPTATION QP
 # ============================================================
 
 STEP_QP_ALPHA_LOCATION = 1.0
-
 STEP_QP_ALPHA_TIMING = 5.0
-
 STEP_QP_ALPHA_DCM = 1000.0
-
 STEP_QP_ALPHA_VIABILITY = 1.0e6
 
-STEP_TIMING_GAP = 0.02
+STEP_TIMING_GAP = 0.05
 
 
 # ============================================================
-# PLANNER RATE
+# SWING
 # ============================================================
 
-PLANNER_UPDATE_FREQUENCY = 1.0 / DT
-
-PLANNER_UPDATE_PERIOD = DT
-
-
-# ============================================================
-# SWING TRAJECTORY
-# ============================================================
-
-SWING_HEIGHT_DESIRED = 0.03
-
-SWING_HEIGHT_MAX = 0.04
-
-SWING_VERTICAL_CONSTRAINT_SAMPLES = (
-    41
-)
-
-SWING_VERTICAL_COEFFICIENT_REGULARIZATION = (
-    1.0e-6
-)
-
-SWING_VERTICAL_BOUND_TOLERANCE = (
-    1.0e-9
-)
-
-SWING_VERTICAL_MAX_REFINEMENTS = (
-    8
-)
+SWING_HEIGHT = 0.04
 
 
 # ============================================================
 # LIPM-MPC
-#
-# Reused from lipm_mpc implementation.
 # ============================================================
 
 MPC_TIMESTEP = 0.03
@@ -283,9 +216,7 @@ MPC_TIMESTEP = 0.03
 MPC_HORIZON_STEPS = 48
 
 TERMINAL_POSITION_WEIGHT = 1.0
-
 TERMINAL_VELOCITY_WEIGHT = 1.0
-
 TERMINAL_ACCELERATION_WEIGHT = 1.0
 
 CONTROL_WEIGHT = 2.0e-5
@@ -298,112 +229,52 @@ MPC_SOLVER_OPTIONS = {
 
 # ============================================================
 # SUPPORT GEOMETRY
-#
-# Same values as lipm_mpc/run.py
 # ============================================================
 
 ZMP_SUPPORT_SCALE = 0.9
 
 FOOT_TOE = 0.0645
-
 FOOT_HEEL = 0.0386
-
 FOOT_HALF_WIDTH = 0.02065
 
-
-# ============================================================
-# SINGLE-SUPPORT ZMP
-#
-# Step Timing Adaptation assumes:
-#
-#     xi_dot = omega * (xi - u0)
-#
-# where u0 is fixed during single support.
-#
-# Therefore LIPM-MPC is constrained to keep its ZMP
-# very close to the stance-foot reference point u0.
-#
-# Exact equality cannot be used because LIPMMPC1D requires:
-#
-#     lower_bound < upper_bound
-#
-# Hence:
-#
-#     u0 - epsilon <= ZMP <= u0 + epsilon
-#
-# 0.5 mm is sufficiently small for the reduced-order
-# validation while remaining numerically well defined.
-# ============================================================
-
-SINGLE_SUPPORT_ZMP_HALF_WIDTH = 0.0005
+SINGLE_SUPPORT_ZMP_HALF_WIDTH = (
+    0.0005
+)
 
 
 # ============================================================
 # DIFFERENTIAL IK
-#
-# Same structure as lipm_mpc.
 # ============================================================
 
 IK_DAMPING = 1.0e-8
-
 IK_RCOND = 1.0e-10
 
 SUPPORT_POSITION_KP = 25.0
-
 SWING_POSITION_KP = 20.0
-
 COM_POSITION_KP = 10.0
-
 TRUNK_ORIENTATION_KP = 10.0
 
 
 # ============================================================
 # DISTURBANCE
-#
-# Applied to the LIPM state.
-#
-# A desired DCM jump:
-#
-#       Delta xi
-#
-# is produced by:
-#
-#       Delta v = omega * Delta xi
-#
-# while keeping CoM position unchanged.
-#
-# Therefore the disturbance affects both:
-#
-#       planner
-#       MPC
-#
-# rather than only faking a planner measurement.
 # ============================================================
 
 ENABLE_DISTURBANCE = False
 
 DISTURBANCE_TIME = 0.10
-# time from beginning of SINGLE SUPPORT
 
 DISTURBANCE_DCM_X = +0.010
 DISTURBANCE_DCM_Y = 0.000
 
 
 # ============================================================
-# VIEWER
+# VIEWER / PRINT
 # ============================================================
 
 SHOW_VIEWER = True
-
 REALTIME_PLAYBACK = True
 
 VIEWER_SYNC_PERIOD = 0.02
-
-
-# ============================================================
-# PRINT
-# ============================================================
-
 STATUS_PRINT_PERIOD = 0.05
 
 
@@ -415,40 +286,94 @@ TIME_TOLERANCE = 1.0e-10
 
 
 # ============================================================
-# MPC / IK RATIO
+# MPC / EXECUTOR RATIO
 # ============================================================
 
-MPC_IK_RATIO = (
+MPC_EXECUTOR_RATIO = (
     MPC_TIMESTEP
     /
     DT
 )
 
-MPC_IK_STEPS = int(
+MPC_EXECUTOR_STEPS = int(
     round(
-        MPC_IK_RATIO
+        MPC_EXECUTOR_RATIO
     )
 )
 
 if not np.isclose(
-    MPC_IK_RATIO,
-    MPC_IK_STEPS,
+    MPC_EXECUTOR_RATIO,
+    MPC_EXECUTOR_STEPS,
     atol=1.0e-12,
 ):
 
     raise RuntimeError(
-        "MPC_TIMESTEP must be an integer multiple of DT."
+        "MPC_TIMESTEP must be "
+        "an integer multiple of DT."
     )
 
 
 # ============================================================
-# HELPERS
+# BASIC HELPERS
 # ============================================================
 
 def separator():
 
     print(
         "=" * 100
+    )
+
+
+def opposite_side(
+    side,
+):
+
+    if side == "left":
+        return "right"
+
+    if side == "right":
+        return "left"
+
+    raise ValueError(
+        f"Invalid side: {side}"
+    )
+
+
+def stance_leg_from_side(
+    side,
+):
+
+    if side == "left":
+        return StanceLeg.LEFT
+
+    if side == "right":
+        return StanceLeg.RIGHT
+
+    raise ValueError(
+        f"Invalid side: {side}"
+    )
+
+
+def get_contact_position(
+    side,
+    left_contact,
+    right_contact,
+):
+
+    if side == "left":
+
+        return (
+            left_contact
+        )
+
+    if side == "right":
+
+        return (
+            right_contact
+        )
+
+    raise ValueError(
+        f"Invalid side: {side}"
     )
 
 
@@ -480,23 +405,100 @@ def update_mujoco_from_pinocchio(
 
 
 # ============================================================
+# NOMINAL STEP
+# ============================================================
+
+def compute_nominal_step(
+    planner,
+    stance_side,
+):
+
+    return (
+        planner.compute_nominal_step(
+            desired_velocity_x=(
+                DESIRED_VELOCITY_X
+            ),
+
+            desired_velocity_y=(
+                DESIRED_VELOCITY_Y
+            ),
+
+            stance_leg=(
+                stance_leg_from_side(
+                    stance_side
+                )
+            ),
+        )
+    )
+
+
+def compute_nominal_landing(
+    *,
+    stance_side,
+    left_contact,
+    right_contact,
+    nominal_step,
+):
+
+    support = (
+        get_contact_position(
+            stance_side,
+            left_contact,
+            right_contact,
+        )
+    )
+
+    swing_side = (
+        opposite_side(
+            stance_side
+        )
+    )
+
+    swing_contact = (
+        get_contact_position(
+            swing_side,
+            left_contact,
+            right_contact,
+        )
+    )
+
+    target = (
+        swing_contact.copy()
+    )
+
+    target[0] = (
+        support[0]
+        +
+        nominal_step.step_displacement_x
+    )
+
+    target[1] = (
+        support[1]
+        +
+        nominal_step.step_displacement_y
+    )
+
+    return target
+
+
+# ============================================================
 # MPC
 # ============================================================
 
 def create_axis_mpc():
 
-    model = (
-        LIPMModel1D(
-            timestep=(
-                MPC_TIMESTEP
-            ),
-            com_height=(
-                COM_HEIGHT
-            ),
-            gravity=(
-                GRAVITY
-            ),
-        )
+    model = LIPMModel1D(
+        timestep=(
+            MPC_TIMESTEP
+        ),
+
+        com_height=(
+            COM_HEIGHT
+        ),
+
+        gravity=(
+            GRAVITY
+        ),
     )
 
     terminal_weights = np.array(
@@ -508,21 +510,22 @@ def create_axis_mpc():
         dtype=float,
     )
 
-    controller = (
-        LIPMMPC1D(
-            model=(
-                model
-            ),
-            horizon_steps=(
-                MPC_HORIZON_STEPS
-            ),
-            terminal_weights=(
-                terminal_weights
-            ),
-            control_weight=(
-                CONTROL_WEIGHT
-            ),
-        )
+    controller = LIPMMPC1D(
+        model=(
+            model
+        ),
+
+        horizon_steps=(
+            MPC_HORIZON_STEPS
+        ),
+
+        terminal_weights=(
+            terminal_weights
+        ),
+
+        control_weight=(
+            CONTROL_WEIGHT
+        ),
     )
 
     return (
@@ -536,13 +539,21 @@ def shift_control_sequence(
 ):
 
     if control is None:
-
         return None
 
     control = np.asarray(
         control,
         dtype=float,
     )
+
+    if control.shape != (
+        MPC_HORIZON_STEPS,
+    ):
+
+        raise ValueError(
+            "Previous MPC control sequence "
+            "has invalid shape."
+        )
 
     shifted = np.empty_like(
         control
@@ -588,7 +599,7 @@ def compute_dcm_from_lipm(
 
 
 # ============================================================
-# CURRENT CONTINUOUS LIPM STATE
+# CONTINUOUS LIPM STATE
 # ============================================================
 
 def get_current_lipm_state(
@@ -616,6 +627,7 @@ def get_current_lipm_state(
         segment.get_x_state(
             tau
         ),
+
         segment.get_y_state(
             tau
         ),
@@ -623,13 +635,72 @@ def get_current_lipm_state(
 
 
 # ============================================================
-# MPC SOLVE
+# STEP PLANNER
+# ============================================================
+
+def solve_step_planner(
+    *,
+    planner,
+    nominal_step,
+    dcm,
+    stance_position,
+    elapsed_time,
+):
+
+    return (
+        planner.solve_adaptive_step(
+            nominal_step=(
+                nominal_step
+            ),
+
+            dcm_measured=(
+                dcm
+            ),
+
+            stance_position=(
+                stance_position[
+                    0:2
+                ]
+            ),
+
+            elapsed_time=(
+                elapsed_time
+            ),
+
+            alpha_location=(
+                STEP_QP_ALPHA_LOCATION
+            ),
+
+            alpha_timing=(
+                STEP_QP_ALPHA_TIMING
+            ),
+
+            alpha_dcm=(
+                STEP_QP_ALPHA_DCM
+            ),
+
+            alpha_viability=(
+                STEP_QP_ALPHA_VIABILITY
+            ),
+
+            timing_gap=(
+                STEP_TIMING_GAP
+            ),
+        )
+    )
+
+
+# ============================================================
+# SOLVE MPC SEGMENT
 # ============================================================
 
 def solve_mpc_segment(
     *,
     current_phase,
     phase_time,
+
+    stance_side,
+    swing_side,
 
     x_state,
     y_state,
@@ -640,14 +711,17 @@ def solve_mpc_segment(
     previous_x_control,
     previous_y_control,
 
-    left_initial_position,
-    right_initial_position,
+    left_contact_position,
+    right_contact_position,
+
+    landing_position,
+    current_step_time,
+
+    nominal_left_step,
+    nominal_right_step,
 
     left_rotation,
     right_rotation,
-
-    landing_position,
-    single_support_duration,
 ):
 
     preview = (
@@ -655,6 +729,7 @@ def solve_mpc_segment(
             current_phase=(
                 current_phase
             ),
+
             phase_time=(
                 phase_time
             ),
@@ -663,24 +738,56 @@ def solve_mpc_segment(
                 INITIAL_DOUBLE_SUPPORT_DURATION
             ),
 
-            single_support_duration=(
-                single_support_duration
+            double_support_duration=(
+                DOUBLE_SUPPORT_DURATION
+            ),
+
+            current_single_support_duration=(
+                current_step_time
             ),
 
             stance_side=(
-                STANCE_SIDE
+                stance_side
             ),
 
-            left_initial_position=(
-                left_initial_position
+            swing_side=(
+                swing_side
             ),
 
-            right_initial_position=(
-                right_initial_position
+            left_contact_position=(
+                left_contact_position
             ),
 
-            landing_position=(
+            right_contact_position=(
+                right_contact_position
+            ),
+
+            current_landing_position=(
                 landing_position
+            ),
+
+            nominal_left_step_displacement=np.array(
+                [
+                    nominal_left_step.step_displacement_x,
+                    nominal_left_step.step_displacement_y,
+                ],
+                dtype=float,
+            ),
+
+            nominal_right_step_displacement=np.array(
+                [
+                    nominal_right_step.step_displacement_x,
+                    nominal_right_step.step_displacement_y,
+                ],
+                dtype=float,
+            ),
+
+            nominal_left_step_time=(
+                nominal_left_step.step_time
+            ),
+
+            nominal_right_step_time=(
+                nominal_right_step.step_time
             ),
 
             left_rotation=(
@@ -721,9 +828,9 @@ def solve_mpc_segment(
         )
     )
 
-    # --------------------------------------------------------
-    # Terminal goal = center of final preview support region.
-    # --------------------------------------------------------
+    # ========================================================
+    # TERMINAL GOAL
+    # ========================================================
 
     x_goal = np.array(
         [
@@ -755,6 +862,10 @@ def solve_mpc_segment(
         dtype=float,
     )
 
+    # ========================================================
+    # MPC SOLVE
+    # ========================================================
+
     wall_start = (
         time.perf_counter()
     )
@@ -764,20 +875,25 @@ def solve_mpc_segment(
             current_state=(
                 x_state
             ),
+
             goal_state=(
                 x_goal
             ),
+
             lower_bounds=(
                 preview.x_min
             ),
+
             upper_bounds=(
                 preview.x_max
             ),
+
             initial_control=(
                 shift_control_sequence(
                     previous_x_control
                 )
             ),
+
             solver_options=(
                 MPC_SOLVER_OPTIONS
             ),
@@ -789,20 +905,25 @@ def solve_mpc_segment(
             current_state=(
                 y_state
             ),
+
             goal_state=(
                 y_goal
             ),
+
             lower_bounds=(
                 preview.y_min
             ),
+
             upper_bounds=(
                 preview.y_max
             ),
+
             initial_control=(
                 shift_control_sequence(
                     previous_y_control
                 )
             ),
+
             solver_options=(
                 MPC_SOLVER_OPTIONS
             ),
@@ -834,6 +955,7 @@ def solve_mpc_segment(
             x_state=(
                 x_state
             ),
+
             y_state=(
                 y_state
             ),
@@ -841,6 +963,7 @@ def solve_mpc_segment(
             x_jerk=(
                 x_result.first_control
             ),
+
             y_jerk=(
                 y_result.first_control
             ),
@@ -856,9 +979,6 @@ def solve_mpc_segment(
     )
 
     return {
-        "preview":
-            preview,
-
         "x_result":
             x_result,
 
@@ -874,63 +994,10 @@ def solve_mpc_segment(
 
 
 # ============================================================
-# PLANNER
+# RUN
 # ============================================================
 
-def solve_step_planner(
-    planner,
-    nominal_step,
-    dcm,
-    stance_position_xy,
-    elapsed_time,
-):
-
-    return (
-        planner.solve_adaptive_step(
-            nominal_step=(
-                nominal_step
-            ),
-
-            dcm_measured=(
-                dcm
-            ),
-
-            stance_position=(
-                stance_position_xy
-            ),
-
-            elapsed_time=(
-                elapsed_time
-            ),
-
-            alpha_location=(
-                STEP_QP_ALPHA_LOCATION
-            ),
-
-            alpha_timing=(
-                STEP_QP_ALPHA_TIMING
-            ),
-
-            alpha_dcm=(
-                STEP_QP_ALPHA_DCM
-            ),
-
-            alpha_viability=(
-                STEP_QP_ALPHA_VIABILITY
-            ),
-
-            timing_gap=(
-                STEP_TIMING_GAP
-            ),
-        )
-    )
-
-
-# ============================================================
-# EXECUTION
-# ============================================================
-
-def run_test(
+def run_walk(
     *,
     mj_model,
     mj_data,
@@ -940,7 +1007,7 @@ def run_test(
 ):
 
     # ========================================================
-    # INITIAL KINEMATIC STATE
+    # INITIAL ROBOT STATE
     # ========================================================
 
     q_pin = (
@@ -954,51 +1021,29 @@ def run_test(
     )
 
     (
-        left_initial_position,
+        left_contact_position,
         left_rotation,
     ) = (
         robot.get_left_foot_pose()
     )
 
     (
-        right_initial_position,
+        right_contact_position,
         right_rotation,
     ) = (
         robot.get_right_foot_pose()
     )
 
+    left_contact_position = (
+        left_contact_position.copy()
+    )
+
+    right_contact_position = (
+        right_contact_position.copy()
+    )
+
     initial_com = (
         robot.get_com()
-    )
-
-    # ========================================================
-    # COM WORLD-Z REFERENCE
-    #
-    # COM_HEIGHT is the LIPM height measured relative to the
-    # support plane:
-    #
-    #     h = z_CoM - z_support
-    #
-    # It is NOT an absolute world-z coordinate.
-    #
-    # Current validation:
-    #
-    #     LEFT stance -> RIGHT swing
-    #
-    # Therefore the left-foot site height is used as the fixed
-    # support-plane reference.
-    # ========================================================
-
-    com_world_z_ref = (
-        left_initial_position[2]
-        +
-        COM_HEIGHT
-    )
-
-    initial_com_height_above_support = (
-        initial_com[2]
-        -
-        left_initial_position[2]
     )
 
     (
@@ -1010,54 +1055,97 @@ def run_test(
         )
     )
 
-    stance_position_xy = (
-        left_initial_position[
-            0:2
-        ].copy()
+    # ========================================================
+    # WORLD-Z COM REFERENCE
+    #
+    # Flat terrain:
+    # use initial support-plane height.
+    # ========================================================
+
+    ground_z_reference = (
+        0.5
+        *
+        (
+            left_contact_position[2]
+            +
+            right_contact_position[2]
+        )
+    )
+
+    com_world_z_reference = (
+        ground_z_reference
+        +
+        COM_HEIGHT
     )
 
     # ========================================================
-    # NOMINAL STEP
+    # NOMINAL STEP FOR EACH STANCE LEG
     # ========================================================
 
-    nominal_step = (
-        planner.compute_nominal_step(
-            stance_leg=(
-                STANCE_LEG
+    nominal_left_step = (
+        compute_nominal_step(
+            planner,
+            "left",
+        )
+    )
+
+    nominal_right_step = (
+        compute_nominal_step(
+            planner,
+            "right",
+        )
+    )
+
+    # ========================================================
+    # INITIAL GAIT STATE
+    # ========================================================
+
+    stance_side = (
+        FIRST_STANCE_SIDE
+    )
+
+    swing_side = (
+        opposite_side(
+            stance_side
+        )
+    )
+
+    current_nominal_step = (
+        nominal_left_step
+        if
+        stance_side
+        ==
+        "left"
+        else
+        nominal_right_step
+    )
+
+    landing_position = (
+        compute_nominal_landing(
+            stance_side=(
+                stance_side
             ),
 
-            desired_velocity_x=(
-                DESIRED_VELOCITY_X
+            left_contact=(
+                left_contact_position
             ),
 
-            desired_velocity_y=(
-                DESIRED_VELOCITY_Y
+            right_contact=(
+                right_contact_position
+            ),
+
+            nominal_step=(
+                current_nominal_step
             ),
         )
     )
 
-    nominal_landing_position = (
-        right_initial_position.copy()
-    )
-
-    nominal_landing_position[0] = (
-        stance_position_xy[0]
-        +
-        nominal_step.step_displacement_x
-    )
-
-    nominal_landing_position[1] = (
-        stance_position_xy[1]
-        +
-        nominal_step.step_displacement_y
-    )
-
-    nominal_single_support_duration = (
-        nominal_step.step_time
+    current_step_time = (
+        current_nominal_step.step_time
     )
 
     # ========================================================
-    # LIPM STATE
+    # INITIAL LIPM STATE
     # ========================================================
 
     x_state = np.array(
@@ -1082,17 +1170,11 @@ def run_test(
     # MPC
     # ========================================================
 
-    (
-        _,
-        x_mpc,
-    ) = (
+    _, x_mpc = (
         create_axis_mpc()
     )
 
-    (
-        _,
-        y_mpc,
-    ) = (
+    _, y_mpc = (
         create_axis_mpc()
     )
 
@@ -1108,42 +1190,16 @@ def run_test(
     max_mpc_solve_time = 0.0
 
     # ========================================================
-    # SWING TRAJECTORY
+    # SWING
     # ========================================================
 
     swing_trajectory = (
-        OnlineSwingFootTrajectory()
+        OnlineQuinticSwingTrajectory()
     )
 
-    vertical_parameters = (
-        VerticalSwingQPParameters(
-            desired_height=(
-                SWING_HEIGHT_DESIRED
-            ),
-
-            maximum_height=(
-                SWING_HEIGHT_MAX
-            ),
-
-            constraint_samples=(
-                SWING_VERTICAL_CONSTRAINT_SAMPLES
-            ),
-
-            coefficient_regularization=(
-                SWING_VERTICAL_COEFFICIENT_REGULARIZATION
-            ),
-
-            bound_tolerance=(
-                SWING_VERTICAL_BOUND_TOLERANCE
-            ),
-
-            max_refinements=(
-                SWING_VERTICAL_MAX_REFINEMENTS
-            ),
-        )
+    swing_initialized = (
+        False
     )
-
-    swing_initialized = False
 
     # ========================================================
     # PHASE
@@ -1153,29 +1209,33 @@ def run_test(
         INITIAL_DOUBLE_SUPPORT
     )
 
-    phase_time = 0.0
-
-    kinematic_time = 0.0
-
-    # Before SS starts, MPC preview uses nominal step.
-
-    landing_position = (
-        nominal_landing_position.copy()
+    phase_time = (
+        0.0
     )
 
-    current_step_time = (
-        nominal_single_support_duration
+    kinematic_time = (
+        0.0
     )
 
-    planner_result = None
+    step_index = (
+        0
+    )
 
-    planner_frozen = False
+    planner_result = (
+        None
+    )
 
-    freeze_time = None
+    planner_frozen = (
+        False
+    )
 
-    next_planner_update = 0.0
+    disturbance_applied = (
+        False
+    )
 
-    disturbance_applied = False
+    stop_requested = (
+        False
+    )
 
     # ========================================================
     # DIAGNOSTICS
@@ -1187,28 +1247,31 @@ def run_test(
 
     max_swing_error = 0.0
 
+    max_landing_error = 0.0
+
+    last_landing_error = 0.0
+
     max_viability_slack_x = 0.0
 
     max_viability_slack_y = 0.0
 
     next_print_time = 0.0
 
+    next_viewer_sync_time = 0.0
+
     # ========================================================
-    # INFO
+    # HEADER
     # ========================================================
 
     separator()
 
     print(
-        "STEP TIMING ADAPTATION"
+        "CONTINUOUS STEP TIMING ADAPTATION WALKING"
     )
 
     print(
-        "LIPM-MPC + HIERARCHICAL DIFFERENTIAL IK"
-    )
-
-    print(
-        "KINEMATIC SET-STATE VALIDATION"
+        "LIPM-MPC + ONLINE QUINTIC SWING "
+        "+ HIERARCHICAL DIFFERENTIAL IK"
     )
 
     separator()
@@ -1216,61 +1279,45 @@ def run_test(
     print()
 
     print(
-        "Execution architecture:"
+        f"walk duration = "
+        f"{WALK_DURATION:.3f} s"
     )
 
     print(
-        "  adaptive step planner"
+        f"DT            = "
+        f"{DT:.6f} s"
     )
 
     print(
-        "       -> adaptive support preview"
+        f"MPC dt        = "
+        f"{MPC_TIMESTEP:.6f} s"
     )
 
     print(
-        "       -> LIPM-MPC CoM"
+        f"initial DS    = "
+        f"{INITIAL_DOUBLE_SUPPORT_DURATION:.3f} s"
     )
 
     print(
-        "       -> swing trajectory"
+        f"normal DS     = "
+        f"{DOUBLE_SUPPORT_DURATION:.3f} s"
     )
 
     print(
-        "       -> hierarchical differential IK"
-    )
-
-    print(
-        "       -> Pinocchio integrate"
-    )
-
-    print(
-        "       -> MuJoCo qpos set-state"
-    )
-
-    print()
-
-    print(
-        "No rigid-body dynamics."
-    )
-
-    print(
-        "No WBC."
-    )
-
-    print(
-        "No mj_step()."
+        f"timing gap    = "
+        f"{STEP_TIMING_GAP:.3f} s"
     )
 
     print()
 
     print(
         f"Initial LEFT  = "
-        f"{left_initial_position}"
+        f"{left_contact_position}"
     )
 
     print(
         f"Initial RIGHT = "
-        f"{right_initial_position}"
+        f"{right_contact_position}"
     )
 
     print(
@@ -1278,67 +1325,14 @@ def run_test(
         f"{initial_com}"
     )
 
-    print(
-        f"Initial CoM height above support = "
-        f"{initial_com_height_above_support:.6f} m"
-    )
-
-    print(
-        f"LIPM CoM height                  = "
-        f"{COM_HEIGHT:.6f} m"
-    )
-
-    print(
-        f"CoM world-z reference            = "
-        f"{com_world_z_ref:.6f} m"
-    )
-
-    print(
-        f"Initial vertical mismatch        = "
-        f"{1000.0 * (com_world_z_ref - initial_com[2]):+.3f} mm"
-    )
-
     print()
-
-    print(
-        f"Nominal uT    = "
-        f"{nominal_landing_position}"
-    )
-
-    print(
-        f"Nominal T     = "
-        f"{nominal_step.step_time:.6f} s"
-    )
-
-    print(
-        f"omega         = "
-        f"{planner.omega:.6f} rad/s"
-    )
-
-    print()
-
-    print(
-        "IK hierarchy:"
-    )
-
-    print(
-        "  support > CoM > swing > trunk"
-    )
-
-    print()
-
-    # ========================================================
-    # REAL-TIME
-    # ========================================================
 
     wall_start = (
         time.perf_counter()
     )
 
-    iteration = 0
-
     # ========================================================
-    # LOOP
+    # MAIN LOOP
     # ========================================================
 
     while True:
@@ -1351,23 +1345,36 @@ def run_test(
 
             break
 
+        if (
+            kinematic_time
+            >=
+            WALK_DURATION
+        ):
+
+            stop_requested = (
+                True
+            )
+
         # ====================================================
-        # INITIAL DS -> SINGLE SUPPORT
+        # TOUCHDOWN:
+        # SINGLE SUPPORT -> DOUBLE SUPPORT
+        #
+        # One exact touchdown reference sample has already
+        # been executed because transition occurs only after
+        # phase_time exceeds T.
         # ====================================================
 
         if (
             phase
             ==
-            INITIAL_DOUBLE_SUPPORT
+            SINGLE_SUPPORT
             and
             phase_time
-            >=
-            INITIAL_DOUBLE_SUPPORT_DURATION
-            -
+            >
+            current_step_time
+            +
             TIME_TOLERANCE
         ):
-
-            # Current MPC state at exact transition.
 
             (
                 x_state,
@@ -1377,43 +1384,281 @@ def run_test(
                     x_state=(
                         x_state
                     ),
+
                     y_state=(
                         y_state
                     ),
+
                     segment=(
                         current_segment
                     ),
+
                     mpc_substep=(
                         mpc_substep
                     ),
                 )
             )
 
-            current_segment = None
+            current_segment = (
+                None
+            )
 
-            mpc_substep = 0
+            mpc_substep = (
+                0
+            )
 
-            previous_x_control = None
-            previous_y_control = None
+            previous_x_control = (
+                None
+            )
+
+            previous_y_control = (
+                None
+            )
+
+            robot.update(
+                q_pin
+            )
+
+            if (
+                swing_side
+                ==
+                "left"
+            ):
+
+                (
+                    actual_landing,
+                    _,
+                ) = (
+                    robot.get_left_foot_pose()
+                )
+
+                left_contact_position = (
+                    landing_position.copy()
+                )
+
+            else:
+
+                (
+                    actual_landing,
+                    _,
+                ) = (
+                    robot.get_right_foot_pose()
+                )
+
+                right_contact_position = (
+                    landing_position.copy()
+                )
+
+            last_landing_error = float(
+                np.linalg.norm(
+                    actual_landing
+                    -
+                    landing_position
+                )
+            )
+
+            max_landing_error = max(
+                max_landing_error,
+                last_landing_error,
+            )
+
+            print()
+
+            print(
+                f"TOUCHDOWN STEP {step_index}"
+                f" | {swing_side.upper()} foot"
+                f" | error="
+                f"{1000.0 * last_landing_error:.3f} mm"
+            )
+
+            # ------------------------------------------------
+            # Landed foot becomes next stance.
+            # ------------------------------------------------
+
+            stance_side = (
+                swing_side
+            )
+
+            swing_side = (
+                opposite_side(
+                    stance_side
+                )
+            )
+
+            current_nominal_step = (
+                nominal_left_step
+                if
+                stance_side
+                ==
+                "left"
+                else
+                nominal_right_step
+            )
+
+            # Nominal upcoming target during DS preview.
+
+            landing_position = (
+                compute_nominal_landing(
+                    stance_side=(
+                        stance_side
+                    ),
+
+                    left_contact=(
+                        left_contact_position
+                    ),
+
+                    right_contact=(
+                        right_contact_position
+                    ),
+
+                    nominal_step=(
+                        current_nominal_step
+                    ),
+                )
+            )
+
+            current_step_time = (
+                current_nominal_step.step_time
+            )
+
+            phase = (
+                DOUBLE_SUPPORT
+            )
+
+            phase_time = (
+                0.0
+            )
+
+            swing_initialized = (
+                False
+            )
+
+            planner_result = (
+                None
+            )
+
+            planner_frozen = (
+                False
+            )
+
+            disturbance_applied = (
+                False
+            )
+
+        # ====================================================
+        # INITIAL DS -> SS
+        # OR NORMAL DS -> SS
+        # ====================================================
+
+        start_single_support = (
+            (
+                phase
+                ==
+                INITIAL_DOUBLE_SUPPORT
+                and
+                phase_time
+                >=
+                INITIAL_DOUBLE_SUPPORT_DURATION
+                -
+                TIME_TOLERANCE
+            )
+            or
+            (
+                phase
+                ==
+                DOUBLE_SUPPORT
+                and
+                phase_time
+                >=
+                DOUBLE_SUPPORT_DURATION
+                -
+                TIME_TOLERANCE
+                and
+                not stop_requested
+            )
+        )
+
+        if start_single_support:
+
+            (
+                x_state,
+                y_state,
+            ) = (
+                get_current_lipm_state(
+                    x_state=(
+                        x_state
+                    ),
+
+                    y_state=(
+                        y_state
+                    ),
+
+                    segment=(
+                        current_segment
+                    ),
+
+                    mpc_substep=(
+                        mpc_substep
+                    ),
+                )
+            )
+
+            current_segment = (
+                None
+            )
+
+            mpc_substep = (
+                0
+            )
+
+            previous_x_control = (
+                None
+            )
+
+            previous_y_control = (
+                None
+            )
 
             phase = (
                 SINGLE_SUPPORT
             )
 
-            phase_time = 0.0
+            phase_time = (
+                0.0
+            )
 
-            # ------------------------------------------------
-            # Current DCM from MPC CoM state.
-            # ------------------------------------------------
+            step_index += (
+                1
+            )
+
+            current_nominal_step = (
+                nominal_left_step
+                if
+                stance_side
+                ==
+                "left"
+                else
+                nominal_right_step
+            )
+
+            stance_position = (
+                get_contact_position(
+                    stance_side,
+                    left_contact_position,
+                    right_contact_position,
+                )
+            )
 
             dcm = (
                 compute_dcm_from_lipm(
                     x_state=(
                         x_state
                     ),
+
                     y_state=(
                         y_state
                     ),
+
                     omega=(
                         planner.omega
                     ),
@@ -1425,21 +1670,33 @@ def run_test(
                     planner=(
                         planner
                     ),
+
                     nominal_step=(
-                        nominal_step
+                        current_nominal_step
                     ),
+
                     dcm=(
                         dcm
                     ),
-                    stance_position_xy=(
-                        stance_position_xy
+
+                    stance_position=(
+                        stance_position
                     ),
+
                     elapsed_time=0.0,
                 )
             )
 
+            swing_contact = (
+                get_contact_position(
+                    swing_side,
+                    left_contact_position,
+                    right_contact_position,
+                )
+            )
+
             landing_position = (
-                right_initial_position.copy()
+                swing_contact.copy()
             )
 
             landing_position[0] = (
@@ -1454,24 +1711,49 @@ def run_test(
                 planner_result.step_time
             )
 
+            max_viability_slack_x = max(
+                max_viability_slack_x,
+                planner_result.viability_slack_x,
+            )
+
+            max_viability_slack_y = max(
+                max_viability_slack_y,
+                planner_result.viability_slack_y,
+            )
+
             # ------------------------------------------------
-            # Initialize online swing trajectory at lift-off.
+            # Initialize online swing from ACTUAL foot pose.
             # ------------------------------------------------
 
             robot.update(
                 q_pin
             )
 
-            (
-                current_right_position,
-                _,
-            ) = (
-                robot.get_right_foot_pose()
-            )
+            if (
+                swing_side
+                ==
+                "left"
+            ):
 
-            swing_trajectory.reset_3d(
+                (
+                    swing_start,
+                    _,
+                ) = (
+                    robot.get_left_foot_pose()
+                )
+
+            else:
+
+                (
+                    swing_start,
+                    _,
+                ) = (
+                    robot.get_right_foot_pose()
+                )
+
+            swing_trajectory.reset(
                 initial_position=(
-                    current_right_position
+                    swing_start
                 ),
 
                 initial_velocity=np.zeros(
@@ -1487,36 +1769,70 @@ def run_test(
                 start_time=0.0,
             )
 
-            swing_initialized = True
-
-            next_planner_update = (
-                PLANNER_UPDATE_PERIOD
+            swing_initialized = (
+                True
             )
 
-            separator()
-
-            print(
-                "START ADAPTIVE SINGLE SUPPORT"
+            planner_frozen = (
+                False
             )
 
-            separator()
-
-            print(
-                f"DCM at lift-off = "
-                f"{dcm}"
-            )
-
-            print(
-                f"Initial adapted uT = "
-                f"{landing_position}"
-            )
-
-            print(
-                f"Initial adapted T  = "
-                f"{current_step_time:.6f} s"
+            disturbance_applied = (
+                False
             )
 
             print()
+
+            separator()
+
+            print(
+                f"STEP {step_index}"
+                f" | {stance_side.upper()} support"
+                f" | {swing_side.upper()} swing"
+            )
+
+            separator()
+
+            print(
+                f"DCM       = {dcm}"
+            )
+
+            print(
+                f"nominal T = "
+                f"{current_nominal_step.step_time:.6f} s"
+            )
+
+            print(
+                f"adapted T = "
+                f"{current_step_time:.6f} s"
+            )
+
+            print(
+                f"uT        = "
+                f"{landing_position}"
+            )
+
+            print()
+
+        # ====================================================
+        # GRACEFUL FINISH AFTER FULL DS
+        # ====================================================
+
+        if (
+            phase
+            ==
+            DOUBLE_SUPPORT
+            and
+            stop_requested
+            and
+            phase_time
+            >=
+            DOUBLE_SUPPORT_DURATION
+            -
+            TIME_TOLERANCE
+        ):
+
+            break
 
         # ====================================================
         # CURRENT CONTINUOUS LIPM STATE
@@ -1530,12 +1846,15 @@ def run_test(
                 x_state=(
                     x_state
                 ),
+
                 y_state=(
                     y_state
                 ),
+
                 segment=(
                     current_segment
                 ),
+
                 mpc_substep=(
                     mpc_substep
                 ),
@@ -1562,14 +1881,6 @@ def run_test(
             TIME_TOLERANCE
         ):
 
-            # DCM:
-            #
-            # xi = c + c_dot / omega
-            #
-            # For fixed position:
-            #
-            # Delta v = omega * Delta xi
-
             current_x_state[1] += (
                 planner.omega
                 *
@@ -1590,37 +1901,25 @@ def run_test(
                 current_y_state.copy()
             )
 
-            current_segment = None
-
-            mpc_substep = 0
-
-            previous_x_control = None
-            previous_y_control = None
-
-            disturbance_applied = True
-
-            print()
-
-            separator()
-
-            print(
-                "DCM DISTURBANCE APPLIED"
+            current_segment = (
+                None
             )
 
-            separator()
-
-            print(
-                f"t_SS = "
-                f"{phase_time:.6f} s"
+            mpc_substep = (
+                0
             )
 
-            print(
-                f"Delta DCM = "
-                f"({DISTURBANCE_DCM_X:+.6f}, "
-                f"{DISTURBANCE_DCM_Y:+.6f}) m"
+            previous_x_control = (
+                None
             )
 
-            print()
+            previous_y_control = (
+                None
+            )
+
+            disturbance_applied = (
+                True
+            )
 
             current_x_state = (
                 x_state.copy()
@@ -1639,9 +1938,11 @@ def run_test(
                 x_state=(
                     current_x_state
                 ),
+
                 y_state=(
                     current_y_state
                 ),
+
                 omega=(
                     planner.omega
                 ),
@@ -1649,7 +1950,7 @@ def run_test(
         )
 
         # ====================================================
-        # ONLINE STEP TIMING / LOCATION ADAPTATION
+        # ONLINE STEP ADAPTATION
         # ====================================================
 
         if (
@@ -1658,10 +1959,11 @@ def run_test(
             SINGLE_SUPPORT
             and
             not planner_frozen
+            and
+            phase_time
+            >
+            TIME_TOLERANCE
         ):
-
-            # Freeze current target when there is no longer
-            # enough time to adapt safely.
 
             if (
                 phase_time
@@ -1673,19 +1975,19 @@ def run_test(
                 TIME_TOLERANCE
             ):
 
-                planner_frozen = True
-
-                freeze_time = (
-                    phase_time
+                planner_frozen = (
+                    True
                 )
 
-            elif (
-                phase_time
-                >=
-                next_planner_update
-                -
-                TIME_TOLERANCE
-            ):
+            else:
+
+                stance_position = (
+                    get_contact_position(
+                        stance_side,
+                        left_contact_position,
+                        right_contact_position,
+                    )
+                )
 
                 try:
 
@@ -1696,15 +1998,15 @@ def run_test(
                             ),
 
                             nominal_step=(
-                                nominal_step
+                                current_nominal_step
                             ),
 
                             dcm=(
                                 dcm
                             ),
 
-                            stance_position_xy=(
-                                stance_position_xy
+                            stance_position=(
+                                stance_position
                             ),
 
                             elapsed_time=(
@@ -1739,6 +2041,20 @@ def run_test(
                         planner_result.viability_slack_y,
                     )
 
+                    if (
+                        phase_time
+                        >=
+                        current_step_time
+                        -
+                        STEP_TIMING_GAP
+                        -
+                        TIME_TOLERANCE
+                    ):
+
+                        planner_frozen = (
+                            True
+                        )
+
                 except RuntimeError as error:
 
                     if (
@@ -1749,35 +2065,19 @@ def run_test(
                         ).lower()
                     ):
 
-                        planner_frozen = True
-
-                        freeze_time = (
-                            phase_time
+                        planner_frozen = (
+                            True
                         )
 
                     else:
 
                         raise
 
-                while (
-                    next_planner_update
-                    <=
-                    phase_time
-                    +
-                    TIME_TOLERANCE
-                ):
-
-                    next_planner_update += (
-                        PLANNER_UPDATE_PERIOD
-                    )
-
         # ====================================================
         # MPC
         # ====================================================
 
         if current_segment is None:
-
-            # The segment begins from the exact current state.
 
             x_state = (
                 current_x_state.copy()
@@ -1795,6 +2095,14 @@ def run_test(
 
                     phase_time=(
                         phase_time
+                    ),
+
+                    stance_side=(
+                        stance_side
+                    ),
+
+                    swing_side=(
+                        swing_side
                     ),
 
                     x_state=(
@@ -1821,12 +2129,28 @@ def run_test(
                         previous_y_control
                     ),
 
-                    left_initial_position=(
-                        left_initial_position
+                    left_contact_position=(
+                        left_contact_position
                     ),
 
-                    right_initial_position=(
-                        right_initial_position
+                    right_contact_position=(
+                        right_contact_position
+                    ),
+
+                    landing_position=(
+                        landing_position
+                    ),
+
+                    current_step_time=(
+                        current_step_time
+                    ),
+
+                    nominal_left_step=(
+                        nominal_left_step
+                    ),
+
+                    nominal_right_step=(
+                        nominal_right_step
                     ),
 
                     left_rotation=(
@@ -1835,14 +2159,6 @@ def run_test(
 
                     right_rotation=(
                         right_rotation
-                    ),
-
-                    landing_position=(
-                        landing_position
-                    ),
-
-                    single_support_duration=(
-                        current_step_time
                     ),
                 )
             )
@@ -1877,9 +2193,13 @@ def run_test(
                 .copy()
             )
 
-            mpc_substep = 0
+            mpc_substep = (
+                0
+            )
 
-            mpc_solve_count += 1
+            mpc_solve_count += (
+                1
+            )
 
             max_mpc_solve_time = max(
                 max_mpc_solve_time,
@@ -1889,7 +2209,7 @@ def run_test(
             )
 
         # ====================================================
-        # CURRENT CONTINUOUS COM REFERENCE
+        # CONTINUOUS COM REFERENCE
         # ====================================================
 
         tau = (
@@ -1904,26 +2224,6 @@ def run_test(
             )
         )
 
-        # ====================================================
-        # CONVERT LIPM COM REFERENCE TO WORLD COORDINATES
-        #
-        # ConstantJerkCoMSegment stores:
-        #
-        #     position[2] = COM_HEIGHT
-        #
-        # where COM_HEIGHT is the LIPM relative height h.
-        #
-        # Differential IK, however, expects the actual CoM
-        # position in the world frame.
-        #
-        # Therefore:
-        #
-        #     z_CoM^W = z_support^W + h
-        #
-        # Horizontal x/y and their velocities remain exactly
-        # those generated by LIPM-MPC.
-        # ====================================================
-
         com_position_ref = (
             com_reference.position.copy()
         )
@@ -1933,7 +2233,7 @@ def run_test(
         )
 
         com_position_ref[2] = (
-            com_world_z_ref
+            com_world_z_reference
         )
 
         com_velocity_ref[2] = (
@@ -1944,112 +2244,96 @@ def run_test(
         # FOOT REFERENCES
         # ====================================================
 
-        if (
-            phase
-            ==
-            INITIAL_DOUBLE_SUPPORT
+        if phase in (
+            INITIAL_DOUBLE_SUPPORT,
+            DOUBLE_SUPPORT,
         ):
 
             p_left_ref = (
-                left_initial_position
-                .copy()
+                left_contact_position.copy()
             )
 
             p_right_ref = (
-                right_initial_position
-                .copy()
+                right_contact_position.copy()
             )
 
-            v_swing_ref = None
+            v_swing_ref = (
+                None
+            )
 
         else:
 
             if not swing_initialized:
 
                 raise RuntimeError(
-                    "Swing trajectory was not initialized."
+                    "Swing trajectory "
+                    "is not initialized."
                 )
 
-            landing_now = (
-                phase_time
-                >=
-                current_step_time
-                -
-                TIME_TOLERANCE
+            swing_sample = (
+                swing_trajectory.update(
+                    current_time=(
+                        min(
+                            phase_time,
+                            current_step_time,
+                        )
+                    ),
+
+                    landing_time=(
+                        current_step_time
+                    ),
+
+                    target_position=(
+                        landing_position
+                    ),
+
+                    swing_height=(
+                        SWING_HEIGHT
+                    ),
+                )
             )
 
-            if landing_now:
+            if (
+                swing_side
+                ==
+                "left"
+            ):
 
                 p_left_ref = (
-                    left_initial_position
-                    .copy()
+                    swing_sample.position.copy()
                 )
 
                 p_right_ref = (
-                    landing_position
-                    .copy()
-                )
-
-                v_swing_ref = np.zeros(
-                    3,
-                    dtype=float,
+                    right_contact_position.copy()
                 )
 
             else:
 
-                swing_sample = (
-                    swing_trajectory.update_3d(
-                        current_time=(
-                            phase_time
-                        ),
-
-                        landing_time=(
-                            current_step_time
-                        ),
-
-                        landing_position_xy=(
-                            landing_position[
-                                0:2
-                            ]
-                        ),
-
-                        vertical_parameters=(
-                            vertical_parameters
-                        ),
-                    )
-                )
-
                 p_left_ref = (
-                    left_initial_position
-                    .copy()
+                    left_contact_position.copy()
                 )
 
                 p_right_ref = (
-                    swing_sample
-                    .position
-                    .copy()
+                    swing_sample.position.copy()
                 )
 
-                v_swing_ref = (
-                    swing_sample
-                    .velocity
-                    .copy()
-                )
+            v_swing_ref = (
+                swing_sample.velocity.copy()
+            )
 
         # ====================================================
         # DIFFERENTIAL IK
         # ====================================================
 
-        if (
-            phase
-            ==
-            INITIAL_DOUBLE_SUPPORT
+        if phase in (
+            INITIAL_DOUBLE_SUPPORT,
+            DOUBLE_SUPPORT,
         ):
 
             (
                 qdot_full,
-                diagnostics,
-                Z,
+                _,
+                _,
             ) = (
                 solve_double_support_ik(
                     robot=(
@@ -2104,10 +2388,26 @@ def run_test(
 
         else:
 
+            support_position_ref = (
+                get_contact_position(
+                    stance_side,
+                    p_left_ref,
+                    p_right_ref,
+                )
+            )
+
+            swing_position_ref = (
+                get_contact_position(
+                    swing_side,
+                    p_left_ref,
+                    p_right_ref,
+                )
+            )
+
             (
                 qdot_full,
-                diagnostics,
-                Z,
+                _,
+                _,
             ) = (
                 solve_single_support_ik(
                     robot=(
@@ -2119,15 +2419,15 @@ def run_test(
                     ),
 
                     support_side=(
-                        STANCE_SIDE
+                        stance_side
                     ),
 
                     support_position_ref=(
-                        p_left_ref
+                        support_position_ref
                     ),
 
                     swing_position_ref=(
-                        p_right_ref
+                        swing_position_ref
                     ),
 
                     swing_linear_velocity_ref=(
@@ -2179,7 +2479,8 @@ def run_test(
         ):
 
             raise RuntimeError(
-                "Differential IK returned NaN/Inf."
+                "Differential IK "
+                "returned NaN/Inf."
             )
 
         # ====================================================
@@ -2259,10 +2560,9 @@ def run_test(
             com_error,
         )
 
-        if (
-            phase
-            ==
-            INITIAL_DOUBLE_SUPPORT
+        if phase in (
+            INITIAL_DOUBLE_SUPPORT,
+            DOUBLE_SUPPORT,
         ):
 
             left_error = float(
@@ -2286,25 +2586,51 @@ def run_test(
                 right_error,
             )
 
-            swing_error = 0.0
+            swing_error = (
+                0.0
+            )
 
         else:
 
-            support_error = float(
-                np.linalg.norm(
-                    p_left_ref
-                    -
-                    p_left_actual
-                )
-            )
+            if (
+                stance_side
+                ==
+                "left"
+            ):
 
-            swing_error = float(
-                np.linalg.norm(
-                    p_right_ref
-                    -
-                    p_right_actual
+                support_error = float(
+                    np.linalg.norm(
+                        p_left_ref
+                        -
+                        p_left_actual
+                    )
                 )
-            )
+
+                swing_error = float(
+                    np.linalg.norm(
+                        p_right_ref
+                        -
+                        p_right_actual
+                    )
+                )
+
+            else:
+
+                support_error = float(
+                    np.linalg.norm(
+                        p_right_ref
+                        -
+                        p_right_actual
+                    )
+                )
+
+                swing_error = float(
+                    np.linalg.norm(
+                        p_left_ref
+                        -
+                        p_left_actual
+                    )
+                )
 
         max_support_error = max(
             max_support_error,
@@ -2331,41 +2657,33 @@ def run_test(
             if (
                 phase
                 ==
-                INITIAL_DOUBLE_SUPPORT
+                SINGLE_SUPPORT
             ):
 
                 print(
                     f"t={kinematic_time:6.3f}"
-                    f" | phase=INITIAL_DS"
-                    f" | CoM="
-                    f"({p_com_actual[0]:+.4f},"
-                    f"{p_com_actual[1]:+.4f})"
+                    f" | STEP={step_index:02d}"
+                    f" | SS {stance_side.upper()}"
+                    f" | tSS={phase_time:.3f}"
+                    f" | T={current_step_time:.3f}"
+                    f" | uT="
+                    f"({landing_position[0]:+.3f},"
+                    f"{landing_position[1]:+.3f})"
                     f" | CoM err="
                     f"{1000.0 * com_error:.2f} mm"
-                    f" | foot err="
-                    f"{1000.0 * support_error:.2f} mm"
+                    f" | swing err="
+                    f"{1000.0 * swing_error:.2f} mm"
                 )
 
             else:
 
                 print(
-                    f"tSS={phase_time:6.3f}"
-                    f" | DCM="
-                    f"({dcm[0]:+.4f},"
-                    f"{dcm[1]:+.4f})"
-                    f" | uT="
-                    f"({landing_position[0]:+.4f},"
-                    f"{landing_position[1]:+.4f})"
-                    f" | T="
-                    f"{current_step_time:.4f}"
+                    f"t={kinematic_time:6.3f}"
+                    f" | {phase}"
                     f" | CoM err="
                     f"{1000.0 * com_error:.2f} mm"
-                    f" | support err="
+                    f" | feet err="
                     f"{1000.0 * support_error:.2f} mm"
-                    f" | swing err="
-                    f"{1000.0 * swing_error:.2f} mm"
-                    f" | frozen="
-                    f"{int(planner_frozen)}"
                 )
 
             next_print_time += (
@@ -2373,33 +2691,17 @@ def run_test(
             )
 
         # ====================================================
-        # TOUCHDOWN / FINISH
+        # ADVANCE MPC SEGMENT
         # ====================================================
 
-        if (
-            phase
-            ==
-            SINGLE_SUPPORT
-            and
-            phase_time
-            >=
-            current_step_time
-            -
-            TIME_TOLERANCE
-        ):
-
-            break
-
-        # ====================================================
-        # ADVANCE MPC INTERVAL
-        # ====================================================
-
-        mpc_substep += 1
+        mpc_substep += (
+            1
+        )
 
         if (
             mpc_substep
             >=
-            MPC_IK_STEPS
+            MPC_EXECUTOR_STEPS
         ):
 
             x_state = (
@@ -2412,12 +2714,16 @@ def run_test(
                 .get_terminal_y_state()
             )
 
-            current_segment = None
+            current_segment = (
+                None
+            )
 
-            mpc_substep = 0
+            mpc_substep = (
+                0
+            )
 
         # ====================================================
-        # TIME
+        # LOGICAL TIME
         # ====================================================
 
         phase_time += (
@@ -2428,8 +2734,6 @@ def run_test(
             DT
         )
 
-        iteration += 1
-
         mj_data.time = (
             kinematic_time
         )
@@ -2438,9 +2742,21 @@ def run_test(
         # VIEWER
         # ====================================================
 
-        if viewer is not None:
+        if (
+            viewer is not None
+            and
+            kinematic_time
+            >=
+            next_viewer_sync_time
+            -
+            TIME_TOLERANCE
+        ):
 
             viewer.sync()
+
+            next_viewer_sync_time += (
+                VIEWER_SYNC_PERIOD
+            )
 
             if REALTIME_PLAYBACK:
 
@@ -2488,32 +2804,12 @@ def run_test(
         robot.get_right_foot_pose()
     )
 
-    final_landing_error = float(
-        np.linalg.norm(
-            landing_position
-            -
-            final_right
-        )
-    )
-
-    final_support_error = float(
-        np.linalg.norm(
-            left_initial_position
-            -
-            final_left
-        )
-    )
-
-    # ========================================================
-    # OUTPUT
-    # ========================================================
-
     print()
 
     separator()
 
     print(
-        "FINAL RESULT"
+        "FINAL WALKING RESULT"
     )
 
     separator()
@@ -2521,167 +2817,93 @@ def run_test(
     print()
 
     print(
-        f"Nominal uT = "
-        f"{nominal_landing_position}"
+        f"logical walking time = "
+        f"{kinematic_time:.3f} s"
     )
 
     print(
-        f"Nominal T  = "
-        f"{nominal_step.step_time:.6f} s"
-    )
-
-    print()
-
-    print(
-        f"Adapted uT = "
-        f"{landing_position}"
-    )
-
-    print(
-        f"Adapted T  = "
-        f"{current_step_time:.6f} s"
+        f"completed steps      = "
+        f"{step_index}"
     )
 
     print()
 
     print(
-        "Adaptation:"
-    )
-
-    print(
-        f"  Delta uT = "
-        f"{landing_position - nominal_landing_position}"
-    )
-
-    print(
-        f"  Delta T  = "
-        f"{1000.0 * (current_step_time - nominal_step.step_time):+.3f} ms"
-    )
-
-    print()
-
-    if planner_result is not None:
-
-        print(
-            f"b = "
-            f"({planner_result.dcm_offset_x:+.6f}, "
-            f"{planner_result.dcm_offset_y:+.6f}) m"
-        )
-
-        print(
-            f"viability slack = "
-            f"({planner_result.viability_slack_x:.3e}, "
-            f"{planner_result.viability_slack_y:.3e})"
-        )
-
-        print(
-            f"QP equality residual = "
-            f"{planner_result.max_equality_residual:.3e}"
-        )
-
-    print()
-
-    print(
-        f"planner frozen      = "
-        f"{planner_frozen}"
-    )
-
-    print(
-        f"freeze time         = "
-        f"{freeze_time}"
-    )
-
-    print(
-        f"disturbance applied = "
-        f"{disturbance_applied}"
-    )
-
-    print()
-
-    print(
-        f"final CoM           = "
+        f"final CoM   = "
         f"{final_com}"
     )
 
     print(
-        f"final LEFT          = "
+        f"final LEFT  = "
         f"{final_left}"
     )
 
     print(
-        f"final RIGHT         = "
+        f"final RIGHT = "
         f"{final_right}"
     )
 
     print()
 
     print(
-        f"final landing error = "
-        f"{1000.0 * final_landing_error:.3f} mm"
+        f"last landing error = "
+        f"{1000.0 * last_landing_error:.3f} mm"
     )
 
     print(
-        f"final support error = "
-        f"{1000.0 * final_support_error:.3f} mm"
+        f"max landing error  = "
+        f"{1000.0 * max_landing_error:.3f} mm"
     )
 
     print()
 
     print(
-        f"max CoM error       = "
+        f"max CoM error      = "
         f"{1000.0 * max_com_error:.3f} mm"
     )
 
     print(
-        f"max support error   = "
+        f"max support error  = "
         f"{1000.0 * max_support_error:.3f} mm"
     )
 
     print(
-        f"max swing error     = "
+        f"max swing error    = "
         f"{1000.0 * max_swing_error:.3f} mm"
     )
 
     print()
 
     print(
-        f"max slack x         = "
+        f"max viability slack x = "
         f"{max_viability_slack_x:.3e}"
     )
 
     print(
-        f"max slack y         = "
+        f"max viability slack y = "
         f"{max_viability_slack_y:.3e}"
     )
 
     print()
 
     print(
-        f"MPC solves          = "
+        f"MPC solves         = "
         f"{mpc_solve_count}"
     )
 
     print(
-        f"max MPC solve time  = "
+        f"max MPC solve time = "
         f"{1000.0 * max_mpc_solve_time:.2f} ms"
     )
 
     print()
 
     print(
-        "IMPORTANT:"
+        "Execution remains purely kinematic."
     )
 
     print(
-        "  This validates planner -> MPC -> IK integration."
-    )
-
-    print(
-        "  Motion is executed by kinematic set-state only."
-    )
-
-    print(
-        "  Dynamic feasibility is NOT evaluated."
+        "Dynamic feasibility is not evaluated."
     )
 
     separator()
@@ -2694,7 +2916,7 @@ def run_test(
 def main():
 
     # ========================================================
-    # STEP PLANNER
+    # PLANNER
     # ========================================================
 
     planner = (
@@ -2777,7 +2999,9 @@ def main():
         home_id,
     )
 
-    mj_data.qvel[:] = 0.0
+    mj_data.qvel[:] = (
+        0.0
+    )
 
     mujoco.mj_forward(
         mj_model,
@@ -2818,28 +3042,23 @@ def main():
     )
 
     print(
-        f"nq     = "
-        f"{mj_model.nq}"
-    )
-
-    print(
-        f"nv     = "
-        f"{mj_model.nv}"
-    )
-
-    print(
         f"DT     = "
         f"{DT:.6f} s"
     )
 
     print(
-        f"MPC dt = "
+        f"executor = "
+        f"{1.0 / DT:.1f} Hz"
+    )
+
+    print(
+        f"MPC dt   = "
         f"{MPC_TIMESTEP:.6f} s"
     )
 
     print(
-        f"IK steps / MPC interval = "
-        f"{MPC_IK_STEPS}"
+        f"MPC horizon = "
+        f"{MPC_TIMESTEP * MPC_HORIZON_STEPS:.3f} s"
     )
 
     print()
@@ -2850,12 +3069,15 @@ def main():
 
     if SHOW_VIEWER:
 
-        with mujoco.viewer.launch_passive(
-            mj_model,
-            mj_data,
-        ) as viewer:
+        with (
+            mujoco.viewer.launch_passive(
+                mj_model,
+                mj_data,
+            )
+            as viewer
+        ):
 
-            run_test(
+            run_walk(
                 mj_model=(
                     mj_model
                 ),
@@ -2879,7 +3101,7 @@ def main():
 
     else:
 
-        run_test(
+        run_walk(
             mj_model=(
                 mj_model
             ),
