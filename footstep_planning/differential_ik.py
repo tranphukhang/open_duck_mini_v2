@@ -39,7 +39,6 @@ def _matrix_rank(
     )
 
     if A.size == 0:
-
         return 0
 
     s = np.linalg.svd(
@@ -48,15 +47,12 @@ def _matrix_rank(
     )
 
     if s.size == 0:
-
         return 0
 
     tol = (
         rcond
         *
-        max(
-            A.shape
-        )
+        max(A.shape)
         *
         s[0]
     )
@@ -109,9 +105,7 @@ def damped_pseudoinverse(
     tol = (
         rcond
         *
-        max(
-            A.shape
-        )
+        max(A.shape)
         *
         s[0]
     )
@@ -134,9 +128,7 @@ def damped_pseudoinverse(
 
     else:
 
-        sigma = (
-            s[valid]
-        )
+        sigma = s[valid]
 
         gains[valid] = (
             sigma
@@ -151,9 +143,7 @@ def damped_pseudoinverse(
     return (
         Vt.T
         @
-        np.diag(
-            gains
-        )
+        np.diag(gains)
         @
         U.T
     )
@@ -175,9 +165,7 @@ def nullspace_basis(
             "A must be a 2D matrix."
         )
 
-    n = (
-        A.shape[1]
-    )
+    n = A.shape[1]
 
     if A.shape[0] == 0:
 
@@ -200,9 +188,7 @@ def nullspace_basis(
         tol = (
             rcond
             *
-            max(
-                A.shape
-            )
+            max(A.shape)
             *
             s[0]
         )
@@ -275,11 +261,7 @@ def solve_task_hierarchy(
                 "J must be 2D."
             )
 
-        if (
-            J.shape[1]
-            !=
-            n_dof
-        ):
+        if J.shape[1] != n_dof:
 
             raise ValueError(
                 f"{task_name}: "
@@ -287,11 +269,7 @@ def solve_task_hierarchy(
                 f"expected {n_dof}."
             )
 
-        if (
-            J.shape[0]
-            !=
-            v.shape[0]
-        ):
+        if J.shape[0] != v.shape[0]:
 
             raise ValueError(
                 f"{task_name}: "
@@ -328,7 +306,7 @@ def solve_task_hierarchy(
         )
 
         # ====================================================
-        # SOLVE ONLY INSIDE CURRENT NULLSPACE
+        # SOLVE INSIDE CURRENT NULLSPACE
         # ====================================================
 
         if Z.shape[1] > 0:
@@ -356,7 +334,7 @@ def solve_task_hierarchy(
             )
 
         # ====================================================
-        # DIAGNOSTIC
+        # DIAGNOSTICS
         # ====================================================
 
         residual_after = (
@@ -441,9 +419,7 @@ def _vector3(
         dtype=float,
     )
 
-    if value.shape != (
-        3,
-    ):
+    if value.shape != (3,):
 
         raise ValueError(
             f"{name} must have shape (3,)."
@@ -459,9 +435,7 @@ def _vector3(
             f"{name} must contain finite values."
         )
 
-    return (
-        value
-    )
+    return value
 
 
 def _rotation_matrix(
@@ -493,20 +467,34 @@ def _rotation_matrix(
             f"{name} must contain finite values."
         )
 
-    return (
-        value
-    )
+    return value
 
 
 # ============================================================
-# TRUNK PITCH TASK
+# TRUNK FULL-ORIENTATION TASK
 # ============================================================
 
-def build_trunk_pitch_task(
+def build_trunk_orientation_task(
     robot,
     trunk_rotation_ref,
     trunk_orientation_gain,
 ):
+    """
+    Hold the complete 3D orientation of the trunk.
+
+    Error is expressed in the current trunk local frame:
+
+        e_R = log(
+            R_actual^T R_ref
+        )
+
+    Angular command:
+
+        omega_cmd = K_R e_R
+
+    The LOCAL angular Jacobian is used consistently with the
+    local orientation error.
+    """
 
     if trunk_orientation_gain < 0.0:
 
@@ -529,7 +517,7 @@ def build_trunk_pitch_task(
     )
 
     # ========================================================
-    # LOCAL ORIENTATION ERROR
+    # LOCAL 3D ORIENTATION ERROR
     # ========================================================
 
     rotation_error_local = (
@@ -540,16 +528,19 @@ def build_trunk_pitch_task(
         )
     )
 
-    omega_y_cmd = (
+    omega_cmd_local = (
         trunk_orientation_gain
         *
-        float(
-            rotation_error_local[1]
-        )
+        rotation_error_local
     )
 
     # ========================================================
-    # TRUNK LOCAL JACOBIAN
+    # LOCAL TRUNK JACOBIAN
+    #
+    # Pinocchio spatial Jacobian:
+    #
+    # rows 0:3 -> linear
+    # rows 3:6 -> angular
     # ========================================================
 
     J_local = (
@@ -558,31 +549,51 @@ def build_trunk_pitch_task(
         )
     )
 
-    # Pinocchio spatial Jacobian:
-    #
-    # rows 0:3 -> linear
-    # rows 3:6 -> angular
-    #
-    # local angular-Y -> row 4
-    # ========================================================
-
-    J_pitch = (
+    J_orientation = (
         J_local[
-            4:5,
+            3:6,
             robot.walking_velocity_indices,
         ]
     )
 
-    v_pitch = np.array(
-        [
-            omega_y_cmd
-        ],
-        dtype=float,
+    return (
+        J_orientation,
+        omega_cmd_local,
+        rotation_error_local,
+    )
+
+
+# ============================================================
+# LEGACY PITCH TASK
+#
+# Retained for compatibility with any older code.
+# The walking solvers below use the FULL orientation task.
+# ============================================================
+
+def build_trunk_pitch_task(
+    robot,
+    trunk_rotation_ref,
+    trunk_orientation_gain,
+):
+
+    (
+        J_orientation,
+        omega_cmd,
+        rotation_error_local,
+    ) = build_trunk_orientation_task(
+        robot=robot,
+        trunk_rotation_ref=trunk_rotation_ref,
+        trunk_orientation_gain=trunk_orientation_gain,
     )
 
     return (
-        J_pitch,
-        v_pitch,
+        J_orientation[
+            1:2,
+            :
+        ],
+        omega_cmd[
+            1:2
+        ],
         rotation_error_local,
     )
 
@@ -619,26 +630,18 @@ def solve_single_support_ik(
         P1: support foot 5D
         P2: CoM 3D
         P3: swing foot 5D
-        P4: trunk local-Y 1D
+        P4: trunk orientation 3D
 
-    The CoM task is intentionally placed above the swing-foot
-    task because the CoM trajectory will be generated by
-    LIPM-MPC.
+    The trunk task holds roll, pitch and yaw of the trunk
+    relative to trunk_rotation_ref.
 
-    Expected active walking DoF:
+    With 16 active walking DoF:
 
-        16
+        5 + 3 + 5 + 3 = 16
 
-    Expected task dimensions:
-
-        support = 5
-        CoM     = 3
-        swing   = 5
-        trunk   = 1
-
-    Expected final nullity when all reduced tasks are full rank:
-
-        16 - 5 - 3 - 5 - 1 = 2
+    If the higher-priority tasks consume all available
+    directions, the lower-priority trunk task is automatically
+    satisfied only in the remaining nullspace.
     """
 
     # ========================================================
@@ -705,6 +708,13 @@ def solve_single_support_ik(
 
         raise ValueError(
             "com_position_gain "
+            "cannot be negative."
+        )
+
+    if trunk_orientation_gain < 0.0:
+
+        raise ValueError(
+            "trunk_orientation_gain "
             "cannot be negative."
         )
 
@@ -873,9 +883,11 @@ def solve_single_support_ik(
     )
 
     # ========================================================
-    # FOOT 5D COMMANDS
+    # FOOT 5D TASKS
     #
-    # 3D position + two orientation components
+    # 3 position rows
+    # +
+    # 2 foot-orientation rows
     # ========================================================
 
     v_support = np.concatenate(
@@ -901,14 +913,15 @@ def solve_single_support_ik(
     )
 
     # ========================================================
-    # TRUNK TASK
+    # TRUNK FULL ORIENTATION
     # ========================================================
 
     (
-        J_trunk_pitch,
-        v_trunk_pitch,
+        J_trunk_orientation,
+        v_trunk_orientation,
         trunk_error_local,
-    ) = build_trunk_pitch_task(
+    ) = build_trunk_orientation_task(
+
         robot=(
             robot
         ),
@@ -925,9 +938,13 @@ def solve_single_support_ik(
     # ========================================================
     # STRICT PRIORITY
     #
-    # IMPORTANT:
-    #
-    # support > CoM > swing > trunk
+    # support
+    #    >
+    # CoM
+    #    >
+    # swing
+    #    >
+    # trunk orientation
     # ========================================================
 
     tasks = [
@@ -950,9 +967,9 @@ def solve_single_support_ik(
         ),
 
         (
-            "trunk_pitch",
-            J_trunk_pitch,
-            v_trunk_pitch,
+            "trunk_orientation",
+            J_trunk_orientation,
+            v_trunk_orientation,
         ),
     ]
 
@@ -969,6 +986,7 @@ def solve_single_support_ik(
         diagnostics,
         final_nullspace,
     ) = solve_task_hierarchy(
+
         tasks=(
             tasks
         ),
@@ -1016,9 +1034,26 @@ def solve_single_support_ik(
                     )
                 ),
 
-            "trunk_local_y_error_rad":
+            "trunk_orientation_error_norm_rad":
+                float(
+                    np.linalg.norm(
+                        trunk_error_local
+                    )
+                ),
+
+            "trunk_roll_error_rad":
+                float(
+                    trunk_error_local[0]
+                ),
+
+            "trunk_pitch_error_rad":
                 float(
                     trunk_error_local[1]
+                ),
+
+            "trunk_yaw_error_rad":
+                float(
+                    trunk_error_local[2]
                 ),
         }
     )
@@ -1073,11 +1108,11 @@ def solve_double_support_ik(
 
         P1: both feet 10D
         P2: CoM 3D
-        P3: trunk local-Y 1D
+        P3: trunk orientation 3D
 
-    Expected final nullity:
+    Nominal task dimensions:
 
-        16 - 10 - 3 - 1 = 2
+        10 + 3 + 3 = 16
     """
 
     # ========================================================
@@ -1130,6 +1165,13 @@ def solve_double_support_ik(
 
         raise ValueError(
             "com_position_gain "
+            "cannot be negative."
+        )
+
+    if trunk_orientation_gain < 0.0:
+
+        raise ValueError(
+            "trunk_orientation_gain "
             "cannot be negative."
         )
 
@@ -1246,7 +1288,7 @@ def solve_double_support_ik(
     )
 
     # ========================================================
-    # BOTH FEET AS ONE HIGHEST-PRIORITY TASK
+    # BOTH FEET AS HIGHEST-PRIORITY TASK
     # ========================================================
 
     J_both_feet = np.vstack(
@@ -1264,14 +1306,15 @@ def solve_double_support_ik(
     )
 
     # ========================================================
-    # TRUNK
+    # TRUNK FULL ORIENTATION
     # ========================================================
 
     (
-        J_trunk_pitch,
-        v_trunk_pitch,
+        J_trunk_orientation,
+        v_trunk_orientation,
         trunk_error_local,
-    ) = build_trunk_pitch_task(
+    ) = build_trunk_orientation_task(
+
         robot=(
             robot
         ),
@@ -1303,9 +1346,9 @@ def solve_double_support_ik(
         ),
 
         (
-            "trunk_pitch",
-            J_trunk_pitch,
-            v_trunk_pitch,
+            "trunk_orientation",
+            J_trunk_orientation,
+            v_trunk_orientation,
         ),
     ]
 
@@ -1322,6 +1365,7 @@ def solve_double_support_ik(
         diagnostics,
         final_nullspace,
     ) = solve_task_hierarchy(
+
         tasks=(
             tasks
         ),
@@ -1369,9 +1413,26 @@ def solve_double_support_ik(
                     )
                 ),
 
-            "trunk_local_y_error_rad":
+            "trunk_orientation_error_norm_rad":
+                float(
+                    np.linalg.norm(
+                        trunk_error_local
+                    )
+                ),
+
+            "trunk_roll_error_rad":
+                float(
+                    trunk_error_local[0]
+                ),
+
+            "trunk_pitch_error_rad":
                 float(
                     trunk_error_local[1]
+                ),
+
+            "trunk_yaw_error_rad":
+                float(
+                    trunk_error_local[2]
                 ),
         }
     )

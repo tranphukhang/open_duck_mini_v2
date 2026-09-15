@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import sys
 import time
+import threading
+
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+import glfw
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -77,7 +81,7 @@ else:
 
 
 # ============================================================
-# REUSE INITIAL SETTLING / VISUALIZATION
+# SETTLING / ZMP VISUALIZATION
 # ============================================================
 
 from lipm_mpc.run import (
@@ -115,9 +119,9 @@ from footstep_planning.walking_fsm import (
 from footstep_planning.walking_visualization import (
     WalkingVisualizer,
     PlannedFootstep,
-    MAX_PLANNED_FOOTSTEPS,
     add_sphere,
     add_line,
+    draw_polyline,
 )
 
 
@@ -128,20 +132,37 @@ np.set_printoptions(
 
 
 # ============================================================
-# BASE RATE
+# EXECUTOR
 # ============================================================
 
 DT = 0.0005
 
 
 # ============================================================
-# WALKING COMMAND
+# FIRST SUPPORT
 # ============================================================
 
 FIRST_STANCE_SIDE = "left"
 
-DESIRED_VELOCITY_X = 0.10
-DESIRED_VELOCITY_Y = 0.05
+
+# ============================================================
+# INITIAL WALKING COMMAND
+# ============================================================
+
+INITIAL_DESIRED_VELOCITY_X = 0.10
+INITIAL_DESIRED_VELOCITY_Y = 0.00
+
+
+# ============================================================
+# KEYBOARD COMMAND STEP
+#
+# User request:
+#
+#     each arrow press = 0.05 m/s
+# ============================================================
+
+VELOCITY_X_STEP = 0.05
+VELOCITY_Y_STEP = 0.05
 
 
 # ============================================================
@@ -165,6 +186,44 @@ STEP_WIDTH_MAX = +0.03
 
 STEP_TIME_MIN = 0.20
 STEP_TIME_MAX = 0.30
+
+
+# ============================================================
+# COMMAND LIMITS
+#
+# Keep command inside the nominal planner's feasible range.
+#
+# Approximate relationship:
+#
+#     L = vx T
+#     W = vy T
+#
+# using Tmin for maximum magnitude.
+# ============================================================
+
+VELOCITY_X_MIN = (
+    STEP_LENGTH_MIN
+    /
+    STEP_TIME_MIN
+)
+
+VELOCITY_X_MAX = (
+    STEP_LENGTH_MAX
+    /
+    STEP_TIME_MIN
+)
+
+VELOCITY_Y_MIN = (
+    STEP_WIDTH_MIN
+    /
+    STEP_TIME_MIN
+)
+
+VELOCITY_Y_MAX = (
+    STEP_WIDTH_MAX
+    /
+    STEP_TIME_MIN
+)
 
 
 # ============================================================
@@ -204,11 +263,15 @@ IK_RCOND = 1.0e-10
 SUPPORT_POSITION_KP = 25.0
 SWING_POSITION_KP = 20.0
 COM_POSITION_KP = 10.0
+
+# Full 3D trunk orientation task:
+#
+# roll + pitch + yaw
 TRUNK_ORIENTATION_KP = 10.0
 
 
 # ============================================================
-# OPTIONAL DCM DISTURBANCE
+# OPTIONAL SYNTHETIC DCM DISTURBANCE
 # ============================================================
 
 ENABLE_DISTURBANCE = False
@@ -233,6 +296,15 @@ STATUS_PRINT_PERIOD = 0.10
 
 
 # ============================================================
+# VISUAL HISTORY
+#
+# Only show the most recent 4 seconds.
+# ============================================================
+
+VISUAL_HISTORY_DURATION = 4.0
+
+
+# ============================================================
 # NUMERICAL
 # ============================================================
 
@@ -242,32 +314,37 @@ TIME_TOLERANCE = 1.0e-10
 # ============================================================
 # ZMP VISUALIZATION
 #
-# Point-foot LIPM:
+# The built-in infinite/history trail is disabled.
 #
-#       p_ZMP = u0 = current stance foot
-#
-# No MPC preview.
+# We draw our own timestamped 4-second trail below.
 # ============================================================
 
 ZMP_VISUALIZATION_CONFIG = (
     ZMPVisualizationConfig(
 
         show_current=True,
-        show_trail=True,
+
+        show_trail=False,
+
         show_preview=False,
 
         current_z=0.010,
+
         trail_z=0.008,
+
         preview_z=0.007,
 
         current_radius=0.007,
+
         preview_radius=0.0028,
 
         trail_width=5.0,
+
         preview_width=2.5,
 
         trail_min_distance=5.0e-4,
-        trail_max_points=300,
+
+        trail_max_points=2,
 
         preview_point_stride=2,
 
@@ -311,6 +388,23 @@ ZMP_VISUALIZATION_CONFIG = (
             dtype=np.float32,
         ),
     )
+)
+
+
+# ============================================================
+# RECENT ZMP TRAIL
+# ============================================================
+
+RECENT_ZMP_TRAIL_WIDTH = 5.0
+
+RECENT_ZMP_TRAIL_RGBA = np.array(
+    [
+        0.90,
+        0.10,
+        0.95,
+        0.80,
+    ],
+    dtype=np.float32,
 )
 
 
@@ -387,6 +481,226 @@ COM_DCM_LINE_RGBA = np.array(
 
 
 # ============================================================
+# VELOCITY COMMAND
+# ============================================================
+
+@dataclass(frozen=True)
+class VelocityCommandSnapshot:
+
+    x: float
+
+    y: float
+
+    version: int
+
+
+class VelocityCommand:
+    """
+    Keyboard velocity command.
+
+    Coordinate convention:
+
+        +x : forward
+        -x : backward
+
+        +y : left
+        -y : right
+
+    Arrow keys:
+
+        UP    -> vx += 0.05
+        DOWN  -> vx -= 0.05
+        LEFT  -> vy += 0.05
+        RIGHT -> vy -= 0.05
+
+    IMPORTANT:
+
+    No terminal print is done here.
+
+    The command is printed together with:
+
+        uT
+        T
+        vCoM
+
+    in the normal status line.
+    """
+
+    def __init__(
+        self,
+        *,
+        initial_x,
+        initial_y,
+    ):
+
+        self._lock = (
+            threading.Lock()
+        )
+
+        self._x = float(
+            np.clip(
+                initial_x,
+                VELOCITY_X_MIN,
+                VELOCITY_X_MAX,
+            )
+        )
+
+        self._y = float(
+            np.clip(
+                initial_y,
+                VELOCITY_Y_MIN,
+                VELOCITY_Y_MAX,
+            )
+        )
+
+        self._version = 0
+
+
+    def snapshot(
+        self,
+    ) -> VelocityCommandSnapshot:
+
+        with self._lock:
+
+            return VelocityCommandSnapshot(
+
+                x=float(
+                    self._x
+                ),
+
+                y=float(
+                    self._y
+                ),
+
+                version=int(
+                    self._version
+                ),
+            )
+
+
+    def key_callback(
+        self,
+        keycode,
+    ):
+
+        with self._lock:
+
+            old_x = (
+                self._x
+            )
+
+            old_y = (
+                self._y
+            )
+
+            # =================================================
+            # FORWARD
+            # =================================================
+
+            if keycode == glfw.KEY_UP:
+
+                self._x = float(
+                    np.clip(
+                        self._x
+                        +
+                        VELOCITY_X_STEP,
+
+                        VELOCITY_X_MIN,
+                        VELOCITY_X_MAX,
+                    )
+                )
+
+            # =================================================
+            # BACKWARD
+            # =================================================
+
+            elif keycode == glfw.KEY_DOWN:
+
+                self._x = float(
+                    np.clip(
+                        self._x
+                        -
+                        VELOCITY_X_STEP,
+
+                        VELOCITY_X_MIN,
+                        VELOCITY_X_MAX,
+                    )
+                )
+
+            # =================================================
+            # LEFT
+            # =================================================
+
+            elif keycode == glfw.KEY_LEFT:
+
+                self._y = float(
+                    np.clip(
+                        self._y
+                        +
+                        VELOCITY_Y_STEP,
+
+                        VELOCITY_Y_MIN,
+                        VELOCITY_Y_MAX,
+                    )
+                )
+
+            # =================================================
+            # RIGHT
+            # =================================================
+
+            elif keycode == glfw.KEY_RIGHT:
+
+                self._y = float(
+                    np.clip(
+                        self._y
+                        -
+                        VELOCITY_Y_STEP,
+
+                        VELOCITY_Y_MIN,
+                        VELOCITY_Y_MAX,
+                    )
+                )
+
+            else:
+
+                return
+
+            # Avoid accumulated floating-point noise such as:
+            #
+            # 0.15000000000000002
+
+            self._x = float(
+                np.round(
+                    self._x,
+                    6,
+                )
+            )
+
+            self._y = float(
+                np.round(
+                    self._y,
+                    6,
+                )
+            )
+
+            changed = (
+                not np.isclose(
+                    old_x,
+                    self._x,
+                )
+                or
+                not np.isclose(
+                    old_y,
+                    self._y,
+                )
+            )
+
+            if changed:
+
+                self._version += 1
+
+
+# ============================================================
 # VISUAL STATE
 # ============================================================
 
@@ -399,12 +713,414 @@ class VisualWalkingState:
 
 
 # ============================================================
+# TIMED VISUAL FOOTSTEP
+# ============================================================
+
+@dataclass
+class TimedFootstep:
+
+    time: float
+
+    footstep: PlannedFootstep
+
+
+# ============================================================
+# RECENT VISUAL HISTORY
+# ============================================================
+
+class RecentVisualHistory:
+    """
+    Timestamped visualization history.
+
+    Everything older than:
+
+        current_time - VISUAL_HISTORY_DURATION
+
+    is removed.
+
+    Managed histories:
+
+        actual left-foot trail
+        actual right-foot trail
+        actual CoM trail
+        point-foot ZMP trail
+        landed footprints
+    """
+
+    def __init__(
+        self,
+        *,
+        duration,
+    ):
+
+        self.duration = float(
+            duration
+        )
+
+        if self.duration <= 0.0:
+
+            raise ValueError(
+                "Visual history duration must be positive."
+            )
+
+        self.left_trail = deque()
+
+        self.right_trail = deque()
+
+        self.com_trail = deque()
+
+        self.zmp_trail = deque()
+
+        self.footsteps = deque()
+
+
+    # ========================================================
+    # PRUNE ONE TIMED DEQUE
+    # ========================================================
+
+    def _prune_deque(
+        self,
+        data,
+        current_time,
+    ):
+
+        threshold = (
+            current_time
+            -
+            self.duration
+        )
+
+        while (
+            len(data) > 0
+            and
+            data[0][0]
+            <
+            threshold
+            -
+            TIME_TOLERANCE
+        ):
+
+            data.popleft()
+
+
+    # ========================================================
+    # PRUNE EVERYTHING
+    # ========================================================
+
+    def prune(
+        self,
+        current_time,
+    ):
+
+        self._prune_deque(
+            self.left_trail,
+            current_time,
+        )
+
+        self._prune_deque(
+            self.right_trail,
+            current_time,
+        )
+
+        self._prune_deque(
+            self.com_trail,
+            current_time,
+        )
+
+        self._prune_deque(
+            self.zmp_trail,
+            current_time,
+        )
+
+        threshold = (
+            current_time
+            -
+            self.duration
+        )
+
+        while (
+            len(
+                self.footsteps
+            )
+            >
+            0
+            and
+            self.footsteps[0].time
+            <
+            threshold
+            -
+            TIME_TOLERANCE
+        ):
+
+            self.footsteps.popleft()
+
+
+    # ========================================================
+    # INITIAL STATE
+    # ========================================================
+
+    def initialize(
+        self,
+        *,
+        current_time,
+        robot,
+        zmp_world,
+    ):
+
+        (
+            p_left,
+            R_left,
+        ) = (
+            robot.get_left_foot_pose()
+        )
+
+        (
+            p_right,
+            R_right,
+        ) = (
+            robot.get_right_foot_pose()
+        )
+
+        p_com = (
+            robot.get_com()
+        )
+
+        self.left_trail.append(
+            (
+                current_time,
+                p_left.copy(),
+            )
+        )
+
+        self.right_trail.append(
+            (
+                current_time,
+                p_right.copy(),
+            )
+        )
+
+        self.com_trail.append(
+            (
+                current_time,
+                p_com.copy(),
+            )
+        )
+
+        self.zmp_trail.append(
+            (
+                current_time,
+                np.asarray(
+                    zmp_world,
+                    dtype=float,
+                ).copy(),
+            )
+        )
+
+        self.footsteps.append(
+            TimedFootstep(
+
+                time=(
+                    current_time
+                ),
+
+                footstep=PlannedFootstep(
+
+                    side="left",
+
+                    position=(
+                        p_left.copy()
+                    ),
+
+                    rotation=(
+                        R_left.copy()
+                    ),
+                ),
+            )
+        )
+
+        self.footsteps.append(
+            TimedFootstep(
+
+                time=(
+                    current_time
+                ),
+
+                footstep=PlannedFootstep(
+
+                    side="right",
+
+                    position=(
+                        p_right.copy()
+                    ),
+
+                    rotation=(
+                        R_right.copy()
+                    ),
+                ),
+            )
+        )
+
+
+    # ========================================================
+    # RECORD CURRENT ROBOT STATE
+    # ========================================================
+
+    def record(
+        self,
+        *,
+        current_time,
+        robot,
+        zmp_world,
+    ):
+
+        p_left, _ = (
+            robot.get_left_foot_pose()
+        )
+
+        p_right, _ = (
+            robot.get_right_foot_pose()
+        )
+
+        p_com = (
+            robot.get_com()
+        )
+
+        self.left_trail.append(
+            (
+                current_time,
+                p_left.copy(),
+            )
+        )
+
+        self.right_trail.append(
+            (
+                current_time,
+                p_right.copy(),
+            )
+        )
+
+        self.com_trail.append(
+            (
+                current_time,
+                p_com.copy(),
+            )
+        )
+
+        self.zmp_trail.append(
+            (
+                current_time,
+                np.asarray(
+                    zmp_world,
+                    dtype=float,
+                ).copy(),
+            )
+        )
+
+        self.prune(
+            current_time
+        )
+
+
+    # ========================================================
+    # RECORD COMPLETED FOOTSTEP
+    # ========================================================
+
+    def add_footstep(
+        self,
+        *,
+        current_time,
+        side,
+        position,
+        rotation,
+    ):
+
+        self.footsteps.append(
+            TimedFootstep(
+
+                time=(
+                    current_time
+                ),
+
+                footstep=PlannedFootstep(
+
+                    side=(
+                        side
+                    ),
+
+                    position=np.asarray(
+                        position,
+                        dtype=float,
+                    ).copy(),
+
+                    rotation=np.asarray(
+                        rotation,
+                        dtype=float,
+                    ).copy(),
+                ),
+            )
+        )
+
+        self.prune(
+            current_time
+        )
+
+
+    # ========================================================
+    # APPLY RECENT HISTORY TO EXISTING WALKING VISUALIZER
+    # ========================================================
+
+    def apply_to_walking_visualizer(
+        self,
+        walking_visualizer,
+    ):
+
+        walking_visualizer.left_trail = [
+            point.copy()
+            for _, point
+            in self.left_trail
+        ]
+
+        walking_visualizer.right_trail = [
+            point.copy()
+            for _, point
+            in self.right_trail
+        ]
+
+        walking_visualizer.com_trail = [
+            point.copy()
+            for _, point
+            in self.com_trail
+        ]
+
+        walking_visualizer.planned_footsteps = [
+            item.footstep
+            for item
+            in self.footsteps
+        ]
+
+
+    # ========================================================
+    # RECENT ZMP POINTS
+    # ========================================================
+
+    def get_zmp_points(
+        self,
+    ):
+
+        return [
+            point.copy()
+            for _, point
+            in self.zmp_trail
+        ]
+
+
+# ============================================================
 # BASIC HELPERS
 # ============================================================
 
 def opposite_side(
-    side: str,
-) -> str:
+    side,
+):
 
     if side == "left":
         return "right"
@@ -418,7 +1134,7 @@ def opposite_side(
 
 
 def stance_leg_from_side(
-    side: str,
+    side,
 ):
 
     if side == "left":
@@ -466,6 +1182,7 @@ def update_mujoco_from_pinocchio(
         q_mj
     )
 
+    # Kinematic set-state execution.
     mj_data.qvel[:] = 0.0
 
     mujoco.mj_forward(
@@ -479,19 +1196,22 @@ def update_mujoco_from_pinocchio(
 # ============================================================
 
 def compute_nominal_step(
+    *,
     planner,
     stance_side,
+    desired_velocity_x,
+    desired_velocity_y,
 ):
 
     return (
         planner.compute_nominal_step(
 
             desired_velocity_x=(
-                DESIRED_VELOCITY_X
+                desired_velocity_x
             ),
 
             desired_velocity_y=(
-                DESIRED_VELOCITY_Y
+                desired_velocity_y
             ),
 
             stance_leg=(
@@ -500,6 +1220,56 @@ def compute_nominal_step(
                 )
             ),
         )
+    )
+
+
+def compute_nominal_steps(
+    *,
+    planner,
+    velocity_command,
+):
+
+    nominal_left = (
+        compute_nominal_step(
+
+            planner=(
+                planner
+            ),
+
+            stance_side="left",
+
+            desired_velocity_x=(
+                velocity_command.x
+            ),
+
+            desired_velocity_y=(
+                velocity_command.y
+            ),
+        )
+    )
+
+    nominal_right = (
+        compute_nominal_step(
+
+            planner=(
+                planner
+            ),
+
+            stance_side="right",
+
+            desired_velocity_x=(
+                velocity_command.x
+            ),
+
+            desired_velocity_y=(
+                velocity_command.y
+            ),
+        )
+    )
+
+    return (
+        nominal_left,
+        nominal_right,
     )
 
 
@@ -561,7 +1331,7 @@ def solve_adaptive_step(
 
 
 # ============================================================
-# CONSISTENT NOMINAL INITIAL DCM
+# CONSISTENT INITIAL DCM
 # ============================================================
 
 def compute_nominal_initial_dcm(
@@ -569,20 +1339,6 @@ def compute_nominal_initial_dcm(
     nominal_step,
     stance_position,
 ):
-
-    """
-    Construct the beginning-of-step DCM that exactly satisfies
-    Stage-2 Eq. (19) at t = 0 for the nominal solution.
-
-        uT - (xi0-u0)*tau + b = u0
-
-    Hence:
-
-        xi0 =
-            u0
-            +
-            (Delta_u_nom + b_nom) / tau_nom
-    """
 
     u0 = np.asarray(
         stance_position[
@@ -607,7 +1363,7 @@ def compute_nominal_initial_dcm(
         dtype=float,
     )
 
-    xi0 = (
+    return (
         u0
         +
         (
@@ -618,8 +1374,6 @@ def compute_nominal_initial_dcm(
         /
         nominal_step.tau
     )
-
-    return xi0
 
 
 # ============================================================
@@ -633,18 +1387,6 @@ def compute_consistent_initial_com_velocity(
     nominal_step,
     stance_position,
 ):
-
-    """
-    DCM:
-
-        xi = c + c_dot / omega
-
-    Therefore:
-
-        c_dot = omega * (xi - c)
-
-    xi is initialized from the nominal periodic step relation.
-    """
 
     xi0 = (
         compute_nominal_initial_dcm(
@@ -692,66 +1434,7 @@ def compute_consistent_initial_com_velocity(
 
 
 # ============================================================
-# FOOTSTEP VISUAL HISTORY
-# ============================================================
-
-def append_planned_footstep(
-    visualizer,
-    *,
-    side,
-    position,
-    rotation,
-):
-
-    footstep = PlannedFootstep(
-
-        side=(
-            side
-        ),
-
-        position=np.asarray(
-            position,
-            dtype=float,
-        ).reshape(
-            3
-        ).copy(),
-
-        rotation=np.asarray(
-            rotation,
-            dtype=float,
-        ).reshape(
-            3,
-            3,
-        ).copy(),
-    )
-
-    visualizer.planned_footsteps.append(
-        footstep
-    )
-
-    if (
-        len(
-            visualizer.planned_footsteps
-        )
-        >
-        MAX_PLANNED_FOOTSTEPS
-    ):
-
-        remove_count = (
-            len(
-                visualizer.planned_footsteps
-            )
-            -
-            MAX_PLANNED_FOOTSTEPS
-        )
-
-        del visualizer.planned_footsteps[
-            0:remove_count
-        ]
-
-
-# ============================================================
-# ADAPTIVE VISUAL OVERLAY
+# ADAPTIVE OVERLAY
 # ============================================================
 
 def draw_adaptive_overlay(
@@ -773,7 +1456,7 @@ def draw_adaptive_overlay(
         )
 
         # ====================================================
-        # COM GROUND PROJECTION
+        # LIPM COM GROUND PROJECTION
         # ====================================================
 
         com_ground = np.array(
@@ -829,7 +1512,7 @@ def draw_adaptive_overlay(
         )
 
         # ====================================================
-        # CURRENT ADAPTIVE uT
+        # CURRENT ADAPTIVE FOOTHOLD
         # ====================================================
 
         if swing_side == "left":
@@ -882,7 +1565,39 @@ def draw_adaptive_overlay(
 
 
 # ============================================================
-# START A NEW STEP
+# DRAW RECENT ZMP TRAIL
+# ============================================================
+
+def draw_recent_zmp_trail(
+    *,
+    viewer,
+    visual_history,
+):
+
+    points = (
+        visual_history
+        .get_zmp_points()
+    )
+
+    if len(points) < 2:
+        return
+
+    with viewer.lock():
+
+        draw_polyline(
+
+            viewer.user_scn,
+
+            points,
+
+            RECENT_ZMP_TRAIL_WIDTH,
+
+            RECENT_ZMP_TRAIL_RGBA,
+        )
+
+
+# ============================================================
+# START NEW STEP
 # ============================================================
 
 def start_new_step(
@@ -932,7 +1647,7 @@ def start_new_step(
     )
 
     # ========================================================
-    # STEP TIMING QP AT t = 0
+    # ADAPTIVE STEP QP AT t = 0
     # ========================================================
 
     planner_result = (
@@ -959,7 +1674,7 @@ def start_new_step(
     )
 
     # ========================================================
-    # ACTUAL SWING FOOT AT LIFT-OFF
+    # SWING FOOT INITIAL POSE
     # ========================================================
 
     if swing_side == "left":
@@ -989,7 +1704,7 @@ def start_new_step(
         )
 
     # ========================================================
-    # LANDING TARGET
+    # ADAPTIVE LANDING TARGET
     # ========================================================
 
     landing_position = (
@@ -1004,13 +1719,12 @@ def start_new_step(
         planner_result.step_location_y
     )
 
-    # Flat terrain.
     landing_position[2] = (
         landing_z
     )
 
     # ========================================================
-    # RESET ONLINE SWING
+    # ONLINE SWING RESET
     # ========================================================
 
     swing_trajectory.reset(
@@ -1052,11 +1766,12 @@ def run_walk(
     robot,
     planner,
     measured_step_width,
+    velocity_command,
     viewer,
 ):
 
     # ========================================================
-    # SETTLED CONFIGURATION
+    # INITIAL SETTLED CONFIGURATION
     # ========================================================
 
     q_pin = (
@@ -1103,6 +1818,12 @@ def run_walk(
         robot.get_com()
     )
 
+    # ========================================================
+    # FULL TRUNK ORIENTATION REFERENCE
+    #
+    # Fixed at settled initial orientation.
+    # ========================================================
+
     (
         _,
         trunk_rotation_ref,
@@ -1112,8 +1833,12 @@ def run_walk(
         )
     )
 
+    trunk_rotation_ref = (
+        trunk_rotation_ref.copy()
+    )
+
     # ========================================================
-    # LIPM WORLD HEIGHT
+    # LIPM HEIGHT
     # ========================================================
 
     support_plane_z = (
@@ -1141,20 +1866,35 @@ def run_walk(
     )
 
     # ========================================================
-    # NOMINAL GAIT
+    # INITIAL COMMAND
     # ========================================================
 
-    nominal_left_step = (
-        compute_nominal_step(
-            planner,
-            "left",
-        )
+    command = (
+        velocity_command
+        .snapshot()
     )
 
-    nominal_right_step = (
-        compute_nominal_step(
-            planner,
-            "right",
+    command_version = (
+        command.version
+    )
+
+    # ========================================================
+    # INITIAL NOMINAL GAIT
+    # ========================================================
+
+    (
+        nominal_left_step,
+        nominal_right_step,
+    ) = (
+        compute_nominal_steps(
+
+            planner=(
+                planner
+            ),
+
+            velocity_command=(
+                command
+            ),
         )
     )
 
@@ -1190,9 +1930,7 @@ def run_walk(
         )
 
     # ========================================================
-    # CONSISTENT INITIAL DCM + CoM VELOCITY
-    #
-    # THIS IS THE IMPORTANT FIX.
+    # CONSISTENT INITIAL DCM / COM VELOCITY
     # ========================================================
 
     (
@@ -1248,10 +1986,6 @@ def run_walk(
         )
     )
 
-    # ========================================================
-    # VERIFY INITIAL DCM
-    # ========================================================
-
     lipm_sample = (
         lipm.sample()
     )
@@ -1267,12 +2001,12 @@ def run_walk(
     if initial_dcm_error > 1.0e-10:
 
         raise RuntimeError(
-            "Initial LIPM DCM initialization mismatch: "
+            "Initial DCM mismatch: "
             f"{initial_dcm_error:.3e}"
         )
 
     # ========================================================
-    # ONLINE SWING TRAJECTORY
+    # SWING GENERATOR
     # ========================================================
 
     swing_trajectory = (
@@ -1331,7 +2065,7 @@ def run_walk(
     )
 
     # ========================================================
-    # VISUALIZATION
+    # STANDARD WALKING VISUALIZER
     # ========================================================
 
     walking_visualizer = (
@@ -1347,6 +2081,10 @@ def run_walk(
     walking_visualizer.configure_viewer(
         viewer
     )
+
+    # ========================================================
+    # ZMP VISUALIZER
+    # ========================================================
 
     zmp_visualizer = (
         LIPMZMPVisualizer(
@@ -1395,7 +2133,34 @@ def run_walk(
     )
 
     # ========================================================
-    # RUNTIME
+    # TIMESTAMPED 4-SECOND HISTORY
+    # ========================================================
+
+    visual_history = (
+        RecentVisualHistory(
+
+            duration=(
+                VISUAL_HISTORY_DURATION
+            )
+        )
+    )
+
+    visual_history.initialize(
+
+        current_time=0.0,
+
+        robot=(
+            robot
+        ),
+
+        zmp_world=(
+            zmp_visualizer
+            .current_zmp_world
+        ),
+    )
+
+    # ========================================================
+    # RUNTIME STATE
     # ========================================================
 
     phase_time = 0.0
@@ -1426,7 +2191,7 @@ def run_walk(
     )
 
     # ========================================================
-    # STARTUP INFORMATION
+    # HEADER
     # ========================================================
 
     print()
@@ -1439,27 +2204,26 @@ def run_walk(
         "Close MuJoCo GUI to stop."
     )
 
+    print()
+
     print(
-        f"v_des="
-        f"({DESIRED_VELOCITY_X:+.3f}, "
-        f"{DESIRED_VELOCITY_Y:+.3f}) m/s"
-        f" | l_p={measured_step_width:.4f} m"
+        "Keyboard:"
     )
 
     print(
-        f"T_nom={first_nominal_step.step_time:.4f} s"
-        f" | L_nom={first_nominal_step.step_length:.4f} m"
-        f" | v0_LIPM="
-        f"({initial_com_velocity[0]:+.4f},"
-        f"{initial_com_velocity[1]:+.4f}) m/s"
+        "  UP    : vx +0.05 m/s"
     )
 
     print(
-        f"first QP:"
-        f" uT="
-        f"({landing_position[0]:+.4f},"
-        f"{landing_position[1]:+.4f}) m"
-        f" | T={current_step_time:.4f} s"
+        "  DOWN  : vx -0.05 m/s"
+    )
+
+    print(
+        "  LEFT  : vy +0.05 m/s"
+    )
+
+    print(
+        "  RIGHT : vy -0.05 m/s"
     )
 
     print()
@@ -1474,7 +2238,66 @@ def run_walk(
             break
 
         # ====================================================
-        # CURRENT LIPM STATE
+        # READ COMMAND
+        # ====================================================
+
+        latest_command = (
+            velocity_command
+            .snapshot()
+        )
+
+        # ====================================================
+        # COMMAND CHANGED
+        #
+        # Recalculate nominal gait immediately.
+        #
+        # No special zero-velocity case.
+        # ====================================================
+
+        if (
+            latest_command.version
+            !=
+            command_version
+        ):
+
+            command = (
+                latest_command
+            )
+
+            command_version = (
+                command.version
+            )
+
+            (
+                nominal_left_step,
+                nominal_right_step,
+            ) = (
+                compute_nominal_steps(
+
+                    planner=(
+                        planner
+                    ),
+
+                    velocity_command=(
+                        command
+                    ),
+                )
+            )
+
+            if stance_side == "left":
+
+                current_nominal_step = (
+                    nominal_left_step
+                )
+
+            else:
+
+                current_nominal_step = (
+                    nominal_right_step
+                )
+
+        # ====================================================
+        # CURRENT LIPM
         # ====================================================
 
         lipm_sample = (
@@ -1483,11 +2306,6 @@ def run_walk(
 
         # ====================================================
         # TOUCHDOWN
-        #
-        # Use ">" rather than ">=" intentionally.
-        #
-        # At phase_time == T the swing trajectory receives one
-        # final sample exactly at touchdown.
         # ====================================================
 
         if (
@@ -1501,10 +2319,6 @@ def run_walk(
             robot.update(
                 q_pin
             )
-
-            # ------------------------------------------------
-            # Commit landing target.
-            # ------------------------------------------------
 
             if swing_side == "left":
 
@@ -1548,13 +2362,15 @@ def run_walk(
                     right_rotation.copy()
                 )
 
-            # ------------------------------------------------
-            # Store completed footprint.
-            # ------------------------------------------------
+            # =================================================
+            # SAVE LANDED FOOTPRINT WITH TIMESTAMP
+            # =================================================
 
-            append_planned_footstep(
+            visual_history.add_footstep(
 
-                walking_visualizer,
+                current_time=(
+                    kinematic_time
+                ),
 
                 side=(
                     swing_side
@@ -1572,11 +2388,7 @@ def run_walk(
             # =================================================
             # SUPPORT SWITCH
             #
-            # Paper point-foot model:
-            #
-            #       u0_(k+1) = uT_k
-            #
-            # CoM position and velocity remain continuous.
+            # u0(k+1) = uT(k)
             # =================================================
 
             stance_side = (
@@ -1651,7 +2463,7 @@ def run_walk(
             )
 
         # ====================================================
-        # SYNTHETIC DCM DISTURBANCE
+        # OPTIONAL DCM DISTURBANCE
         # ====================================================
 
         if (
@@ -1680,7 +2492,7 @@ def run_walk(
             )
 
         # ====================================================
-        # ONLINE STEP LOCATION + TIMING ADAPTATION
+        # ONLINE STEP LOCATION / TIMING ADAPTATION
         # ====================================================
 
         if (
@@ -1690,11 +2502,6 @@ def run_walk(
             >
             TIME_TOLERANCE
         ):
-
-            # ------------------------------------------------
-            # Freeze adaptation once insufficient timing
-            # margin remains.
-            # ------------------------------------------------
 
             if (
                 phase_time
@@ -1753,15 +2560,18 @@ def run_walk(
                     )
 
                     landing_position[0] = (
-                        planner_result.step_location_x
+                        planner_result
+                        .step_location_x
                     )
 
                     landing_position[1] = (
-                        planner_result.step_location_y
+                        planner_result
+                        .step_location_y
                     )
 
                     current_step_time = (
-                        planner_result.step_time
+                        planner_result
+                        .step_time
                     )
 
                     if (
@@ -1778,10 +2588,6 @@ def run_walk(
 
                 except RuntimeError as error:
 
-                    # ----------------------------------------
-                    # Expected late-step condition.
-                    # ----------------------------------------
-
                     if (
                         "timing adaptation window is closed"
                         in
@@ -1797,7 +2603,7 @@ def run_walk(
                         raise
 
         # ====================================================
-        # CURRENT LIPM REFERENCE
+        # LIPM COM REFERENCE
         # ====================================================
 
         lipm_sample = (
@@ -1805,15 +2611,19 @@ def run_walk(
         )
 
         com_position_ref = (
-            lipm_sample.position.copy()
+            lipm_sample
+            .position
+            .copy()
         )
 
         com_velocity_ref = (
-            lipm_sample.velocity.copy()
+            lipm_sample
+            .velocity
+            .copy()
         )
 
         # ====================================================
-        # SWING FOOT REFERENCE
+        # ONLINE SWING
         # ====================================================
 
         swing_sample = (
@@ -1843,26 +2653,28 @@ def run_walk(
         if swing_side == "left":
 
             p_left_ref = (
-                swing_sample.position.copy()
+                swing_sample
+                .position
+                .copy()
             )
 
             p_right_ref = (
-                right_contact_position.copy()
+                right_contact_position
+                .copy()
             )
 
         else:
 
             p_left_ref = (
-                left_contact_position.copy()
+                left_contact_position
+                .copy()
             )
 
             p_right_ref = (
-                swing_sample.position.copy()
+                swing_sample
+                .position
+                .copy()
             )
-
-        # ====================================================
-        # SUPPORT / SWING TASK REFERENCES
-        # ====================================================
 
         support_position_ref = (
             get_contact_position(
@@ -1887,7 +2699,12 @@ def run_walk(
         )
 
         # ====================================================
-        # HIERARCHICAL DIFFERENTIAL IK
+        # DIFFERENTIAL IK
+        #
+        # P1 support foot
+        # P2 CoM
+        # P3 swing foot
+        # P4 full trunk orientation
         # ====================================================
 
         (
@@ -1918,7 +2735,8 @@ def run_walk(
                 ),
 
                 swing_linear_velocity_ref=(
-                    swing_sample.velocity
+                    swing_sample
+                    .velocity
                 ),
 
                 com_position_ref=(
@@ -1970,7 +2788,7 @@ def run_walk(
             )
 
         # ====================================================
-        # KINEMATIC INTEGRATION
+        # PINOCCHIO INTEGRATION
         # ====================================================
 
         q_pin = (
@@ -1994,6 +2812,10 @@ def run_walk(
             q_pin
         )
 
+        # ====================================================
+        # MUJOCO SET-STATE
+        # ====================================================
+
         update_mujoco_from_pinocchio(
 
             robot=(
@@ -2014,7 +2836,7 @@ def run_walk(
         )
 
         # ====================================================
-        # ACTUAL ROBOT CoM VELOCITY
+        # ACTUAL ROBOT COM VELOCITY
         # ====================================================
 
         p_com_actual = (
@@ -2032,9 +2854,7 @@ def run_walk(
         )
 
         # ====================================================
-        # ZMP
-        #
-        # p_ZMP = c - h/g * c_ddot = stance foot
+        # POINT-FOOT ZMP
         # ====================================================
 
         zmp_visualizer.update_current(
@@ -2049,7 +2869,14 @@ def run_walk(
         )
 
         # ====================================================
-        # TERMINAL OUTPUT
+        # TERMINAL STATUS
+        #
+        # IMPORTANT:
+        #
+        # Command is ALWAYS printed in the same status line
+        # together with uT and T.
+        #
+        # There is NO separate key-command print.
         # ====================================================
 
         if (
@@ -2063,6 +2890,9 @@ def run_walk(
             print(
                 f"t={kinematic_time:7.3f}"
                 f" | step={step_index:03d}"
+                f" | vCmd="
+                f"({command.x:+.3f},"
+                f"{command.y:+.3f}) m/s"
                 f" | uT="
                 f"({landing_position[0]:+.4f},"
                 f"{landing_position[1]:+.4f}) m"
@@ -2077,7 +2907,7 @@ def run_walk(
             )
 
         # ====================================================
-        # GUI
+        # VIEWER
         # ====================================================
 
         if (
@@ -2087,6 +2917,34 @@ def run_walk(
             -
             TIME_TOLERANCE
         ):
+
+            # =================================================
+            # RECORD ONLY RECENT 4-SECOND HISTORY
+            # =================================================
+
+            visual_history.record(
+
+                current_time=(
+                    kinematic_time
+                ),
+
+                robot=(
+                    robot
+                ),
+
+                zmp_world=(
+                    zmp_visualizer
+                    .current_zmp_world
+                ),
+            )
+
+            visual_history.apply_to_walking_visualizer(
+                walking_visualizer
+            )
+
+            # =================================================
+            # CURRENT GAIT STATE
+            # =================================================
 
             visual_state = (
                 VisualWalkingState(
@@ -2102,7 +2960,13 @@ def run_walk(
                 )
             )
 
-            # Existing foot / CoM / support visualization.
+            # =================================================
+            # EXISTING WALKING VISUALIZER
+            #
+            # Trails / footprints supplied above contain only
+            # the most recent 4 seconds.
+            # =================================================
+
             walking_visualizer.update(
 
                 viewer,
@@ -2112,7 +2976,25 @@ def run_walk(
                 visual_state,
             )
 
-            # Adaptive target + DCM + LIPM CoM.
+            # =================================================
+            # RECENT 4-SECOND ZMP TRAIL
+            # =================================================
+
+            draw_recent_zmp_trail(
+
+                viewer=(
+                    viewer
+                ),
+
+                visual_history=(
+                    visual_history
+                ),
+            )
+
+            # =================================================
+            # CURRENT LIPM COM / DCM / uT
+            # =================================================
+
             draw_adaptive_overlay(
 
                 viewer=(
@@ -2148,7 +3030,12 @@ def run_walk(
                 ),
             )
 
-            # Point-foot ZMP.
+            # =================================================
+            # CURRENT ZMP MARKER
+            #
+            # Built-in historical trail is disabled.
+            # =================================================
+
             zmp_visualizer.draw_overlay(
                 viewer
             )
@@ -2225,7 +3112,7 @@ def run_walk(
 def main():
 
     # ========================================================
-    # CHECK FILES
+    # FILE CHECK
     # ========================================================
 
     if not SCENE_XML.exists():
@@ -2277,7 +3164,7 @@ def main():
     )
 
     # ========================================================
-    # PINOCCHIO MODEL
+    # PINOCCHIO
     # ========================================================
 
     robot = (
@@ -2295,13 +3182,6 @@ def main():
 
     # ========================================================
     # MEASURE SETTLED FOOT SEPARATION
-    #
-    # This replaces the old hard-coded:
-    #
-    #       DEFAULT_STEP_WIDTH = 0.16
-    #
-    # The planner's l_p should correspond to the actual robot
-    # nominal lateral foot separation.
     # ========================================================
 
     q_pin_initial = (
@@ -2353,9 +3233,6 @@ def main():
 
     # ========================================================
     # ADAPTIVE STEP PLANNER
-    #
-    # Construct AFTER settling because l_p is now measured
-    # from the actual robot configuration.
     # ========================================================
 
     planner = (
@@ -2403,7 +3280,24 @@ def main():
     )
 
     # ========================================================
-    # RUN UNTIL GUI CLOSES
+    # KEYBOARD VELOCITY COMMAND
+    # ========================================================
+
+    velocity_command = (
+        VelocityCommand(
+
+            initial_x=(
+                INITIAL_DESIRED_VELOCITY_X
+            ),
+
+            initial_y=(
+                INITIAL_DESIRED_VELOCITY_Y
+            ),
+        )
+    )
+
+    # ========================================================
+    # VIEWER
     # ========================================================
 
     if not SHOW_VIEWER:
@@ -2417,6 +3311,11 @@ def main():
         mj_model,
 
         mj_data,
+
+        key_callback=(
+            velocity_command
+            .key_callback
+        ),
 
         show_right_ui=True,
 
@@ -2442,6 +3341,10 @@ def main():
 
             measured_step_width=(
                 measured_step_width
+            ),
+
+            velocity_command=(
+                velocity_command
             ),
 
             viewer=(
