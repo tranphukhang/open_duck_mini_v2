@@ -135,7 +135,7 @@ np.set_printoptions(
 # WALKING TEST
 # ============================================================
 
-WALK_DURATION = 5.0
+WALK_DURATION = 10.0
 
 FIRST_STANCE_SIDE = "left"
 
@@ -168,7 +168,7 @@ GRAVITY = 9.81
 
 COM_HEIGHT = 0.2044
 
-DESIRED_VELOCITY_X = 0.05
+DESIRED_VELOCITY_X = 0.5
 DESIRED_VELOCITY_Y = 0.0
 
 DEFAULT_STEP_WIDTH = 0.16
