@@ -156,9 +156,7 @@ INITIAL_DESIRED_VELOCITY_Y = 0.00
 # ============================================================
 # KEYBOARD COMMAND STEP
 #
-# User request:
-#
-#     each arrow press = 0.05 m/s
+# Each arrow press changes velocity by 0.05 m/s.
 # ============================================================
 
 VELOCITY_X_STEP = 0.05
@@ -190,15 +188,6 @@ STEP_TIME_MAX = 0.30
 
 # ============================================================
 # COMMAND LIMITS
-#
-# Keep command inside the nominal planner's feasible range.
-#
-# Approximate relationship:
-#
-#     L = vx T
-#     W = vy T
-#
-# using Tmin for maximum magnitude.
 # ============================================================
 
 VELOCITY_X_MIN = (
@@ -264,9 +253,6 @@ SUPPORT_POSITION_KP = 25.0
 SWING_POSITION_KP = 20.0
 COM_POSITION_KP = 10.0
 
-# Full 3D trunk orientation task:
-#
-# roll + pitch + yaw
 TRUNK_ORIENTATION_KP = 10.0
 
 
@@ -312,11 +298,73 @@ TIME_TOLERANCE = 1.0e-10
 
 
 # ============================================================
+# VELOCITY ARROW VISUALIZATION
+#
+# Both arrows use EXACTLY THE SAME ORIGIN.
+#
+# Blue:
+#     commanded horizontal velocity
+#
+# Red:
+#     actual robot CoM horizontal velocity
+#
+# Displayed arrow vector:
+#
+#     Delta_p = VELOCITY_ARROW_SCALE * [vx, vy, 0]
+#
+# Therefore arrow direction follows velocity direction and
+# arrow length is proportional to velocity magnitude.
+# ============================================================
+
+VELOCITY_ARROW_HEIGHT_OFFSET = 0.16
+
+# m displayed per (m/s)
+VELOCITY_ARROW_SCALE = 0.45
+
+VELOCITY_ARROW_MIN_NORM = 1.0e-5
+
+VELOCITY_ARROW_HEAD_FRACTION = 0.30
+
+VELOCITY_ARROW_HEAD_MIN_LENGTH = 0.008
+
+VELOCITY_ARROW_HEAD_MAX_LENGTH = 0.035
+
+VELOCITY_ARROW_HEAD_HALF_WIDTH_RATIO = 0.55
+
+
+# Command is drawn first and thicker.
+COMMAND_ARROW_WIDTH = 8.0
+
+COMMAND_ARROW_RGBA = np.array(
+    [
+        0.00,
+        0.40,
+        1.00,
+        1.00,
+    ],
+    dtype=np.float32,
+)
+
+
+# Actual velocity is drawn on top and thinner.
+CURRENT_VELOCITY_ARROW_WIDTH = 4.5
+
+CURRENT_VELOCITY_ARROW_RGBA = np.array(
+    [
+        1.00,
+        0.05,
+        0.05,
+        1.00,
+    ],
+    dtype=np.float32,
+)
+
+
+# ============================================================
 # ZMP VISUALIZATION
 #
-# The built-in infinite/history trail is disabled.
-#
-# We draw our own timestamped 4-second trail below.
+# Built-in historical trail is disabled.
+# Our own timestamped 4-second trail is used instead.
 # ============================================================
 
 ZMP_VISUALIZATION_CONFIG = (
@@ -513,17 +561,7 @@ class VelocityCommand:
         LEFT  -> vy += 0.05
         RIGHT -> vy -= 0.05
 
-    IMPORTANT:
-
-    No terminal print is done here.
-
-    The command is printed together with:
-
-        uT
-        T
-        vCoM
-
-    in the normal status line.
+    No separate terminal output is generated here.
     """
 
     def __init__(
@@ -665,10 +703,6 @@ class VelocityCommand:
 
                 return
 
-            # Avoid accumulated floating-point noise such as:
-            #
-            # 0.15000000000000002
-
             self._x = float(
                 np.round(
                     self._x,
@@ -729,23 +763,6 @@ class TimedFootstep:
 # ============================================================
 
 class RecentVisualHistory:
-    """
-    Timestamped visualization history.
-
-    Everything older than:
-
-        current_time - VISUAL_HISTORY_DURATION
-
-    is removed.
-
-    Managed histories:
-
-        actual left-foot trail
-        actual right-foot trail
-        actual CoM trail
-        point-foot ZMP trail
-        landed footprints
-    """
 
     def __init__(
         self,
@@ -775,7 +792,7 @@ class RecentVisualHistory:
 
 
     # ========================================================
-    # PRUNE ONE TIMED DEQUE
+    # PRUNE TIMED DEQUE
     # ========================================================
 
     def _prune_deque(
@@ -804,7 +821,7 @@ class RecentVisualHistory:
 
 
     # ========================================================
-    # PRUNE EVERYTHING
+    # PRUNE ALL HISTORY
     # ========================================================
 
     def prune(
@@ -856,7 +873,7 @@ class RecentVisualHistory:
 
 
     # ========================================================
-    # INITIAL STATE
+    # INITIALIZE
     # ========================================================
 
     def initialize(
@@ -1022,7 +1039,7 @@ class RecentVisualHistory:
 
 
     # ========================================================
-    # RECORD COMPLETED FOOTSTEP
+    # ADD COMPLETED FOOTSTEP
     # ========================================================
 
     def add_footstep(
@@ -1066,7 +1083,7 @@ class RecentVisualHistory:
 
 
     # ========================================================
-    # APPLY RECENT HISTORY TO EXISTING WALKING VISUALIZER
+    # APPLY TO EXISTING VISUALIZER
     # ========================================================
 
     def apply_to_walking_visualizer(
@@ -1182,7 +1199,6 @@ def update_mujoco_from_pinocchio(
         q_mj
     )
 
-    # Kinematic set-state execution.
     mj_data.qvel[:] = 0.0
 
     mujoco.mj_forward(
@@ -1597,6 +1613,309 @@ def draw_recent_zmp_trail(
 
 
 # ============================================================
+# DRAW ONE VELOCITY ARROW
+# ============================================================
+
+def draw_velocity_arrow(
+    *,
+    scene,
+    origin,
+    velocity_xy,
+    rgba,
+    width,
+):
+    """
+    Draw one horizontal velocity vector as an arrow.
+
+    Both command and actual arrows use this same function and
+    therefore can share exactly the same origin.
+
+    Displayed vector:
+
+        p_end = p_start
+                + scale * [vx, vy, 0]
+
+    so both magnitude and direction correspond to the velocity.
+    """
+
+    origin = np.asarray(
+        origin,
+        dtype=float,
+    ).reshape(
+        3
+    )
+
+    velocity_xy = np.asarray(
+        velocity_xy,
+        dtype=float,
+    ).reshape(
+        2
+    )
+
+    if not np.all(
+        np.isfinite(
+            velocity_xy
+        )
+    ):
+
+        return
+
+    speed = float(
+        np.linalg.norm(
+            velocity_xy
+        )
+    )
+
+    # No meaningful arrow to draw at zero speed.
+    # This does NOT change planner behavior at zero command.
+    if speed < VELOCITY_ARROW_MIN_NORM:
+        return
+
+    # ========================================================
+    # WORLD VELOCITY DIRECTION
+    # ========================================================
+
+    direction = np.array(
+        [
+            velocity_xy[0],
+            velocity_xy[1],
+            0.0,
+        ],
+        dtype=float,
+    )
+
+    direction /= (
+        speed
+    )
+
+    # ========================================================
+    # ARROW END
+    # ========================================================
+
+    arrow_length = (
+        VELOCITY_ARROW_SCALE
+        *
+        speed
+    )
+
+    endpoint = (
+        origin
+        +
+        arrow_length
+        *
+        direction
+    )
+
+    # ========================================================
+    # SHAFT
+    # ========================================================
+
+    add_line(
+        scene,
+        origin,
+        endpoint,
+        width,
+        rgba,
+    )
+
+    # ========================================================
+    # ARROW HEAD
+    # ========================================================
+
+    head_length = float(
+        np.clip(
+            VELOCITY_ARROW_HEAD_FRACTION
+            *
+            arrow_length,
+
+            VELOCITY_ARROW_HEAD_MIN_LENGTH,
+
+            VELOCITY_ARROW_HEAD_MAX_LENGTH,
+        )
+    )
+
+    head_half_width = (
+        VELOCITY_ARROW_HEAD_HALF_WIDTH_RATIO
+        *
+        head_length
+    )
+
+    perpendicular = np.array(
+        [
+            -direction[1],
+            direction[0],
+            0.0,
+        ],
+        dtype=float,
+    )
+
+    head_base = (
+        endpoint
+        -
+        head_length
+        *
+        direction
+    )
+
+    head_left = (
+        head_base
+        +
+        head_half_width
+        *
+        perpendicular
+    )
+
+    head_right = (
+        head_base
+        -
+        head_half_width
+        *
+        perpendicular
+    )
+
+    add_line(
+        scene,
+        endpoint,
+        head_left,
+        width,
+        rgba,
+    )
+
+    add_line(
+        scene,
+        endpoint,
+        head_right,
+        width,
+        rgba,
+    )
+
+
+# ============================================================
+# DRAW COMMAND + CURRENT VELOCITY ARROWS
+# ============================================================
+
+def draw_velocity_arrows(
+    *,
+    viewer,
+    robot,
+    command_velocity,
+    current_velocity,
+):
+    """
+    Draw two overlapped-origin velocity arrows above the robot.
+
+    Blue:
+        commanded velocity
+
+    Red:
+        actual CoM velocity
+
+    Both start at EXACTLY the same world point.
+
+    Command is deliberately thicker and drawn first.
+    Actual velocity is thinner and drawn second, so when the
+    two vectors are identical both colors remain visually
+    distinguishable.
+    """
+
+    (
+        trunk_position,
+        _,
+    ) = (
+        robot.get_frame_pose(
+            TRUNK_FRAME
+        )
+    )
+
+    arrow_origin = (
+        trunk_position.copy()
+    )
+    
+
+    arrow_origin[2] += (
+        VELOCITY_ARROW_HEIGHT_OFFSET
+    )
+
+    command_velocity = np.asarray(
+        command_velocity,
+        dtype=float,
+    ).reshape(
+        2
+    )
+
+    current_velocity = np.asarray(
+        current_velocity,
+        dtype=float,
+    ).reshape(
+        2
+    )
+
+    with viewer.lock():
+
+        scene = (
+            viewer.user_scn
+        )
+
+        # ====================================================
+        # BLUE COMMAND ARROW
+        #
+        # Draw first and thicker.
+        # ====================================================
+
+        draw_velocity_arrow(
+
+            scene=(
+                scene
+            ),
+
+            origin=(
+                arrow_origin
+            ),
+
+            velocity_xy=(
+                command_velocity
+            ),
+
+            rgba=(
+                COMMAND_ARROW_RGBA
+            ),
+
+            width=(
+                COMMAND_ARROW_WIDTH
+            ),
+        )
+
+        # ====================================================
+        # RED ACTUAL VELOCITY ARROW
+        #
+        # Same origin, drawn on top.
+        # ====================================================
+
+        draw_velocity_arrow(
+
+            scene=(
+                scene
+            ),
+
+            origin=(
+                arrow_origin
+            ),
+
+            velocity_xy=(
+                current_velocity
+            ),
+
+            rgba=(
+                CURRENT_VELOCITY_ARROW_RGBA
+            ),
+
+            width=(
+                CURRENT_VELOCITY_ARROW_WIDTH
+            ),
+        )
+
+
+# ============================================================
 # START NEW STEP
 # ============================================================
 
@@ -1820,8 +2139,6 @@ def run_walk(
 
     # ========================================================
     # FULL TRUNK ORIENTATION REFERENCE
-    #
-    # Fixed at settled initial orientation.
     # ========================================================
 
     (
@@ -2228,6 +2545,20 @@ def run_walk(
 
     print()
 
+    print(
+        "Velocity arrows:"
+    )
+
+    print(
+        "  BLUE  : command velocity"
+    )
+
+    print(
+        "  RED   : actual CoM velocity"
+    )
+
+    print()
+
     # ========================================================
     # MAIN LOOP
     # ========================================================
@@ -2248,10 +2579,6 @@ def run_walk(
 
         # ====================================================
         # COMMAND CHANGED
-        #
-        # Recalculate nominal gait immediately.
-        #
-        # No special zero-velocity case.
         # ====================================================
 
         if (
@@ -2363,7 +2690,7 @@ def run_walk(
                 )
 
             # =================================================
-            # SAVE LANDED FOOTPRINT WITH TIMESTAMP
+            # SAVE LANDED FOOTPRINT
             # =================================================
 
             visual_history.add_footstep(
@@ -2837,6 +3164,13 @@ def run_walk(
 
         # ====================================================
         # ACTUAL ROBOT COM VELOCITY
+        #
+        # Used both for:
+        #
+        #   1. terminal vCoM
+        #   2. red velocity arrow
+        #
+        # World-frame horizontal velocity.
         # ====================================================
 
         p_com_actual = (
@@ -2870,13 +3204,6 @@ def run_walk(
 
         # ====================================================
         # TERMINAL STATUS
-        #
-        # IMPORTANT:
-        #
-        # Command is ALWAYS printed in the same status line
-        # together with uT and T.
-        #
-        # There is NO separate key-command print.
         # ====================================================
 
         if (
@@ -2962,9 +3289,6 @@ def run_walk(
 
             # =================================================
             # EXISTING WALKING VISUALIZER
-            #
-            # Trails / footprints supplied above contain only
-            # the most recent 4 seconds.
             # =================================================
 
             walking_visualizer.update(
@@ -3031,9 +3355,50 @@ def run_walk(
             )
 
             # =================================================
+            # VELOCITY ARROWS ABOVE ROBOT
+            #
+            # BLUE:
+            #
+            #     [vx_cmd, vy_cmd]
+            #
+            # RED:
+            #
+            #     [vx_CoM_actual, vy_CoM_actual]
+            #
+            # Both have exactly the same origin.
+            # =================================================
+
+            draw_velocity_arrows(
+
+                viewer=(
+                    viewer
+                ),
+
+                robot=(
+                    robot
+                ),
+
+                command_velocity=np.array(
+                    [
+                        command.x,
+                        command.y,
+                    ],
+                    dtype=float,
+                ),
+
+                current_velocity=np.array(
+                    [
+                        com_velocity_actual[0],
+                        com_velocity_actual[1],
+                    ],
+                    dtype=float,
+                ),
+            )
+
+            # =================================================
             # CURRENT ZMP MARKER
             #
-            # Built-in historical trail is disabled.
+            # This function also performs viewer.sync().
             # =================================================
 
             zmp_visualizer.draw_overlay(
