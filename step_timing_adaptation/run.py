@@ -149,14 +149,12 @@ FIRST_STANCE_SIDE = "left"
 # INITIAL WALKING COMMAND
 # ============================================================
 
-INITIAL_DESIRED_VELOCITY_X = 0.10
-INITIAL_DESIRED_VELOCITY_Y = 0.00
+INITIAL_DESIRED_VELOCITY_X = 0.0
+INITIAL_DESIRED_VELOCITY_Y = 0.0
 
 
 # ============================================================
 # KEYBOARD COMMAND STEP
-#
-# Each arrow press changes velocity by 0.05 m/s.
 # ============================================================
 
 VELOCITY_X_STEP = 0.05
@@ -168,7 +166,6 @@ VELOCITY_Y_STEP = 0.05
 # ============================================================
 
 GRAVITY = 9.81
-
 COM_HEIGHT = 0.2044
 
 
@@ -220,11 +217,8 @@ VELOCITY_Y_MAX = (
 # ============================================================
 
 STEP_QP_ALPHA_LOCATION = 1.0
-
 STEP_QP_ALPHA_TIMING = 5.0
-
 STEP_QP_ALPHA_DCM = 1000.0
-
 STEP_QP_ALPHA_VIABILITY = 1.0e6
 
 
@@ -252,7 +246,6 @@ IK_RCOND = 1.0e-10
 SUPPORT_POSITION_KP = 25.0
 SWING_POSITION_KP = 20.0
 COM_POSITION_KP = 10.0
-
 TRUNK_ORIENTATION_KP = 10.0
 
 
@@ -273,21 +266,17 @@ DISTURBANCE_DCM_Y = 0.000
 # ============================================================
 
 SHOW_VIEWER = True
-
 REALTIME_PLAYBACK = True
 
 VIEWER_SYNC_PERIOD = 0.02
-
 STATUS_PRINT_PERIOD = 0.10
 
 
 # ============================================================
 # VISUAL HISTORY
-#
-# Only show the most recent 4 seconds.
 # ============================================================
 
-VISUAL_HISTORY_DURATION = 4.0
+VISUAL_HISTORY_DURATION = 2.0
 
 
 # ============================================================
@@ -300,54 +289,59 @@ TIME_TOLERANCE = 1.0e-10
 # ============================================================
 # VELOCITY ARROW VISUALIZATION
 #
-# Both arrows use EXACTLY THE SAME ORIGIN.
+# MuJoCo native rendering-only geometry:
+#
+#     mjGEOM_ARROW
+#
+# Both arrows have exactly the same origin.
 #
 # Blue:
-#     commanded horizontal velocity
+#     commanded velocity
 #
 # Red:
-#     actual robot CoM horizontal velocity
+#     actual robot CoM velocity
 #
-# Displayed arrow vector:
+# Arrow vector:
 #
-#     Delta_p = VELOCITY_ARROW_SCALE * [vx, vy, 0]
-#
-# Therefore arrow direction follows velocity direction and
-# arrow length is proportional to velocity magnitude.
+#     Delta p =
+#         VELOCITY_ARROW_SCALE
+#         *
+#         [vx, vy, 0]
 # ============================================================
 
 VELOCITY_ARROW_HEIGHT_OFFSET = 0.16
 
-# m displayed per (m/s)
+# Displayed metres per m/s.
 VELOCITY_ARROW_SCALE = 0.45
 
 VELOCITY_ARROW_MIN_NORM = 1.0e-5
 
-VELOCITY_ARROW_HEAD_FRACTION = 0.30
 
-VELOCITY_ARROW_HEAD_MIN_LENGTH = 0.008
+# ------------------------------------------------------------
+# IMPORTANT:
+#
+# For mjGEOM_ARROW, width is a geometric width rather than
+# the pixel-width convention of mjGEOM_LINE.
+#
+# Command is thicker.
+# Actual velocity is thinner and drawn afterwards.
+# ------------------------------------------------------------
 
-VELOCITY_ARROW_HEAD_MAX_LENGTH = 0.035
+COMMAND_ARROW_WIDTH = 0.008
 
-VELOCITY_ARROW_HEAD_HALF_WIDTH_RATIO = 0.55
+CURRENT_VELOCITY_ARROW_WIDTH = 0.0045
 
-
-# Command is drawn first and thicker.
-COMMAND_ARROW_WIDTH = 8.0
 
 COMMAND_ARROW_RGBA = np.array(
     [
         0.00,
-        0.40,
+        0.35,
         1.00,
         1.00,
     ],
     dtype=np.float32,
 )
 
-
-# Actual velocity is drawn on top and thinner.
-CURRENT_VELOCITY_ARROW_WIDTH = 4.5
 
 CURRENT_VELOCITY_ARROW_RGBA = np.array(
     [
@@ -363,8 +357,9 @@ CURRENT_VELOCITY_ARROW_RGBA = np.array(
 # ============================================================
 # ZMP VISUALIZATION
 #
-# Built-in historical trail is disabled.
-# Our own timestamped 4-second trail is used instead.
+# Built-in long history is disabled.
+#
+# A custom timestamped 4-second trail is drawn below.
 # ============================================================
 
 ZMP_VISUALIZATION_CONFIG = (
@@ -536,16 +531,12 @@ COM_DCM_LINE_RGBA = np.array(
 class VelocityCommandSnapshot:
 
     x: float
-
     y: float
-
     version: int
 
 
 class VelocityCommand:
     """
-    Keyboard velocity command.
-
     Coordinate convention:
 
         +x : forward
@@ -554,14 +545,12 @@ class VelocityCommand:
         +y : left
         -y : right
 
-    Arrow keys:
+    Keys:
 
         UP    -> vx += 0.05
         DOWN  -> vx -= 0.05
         LEFT  -> vy += 0.05
         RIGHT -> vy -= 0.05
-
-    No separate terminal output is generated here.
     """
 
     def __init__(
@@ -631,10 +620,6 @@ class VelocityCommand:
                 self._y
             )
 
-            # =================================================
-            # FORWARD
-            # =================================================
-
             if keycode == glfw.KEY_UP:
 
                 self._x = float(
@@ -647,10 +632,6 @@ class VelocityCommand:
                         VELOCITY_X_MAX,
                     )
                 )
-
-            # =================================================
-            # BACKWARD
-            # =================================================
 
             elif keycode == glfw.KEY_DOWN:
 
@@ -665,10 +646,6 @@ class VelocityCommand:
                     )
                 )
 
-            # =================================================
-            # LEFT
-            # =================================================
-
             elif keycode == glfw.KEY_LEFT:
 
                 self._y = float(
@@ -681,10 +658,6 @@ class VelocityCommand:
                         VELOCITY_Y_MAX,
                     )
                 )
-
-            # =================================================
-            # RIGHT
-            # =================================================
 
             elif keycode == glfw.KEY_RIGHT:
 
@@ -730,7 +703,6 @@ class VelocityCommand:
             )
 
             if changed:
-
                 self._version += 1
 
 
@@ -742,19 +714,17 @@ class VelocityCommand:
 class VisualWalkingState:
 
     phase: WalkingPhase
-
     support_side: str
 
 
 # ============================================================
-# TIMED VISUAL FOOTSTEP
+# TIMED FOOTSTEP
 # ============================================================
 
 @dataclass
 class TimedFootstep:
 
     time: float
-
     footstep: PlannedFootstep
 
 
@@ -781,19 +751,11 @@ class RecentVisualHistory:
             )
 
         self.left_trail = deque()
-
         self.right_trail = deque()
-
         self.com_trail = deque()
-
         self.zmp_trail = deque()
-
         self.footsteps = deque()
 
-
-    # ========================================================
-    # PRUNE TIMED DEQUE
-    # ========================================================
 
     def _prune_deque(
         self,
@@ -819,10 +781,6 @@ class RecentVisualHistory:
 
             data.popleft()
 
-
-    # ========================================================
-    # PRUNE ALL HISTORY
-    # ========================================================
 
     def prune(
         self,
@@ -856,11 +814,7 @@ class RecentVisualHistory:
         )
 
         while (
-            len(
-                self.footsteps
-            )
-            >
-            0
+            len(self.footsteps) > 0
             and
             self.footsteps[0].time
             <
@@ -871,10 +825,6 @@ class RecentVisualHistory:
 
             self.footsteps.popleft()
 
-
-    # ========================================================
-    # INITIALIZE
-    # ========================================================
 
     def initialize(
         self,
@@ -936,21 +886,12 @@ class RecentVisualHistory:
         self.footsteps.append(
             TimedFootstep(
 
-                time=(
-                    current_time
-                ),
+                time=current_time,
 
                 footstep=PlannedFootstep(
-
                     side="left",
-
-                    position=(
-                        p_left.copy()
-                    ),
-
-                    rotation=(
-                        R_left.copy()
-                    ),
+                    position=p_left.copy(),
+                    rotation=R_left.copy(),
                 ),
             )
         )
@@ -958,29 +899,16 @@ class RecentVisualHistory:
         self.footsteps.append(
             TimedFootstep(
 
-                time=(
-                    current_time
-                ),
+                time=current_time,
 
                 footstep=PlannedFootstep(
-
                     side="right",
-
-                    position=(
-                        p_right.copy()
-                    ),
-
-                    rotation=(
-                        R_right.copy()
-                    ),
+                    position=p_right.copy(),
+                    rotation=R_right.copy(),
                 ),
             )
         )
 
-
-    # ========================================================
-    # RECORD CURRENT ROBOT STATE
-    # ========================================================
 
     def record(
         self,
@@ -1038,10 +966,6 @@ class RecentVisualHistory:
         )
 
 
-    # ========================================================
-    # ADD COMPLETED FOOTSTEP
-    # ========================================================
-
     def add_footstep(
         self,
         *,
@@ -1054,15 +978,11 @@ class RecentVisualHistory:
         self.footsteps.append(
             TimedFootstep(
 
-                time=(
-                    current_time
-                ),
+                time=current_time,
 
                 footstep=PlannedFootstep(
 
-                    side=(
-                        side
-                    ),
+                    side=side,
 
                     position=np.asarray(
                         position,
@@ -1081,10 +1001,6 @@ class RecentVisualHistory:
             current_time
         )
 
-
-    # ========================================================
-    # APPLY TO EXISTING VISUALIZER
-    # ========================================================
 
     def apply_to_walking_visualizer(
         self,
@@ -1115,10 +1031,6 @@ class RecentVisualHistory:
             in self.footsteps
         ]
 
-
-    # ========================================================
-    # RECENT ZMP POINTS
-    # ========================================================
 
     def get_zmp_points(
         self,
@@ -1199,12 +1111,79 @@ def update_mujoco_from_pinocchio(
         q_mj
     )
 
+    # --------------------------------------------------------
+    # Kinematic set-state execution.
+    # No mj_step() during walking.
+    # --------------------------------------------------------
+
     mj_data.qvel[:] = 0.0
 
     mujoco.mj_forward(
         mj_model,
         mj_data,
     )
+
+
+# ============================================================
+# VIEWER CONFIGURATION
+# ============================================================
+
+def configure_step_timing_viewer(
+    *,
+    viewer,
+    walking_visualizer,
+):
+    """
+    Configure only what is explicitly needed.
+
+    IMPORTANT:
+        viewer.opt.frame is NEVER touched here.
+
+    Therefore:
+        Rendering -> Frame
+
+    remains at MuJoCo's default setting.
+
+    Enabled Model Elements:
+        Contact Force
+        Transparent
+    """
+
+    with viewer.lock():
+
+        # ====================================================
+        # KEEP THE EXISTING TRACKING CAMERA BEHAVIOR
+        #
+        # This changes camera only.
+        #
+        # Rendering -> Frame is intentionally untouched.
+        # ====================================================
+
+        viewer.cam.type = (
+            mujoco.mjtCamera
+            .mjCAMERA_TRACKING
+        )
+
+        viewer.cam.trackbodyid = (
+            walking_visualizer
+            .base_body_id
+        )
+
+        # ====================================================
+        # MODEL ELEMENTS
+        # ====================================================
+
+        viewer.opt.flags[
+            mujoco.mjtVisFlag
+            .mjVIS_CONTACTFORCE
+        ] = True
+
+        viewer.opt.flags[
+            mujoco.mjtVisFlag
+            .mjVIS_TRANSPARENT
+        ] = True
+
+    viewer.sync()
 
 
 # ============================================================
@@ -1248,9 +1227,7 @@ def compute_nominal_steps(
     nominal_left = (
         compute_nominal_step(
 
-            planner=(
-                planner
-            ),
+            planner=planner,
 
             stance_side="left",
 
@@ -1267,9 +1244,7 @@ def compute_nominal_steps(
     nominal_right = (
         compute_nominal_step(
 
-            planner=(
-                planner
-            ),
+            planner=planner,
 
             stance_side="right",
 
@@ -1528,7 +1503,7 @@ def draw_adaptive_overlay(
         )
 
         # ====================================================
-        # CURRENT ADAPTIVE FOOTHOLD
+        # CURRENT ADAPTIVE FOOTHOLD uT
         # ====================================================
 
         if swing_side == "left":
@@ -1581,7 +1556,7 @@ def draw_adaptive_overlay(
 
 
 # ============================================================
-# DRAW RECENT ZMP TRAIL
+# RECENT ZMP TRAIL
 # ============================================================
 
 def draw_recent_zmp_trail(
@@ -1613,6 +1588,196 @@ def draw_recent_zmp_trail(
 
 
 # ============================================================
+# USER SCENE GEOMETRY ALLOCATION
+# ============================================================
+
+def allocate_user_geom(
+    scene,
+):
+
+    if (
+        scene.ngeom
+        >=
+        scene.maxgeom
+    ):
+
+        return None
+
+    geom = (
+        scene.geoms[
+            scene.ngeom
+        ]
+    )
+
+    scene.ngeom += 1
+
+    return geom
+
+
+# ============================================================
+# MUJOCO-NATIVE ARROW
+# ============================================================
+
+def add_mujoco_arrow(
+    *,
+    scene,
+    start,
+    end,
+    width,
+    rgba,
+):
+    """
+    Add a native MuJoCo rendering arrow.
+
+    This uses:
+
+        mjGEOM_ARROW
+
+    together with:
+
+        mjv_connector()
+
+    rather than manually constructing an arrow from line
+    segments.
+
+    This is the same rendering-only arrow primitive used by
+    MuJoCo's abstract visualization for vector decorations.
+    """
+
+    start = np.asarray(
+        start,
+        dtype=float,
+    ).reshape(
+        3
+    )
+
+    end = np.asarray(
+        end,
+        dtype=float,
+    ).reshape(
+        3
+    )
+
+    vector = (
+        end
+        -
+        start
+    )
+
+    if (
+        np.linalg.norm(
+            vector
+        )
+        <
+        1.0e-10
+    ):
+
+        return
+
+    geom = (
+        allocate_user_geom(
+            scene
+        )
+    )
+
+    if geom is None:
+        return
+
+    # ========================================================
+    # INITIALIZE RENDERING-ONLY GEOMETRY
+    # ========================================================
+
+    mujoco.mjv_initGeom(
+
+        geom,
+
+        type=(
+            mujoco.mjtGeom
+            .mjGEOM_ARROW
+        ),
+
+        size=np.zeros(
+            3,
+            dtype=float,
+        ),
+
+        pos=np.zeros(
+            3,
+            dtype=float,
+        ),
+
+        mat=np.eye(
+            3,
+            dtype=float,
+        ).reshape(
+            9
+        ),
+
+        rgba=np.asarray(
+            rgba,
+            dtype=np.float32,
+        ),
+    )
+
+    # ========================================================
+    # CONNECT START -> END
+    # ========================================================
+
+    if hasattr(
+        mujoco,
+        "mjv_connector",
+    ):
+
+        mujoco.mjv_connector(
+
+            geom=(
+                geom
+            ),
+
+            type=(
+                mujoco.mjtGeom
+                .mjGEOM_ARROW
+            ),
+
+            width=float(
+                width
+            ),
+
+            from_=(
+                start
+            ),
+
+            to=(
+                end
+            ),
+        )
+
+    else:
+
+        # Compatibility fallback for older MuJoCo versions.
+
+        mujoco.mjv_makeConnector(
+
+            geom,
+
+            mujoco.mjtGeom
+            .mjGEOM_ARROW,
+
+            float(
+                width
+            ),
+
+            float(start[0]),
+            float(start[1]),
+            float(start[2]),
+
+            float(end[0]),
+            float(end[1]),
+            float(end[2]),
+        )
+
+
+# ============================================================
 # DRAW ONE VELOCITY ARROW
 # ============================================================
 
@@ -1624,19 +1789,6 @@ def draw_velocity_arrow(
     rgba,
     width,
 ):
-    """
-    Draw one horizontal velocity vector as an arrow.
-
-    Both command and actual arrows use this same function and
-    therefore can share exactly the same origin.
-
-    Displayed vector:
-
-        p_end = p_start
-                + scale * [vx, vy, 0]
-
-    so both magnitude and direction correspond to the velocity.
-    """
 
     origin = np.asarray(
         origin,
@@ -1666,16 +1818,18 @@ def draw_velocity_arrow(
         )
     )
 
-    # No meaningful arrow to draw at zero speed.
-    # This does NOT change planner behavior at zero command.
+    # --------------------------------------------------------
+    # Zero velocity:
+    #
+    # simply no visible arrow.
+    #
+    # This has absolutely no effect on planner behaviour.
+    # --------------------------------------------------------
+
     if speed < VELOCITY_ARROW_MIN_NORM:
         return
 
-    # ========================================================
-    # WORLD VELOCITY DIRECTION
-    # ========================================================
-
-    direction = np.array(
+    velocity_world = np.array(
         [
             velocity_xy[0],
             velocity_xy[1],
@@ -1684,114 +1838,40 @@ def draw_velocity_arrow(
         dtype=float,
     )
 
-    direction /= (
-        speed
-    )
-
-    # ========================================================
-    # ARROW END
-    # ========================================================
-
-    arrow_length = (
-        VELOCITY_ARROW_SCALE
-        *
-        speed
-    )
-
     endpoint = (
         origin
         +
-        arrow_length
+        VELOCITY_ARROW_SCALE
         *
-        direction
+        velocity_world
     )
 
-    # ========================================================
-    # SHAFT
-    # ========================================================
+    add_mujoco_arrow(
 
-    add_line(
-        scene,
-        origin,
-        endpoint,
-        width,
-        rgba,
-    )
+        scene=(
+            scene
+        ),
 
-    # ========================================================
-    # ARROW HEAD
-    # ========================================================
+        start=(
+            origin
+        ),
 
-    head_length = float(
-        np.clip(
-            VELOCITY_ARROW_HEAD_FRACTION
-            *
-            arrow_length,
+        end=(
+            endpoint
+        ),
 
-            VELOCITY_ARROW_HEAD_MIN_LENGTH,
+        width=(
+            width
+        ),
 
-            VELOCITY_ARROW_HEAD_MAX_LENGTH,
-        )
-    )
-
-    head_half_width = (
-        VELOCITY_ARROW_HEAD_HALF_WIDTH_RATIO
-        *
-        head_length
-    )
-
-    perpendicular = np.array(
-        [
-            -direction[1],
-            direction[0],
-            0.0,
-        ],
-        dtype=float,
-    )
-
-    head_base = (
-        endpoint
-        -
-        head_length
-        *
-        direction
-    )
-
-    head_left = (
-        head_base
-        +
-        head_half_width
-        *
-        perpendicular
-    )
-
-    head_right = (
-        head_base
-        -
-        head_half_width
-        *
-        perpendicular
-    )
-
-    add_line(
-        scene,
-        endpoint,
-        head_left,
-        width,
-        rgba,
-    )
-
-    add_line(
-        scene,
-        endpoint,
-        head_right,
-        width,
-        rgba,
+        rgba=(
+            rgba
+        ),
     )
 
 
 # ============================================================
-# DRAW COMMAND + CURRENT VELOCITY ARROWS
+# COMMAND + CURRENT VELOCITY ARROWS
 # ============================================================
 
 def draw_velocity_arrows(
@@ -1802,20 +1882,24 @@ def draw_velocity_arrows(
     current_velocity,
 ):
     """
-    Draw two overlapped-origin velocity arrows above the robot.
+    Both arrows:
 
-    Blue:
-        commanded velocity
+        - have exactly the same origin;
+        - are horizontal world-frame velocity vectors;
+        - change direction with velocity direction;
+        - change length with velocity magnitude.
 
-    Red:
-        actual CoM velocity
+    BLUE:
+        command [vx_cmd, vy_cmd]
 
-    Both start at EXACTLY the same world point.
+    RED:
+        actual robot CoM velocity [vx, vy]
 
-    Command is deliberately thicker and drawn first.
-    Actual velocity is thinner and drawn second, so when the
-    two vectors are identical both colors remain visually
-    distinguishable.
+    The blue arrow is thicker.
+    The red arrow is drawn afterwards and is thinner.
+
+    Therefore if the two vectors are exactly coincident,
+    the red arrow is visible inside the blue arrow.
     """
 
     (
@@ -1830,7 +1914,6 @@ def draw_velocity_arrows(
     arrow_origin = (
         trunk_position.copy()
     )
-    
 
     arrow_origin[2] += (
         VELOCITY_ARROW_HEIGHT_OFFSET
@@ -1858,8 +1941,6 @@ def draw_velocity_arrows(
 
         # ====================================================
         # BLUE COMMAND ARROW
-        #
-        # Draw first and thicker.
         # ====================================================
 
         draw_velocity_arrow(
@@ -1887,8 +1968,6 @@ def draw_velocity_arrows(
 
         # ====================================================
         # RED ACTUAL VELOCITY ARROW
-        #
-        # Same origin, drawn on top.
         # ====================================================
 
         draw_velocity_arrow(
@@ -1966,7 +2045,7 @@ def start_new_step(
     )
 
     # ========================================================
-    # ADAPTIVE STEP QP AT t = 0
+    # STEP LOCATION / TIMING QP
     # ========================================================
 
     planner_result = (
@@ -1993,7 +2072,7 @@ def start_new_step(
     )
 
     # ========================================================
-    # SWING FOOT INITIAL POSE
+    # CURRENT SWING FOOT
     # ========================================================
 
     if swing_side == "left":
@@ -2023,7 +2102,7 @@ def start_new_step(
         )
 
     # ========================================================
-    # ADAPTIVE LANDING TARGET
+    # LANDING TARGET
     # ========================================================
 
     landing_position = (
@@ -2031,11 +2110,13 @@ def start_new_step(
     )
 
     landing_position[0] = (
-        planner_result.step_location_x
+        planner_result
+        .step_location_x
     )
 
     landing_position[1] = (
-        planner_result.step_location_y
+        planner_result
+        .step_location_y
     )
 
     landing_position[2] = (
@@ -2075,7 +2156,7 @@ def start_new_step(
 
 
 # ============================================================
-# RUN WALK
+# WALK
 # ============================================================
 
 def run_walk(
@@ -2138,7 +2219,7 @@ def run_walk(
     )
 
     # ========================================================
-    # FULL TRUNK ORIENTATION REFERENCE
+    # TRUNK ORIENTATION REFERENCE
     # ========================================================
 
     (
@@ -2183,7 +2264,7 @@ def run_walk(
     )
 
     # ========================================================
-    # INITIAL COMMAND
+    # INITIAL VELOCITY COMMAND
     # ========================================================
 
     command = (
@@ -2382,7 +2463,7 @@ def run_walk(
     )
 
     # ========================================================
-    # STANDARD WALKING VISUALIZER
+    # WALKING VISUALIZER
     # ========================================================
 
     walking_visualizer = (
@@ -2395,8 +2476,30 @@ def run_walk(
         robot
     )
 
-    walking_visualizer.configure_viewer(
-        viewer
+    # ========================================================
+    # IMPORTANT:
+    #
+    # DO NOT CALL:
+    #
+    #     walking_visualizer.configure_viewer(viewer)
+    #
+    # because that old function forces:
+    #
+    #     Rendering -> Frame -> Site
+    #
+    # Instead use our configuration below, which does NOT
+    # touch viewer.opt.frame.
+    # ========================================================
+
+    configure_step_timing_viewer(
+
+        viewer=(
+            viewer
+        ),
+
+        walking_visualizer=(
+            walking_visualizer
+        ),
     )
 
     # ========================================================
@@ -2450,7 +2553,7 @@ def run_walk(
     )
 
     # ========================================================
-    # TIMESTAMPED 4-SECOND HISTORY
+    # 4-SECOND VISUAL HISTORY
     # ========================================================
 
     visual_history = (
@@ -2477,17 +2580,15 @@ def run_walk(
     )
 
     # ========================================================
-    # RUNTIME STATE
+    # RUNTIME
     # ========================================================
 
     phase_time = 0.0
-
     kinematic_time = 0.0
 
     step_index = 1
 
     planner_frozen = False
-
     disturbance_applied = False
 
     previous_com_actual = (
@@ -2500,7 +2601,6 @@ def run_walk(
     )
 
     next_print_time = 0.0
-
     next_viewer_sync_time = 0.0
 
     wall_start = (
@@ -2550,11 +2650,11 @@ def run_walk(
     )
 
     print(
-        "  BLUE  : command velocity"
+        "  BLUE : command velocity"
     )
 
     print(
-        "  RED   : actual CoM velocity"
+        "  RED  : actual CoM velocity"
     )
 
     print()
@@ -2569,17 +2669,13 @@ def run_walk(
             break
 
         # ====================================================
-        # READ COMMAND
+        # READ CURRENT COMMAND
         # ====================================================
 
         latest_command = (
             velocity_command
             .snapshot()
         )
-
-        # ====================================================
-        # COMMAND CHANGED
-        # ====================================================
 
         if (
             latest_command.version
@@ -2690,7 +2786,7 @@ def run_walk(
                 )
 
             # =================================================
-            # SAVE LANDED FOOTPRINT
+            # SAVE COMPLETED FOOTSTEP
             # =================================================
 
             visual_history.add_footstep(
@@ -2739,7 +2835,6 @@ def run_walk(
             phase_time = 0.0
 
             planner_frozen = False
-
             disturbance_applied = False
 
             (
@@ -2806,9 +2901,7 @@ def run_walk(
         ):
 
             lipm.apply_dcm_disturbance(
-
                 DISTURBANCE_DCM_X,
-
                 DISTURBANCE_DCM_Y,
             )
 
@@ -2950,7 +3043,7 @@ def run_walk(
         )
 
         # ====================================================
-        # ONLINE SWING
+        # ONLINE SWING REFERENCE
         # ====================================================
 
         swing_sample = (
@@ -3028,10 +3121,10 @@ def run_walk(
         # ====================================================
         # DIFFERENTIAL IK
         #
-        # P1 support foot
-        # P2 CoM
-        # P3 swing foot
-        # P4 full trunk orientation
+        # P1: support foot
+        # P2: CoM
+        # P3: swing foot
+        # P4: full trunk orientation
         # ====================================================
 
         (
@@ -3164,13 +3257,6 @@ def run_walk(
 
         # ====================================================
         # ACTUAL ROBOT COM VELOCITY
-        #
-        # Used both for:
-        #
-        #   1. terminal vCoM
-        #   2. red velocity arrow
-        #
-        # World-frame horizontal velocity.
         # ====================================================
 
         p_com_actual = (
@@ -3203,7 +3289,7 @@ def run_walk(
         )
 
         # ====================================================
-        # TERMINAL STATUS
+        # TERMINAL
         # ====================================================
 
         if (
@@ -3246,7 +3332,7 @@ def run_walk(
         ):
 
             # =================================================
-            # RECORD ONLY RECENT 4-SECOND HISTORY
+            # 4-SECOND HISTORY
             # =================================================
 
             visual_history.record(
@@ -3270,7 +3356,7 @@ def run_walk(
             )
 
             # =================================================
-            # CURRENT GAIT STATE
+            # GAIT STATE
             # =================================================
 
             visual_state = (
@@ -3288,7 +3374,7 @@ def run_walk(
             )
 
             # =================================================
-            # EXISTING WALKING VISUALIZER
+            # STANDARD WALKING VISUALIZATION
             # =================================================
 
             walking_visualizer.update(
@@ -3301,7 +3387,7 @@ def run_walk(
             )
 
             # =================================================
-            # RECENT 4-SECOND ZMP TRAIL
+            # RECENT ZMP
             # =================================================
 
             draw_recent_zmp_trail(
@@ -3316,7 +3402,7 @@ def run_walk(
             )
 
             # =================================================
-            # CURRENT LIPM COM / DCM / uT
+            # LIPM COM / DCM / uT
             # =================================================
 
             draw_adaptive_overlay(
@@ -3355,17 +3441,15 @@ def run_walk(
             )
 
             # =================================================
-            # VELOCITY ARROWS ABOVE ROBOT
+            # NATIVE MUJOCO VELOCITY ARROWS
+            #
+            # Both originate from the same point above trunk.
             #
             # BLUE:
-            #
-            #     [vx_cmd, vy_cmd]
+            #     command
             #
             # RED:
-            #
-            #     [vx_CoM_actual, vy_CoM_actual]
-            #
-            # Both have exactly the same origin.
+            #     actual robot CoM velocity
             # =================================================
 
             draw_velocity_arrows(
@@ -3396,9 +3480,9 @@ def run_walk(
             )
 
             # =================================================
-            # CURRENT ZMP MARKER
+            # CURRENT ZMP
             #
-            # This function also performs viewer.sync().
+            # This function calls viewer.sync().
             # =================================================
 
             zmp_visualizer.draw_overlay(
@@ -3513,7 +3597,7 @@ def main():
     )
 
     # ========================================================
-    # INITIAL PHYSICAL SETTLING
+    # INITIAL PHYSICAL SETTLING ONLY
     # ========================================================
 
     settle_robot(
