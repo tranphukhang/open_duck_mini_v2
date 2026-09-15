@@ -173,32 +173,67 @@ COM_HEIGHT = 0.2044
 # ============================================================
 # MANUAL COM PUSH
 #
-# A push is triggered ONLY when SPACE is pressed.
+# Trigger:
 #
-# Force is expressed in WORLD coordinates:
+#     SPACE
+#
+# World-frame force:
 #
 #     +X : forward
 #     -X : backward
+#
 #     +Y : left
 #     -Y : right
 #
-# This is a reduced-order external force applied to the
-# point-foot LIPM:
+# Reduced-order LIPM dynamics:
 #
 #     c_ddot
 #       =
-#       omega^2(c-u0)
+#       omega^2 (c-u0)
 #       +
 #       F_push / m
-#
-# It is NOT a MuJoCo rigid-body external force because walking
-# execution is kinematic set-state.
 # ============================================================
 
 PUSH_FORCE_X = +2.5
 PUSH_FORCE_Y = +2.5
 
 PUSH_DURATION = 0.05
+
+
+# ============================================================
+# PUSH FORCE VISUALIZATION
+#
+# Native MuJoCo arrow located at the LIPM CoM.
+#
+# Displayed vector:
+#
+#     Delta p
+#       =
+#       PUSH_FORCE_ARROW_SCALE
+#       *
+#       [Fx, Fy, 0]
+#
+# Unit:
+#
+#     m displayed / N
+# ============================================================
+
+PUSH_FORCE_ARROW_SCALE = 0.1
+
+PUSH_FORCE_ARROW_WIDTH = 0.006
+
+PUSH_FORCE_ARROW_MIN_NORM = 1.0e-6
+
+
+PUSH_FORCE_ARROW_RGBA = np.array(
+    [
+        1.00,
+        0.50,
+        0.00,
+        1.00,
+    ],
+    dtype=np.float32,
+)
 
 
 # ============================================================
@@ -299,8 +334,6 @@ STATUS_PRINT_PERIOD = 0.10
 
 # ============================================================
 # VISUAL HISTORY
-#
-# Keep the value currently used in the GitHub version.
 # ============================================================
 
 VISUAL_HISTORY_DURATION = 2.0
@@ -315,6 +348,12 @@ TIME_TOLERANCE = 1.0e-10
 
 # ============================================================
 # VELOCITY ARROW VISUALIZATION
+#
+# Blue:
+#     command
+#
+# Red:
+#     actual robot CoM velocity
 # ============================================================
 
 VELOCITY_ARROW_HEIGHT_OFFSET = 0.16
@@ -541,31 +580,6 @@ class VelocityCommandSnapshot:
 
 
 class VelocityCommand:
-    """
-    Keyboard input state.
-
-    Arrow keys:
-
-        UP
-            vx += 0.05 m/s
-
-        DOWN
-            vx -= 0.05 m/s
-
-        LEFT
-            vy += 0.05 m/s
-
-        RIGHT
-            vy -= 0.05 m/s
-
-        SPACE
-            request one finite-duration CoM push
-
-    The SPACE callback only creates a request.
-
-    The actual force is applied inside the deterministic
-    walking loop using logical simulation time.
-    """
 
     def __init__(
         self,
@@ -641,7 +655,7 @@ class VelocityCommand:
             )
 
             # =================================================
-            # MANUAL PUSH
+            # SPACE -> MANUAL PUSH
             # =================================================
 
             if keycode == glfw.KEY_SPACE:
@@ -1231,11 +1245,11 @@ def configure_step_timing_viewer(
 
     with viewer.lock():
 
-        # ----------------------------------------------------
-        # Camera tracking only.
+        # ====================================================
+        # TRACKING CAMERA
         #
-        # viewer.opt.frame is intentionally NOT modified.
-        # ----------------------------------------------------
+        # Rendering -> Frame is intentionally untouched.
+        # ====================================================
 
         viewer.cam.type = (
             mujoco.mjtCamera
@@ -1247,9 +1261,9 @@ def configure_step_timing_viewer(
             .base_body_id
         )
 
-        # ----------------------------------------------------
-        # Model Elements
-        # ----------------------------------------------------
+        # ====================================================
+        # MODEL ELEMENTS
+        # ====================================================
 
         viewer.opt.flags[
             mujoco.mjtVisFlag
@@ -1973,7 +1987,10 @@ def draw_velocity_arrows(
             viewer.user_scn
         )
 
-        # Blue command arrow.
+        # ====================================================
+        # BLUE COMMAND
+        # ====================================================
+
         draw_velocity_arrow(
 
             scene=(
@@ -1997,7 +2014,10 @@ def draw_velocity_arrows(
             ),
         )
 
-        # Red actual CoM velocity arrow.
+        # ====================================================
+        # RED ACTUAL CoM VELOCITY
+        # ====================================================
+
         draw_velocity_arrow(
 
             scene=(
@@ -2018,6 +2038,128 @@ def draw_velocity_arrows(
 
             width=(
                 CURRENT_VELOCITY_ARROW_WIDTH
+            ),
+        )
+
+
+# ============================================================
+# PUSH FORCE ARROW AT LIPM COM
+# ============================================================
+
+def draw_push_force_arrow(
+    *,
+    viewer,
+    com_position,
+    push_active,
+):
+    """
+    Draw the external push force at the LIPM CoM.
+
+    The arrow is visible ONLY while the push is active.
+
+    Origin:
+
+        p_start = c_LIPM
+
+    End:
+
+        p_end
+          =
+          c_LIPM
+          +
+          PUSH_FORCE_ARROW_SCALE
+          *
+          [Fx, Fy, 0]
+
+    Therefore:
+
+        arrow direction
+            -> force direction
+
+        arrow length
+            -> proportional to force magnitude
+    """
+
+    if not push_active:
+
+        return
+
+    force_xy = np.array(
+        [
+            PUSH_FORCE_X,
+            PUSH_FORCE_Y,
+        ],
+        dtype=float,
+    )
+
+    if not np.all(
+        np.isfinite(
+            force_xy
+        )
+    ):
+
+        return
+
+    force_norm = float(
+        np.linalg.norm(
+            force_xy
+        )
+    )
+
+    if (
+        force_norm
+        <
+        PUSH_FORCE_ARROW_MIN_NORM
+    ):
+
+        return
+
+    origin = np.asarray(
+        com_position,
+        dtype=float,
+    ).reshape(
+        3
+    ).copy()
+
+    force_world = np.array(
+        [
+            force_xy[0],
+            force_xy[1],
+            0.0,
+        ],
+        dtype=float,
+    )
+
+    endpoint = (
+        origin
+        +
+        PUSH_FORCE_ARROW_SCALE
+        *
+        force_world
+    )
+
+    with viewer.lock():
+
+        add_mujoco_arrow(
+
+            scene=(
+                viewer.user_scn
+            ),
+
+            start=(
+                origin
+            ),
+
+            end=(
+                endpoint
+            ),
+
+            width=(
+                PUSH_FORCE_ARROW_WIDTH
+            ),
+
+            rgba=(
+                PUSH_FORCE_ARROW_RGBA
             ),
         )
 
@@ -2178,18 +2320,6 @@ def advance_lipm(
     robot_mass,
     push_time_remaining,
 ):
-    """
-    Advance the LIPM for exactly dt.
-
-    If a manual push is active, apply the configured constant
-    force for as much of this interval as remains.
-
-    If the push ends inside the current DT, split the interval:
-
-        [forced part] + [nominal part]
-
-    so PUSH_DURATION is respected exactly.
-    """
 
     dt = float(
         dt
@@ -2202,6 +2332,10 @@ def advance_lipm(
         ),
     )
 
+    # ========================================================
+    # NO PUSH
+    # ========================================================
+
     if (
         push_time_remaining
         <=
@@ -2213,6 +2347,10 @@ def advance_lipm(
         )
 
         return 0.0
+
+    # ========================================================
+    # PUSH ACTIVE
+    # ========================================================
 
     push_dt = min(
         dt,
@@ -2239,6 +2377,10 @@ def advance_lipm(
             robot_mass
         ),
     )
+
+    # ========================================================
+    # PUSH ENDS INSIDE CURRENT DT
+    # ========================================================
 
     remaining_dt = (
         dt
@@ -2280,7 +2422,7 @@ def run_walk(
 ):
 
     # ========================================================
-    # ROBOT MASS FOR REDUCED-ORDER PUSH MODEL
+    # ROBOT MASS
     # ========================================================
 
     robot_mass = (
@@ -2383,7 +2525,7 @@ def run_walk(
     )
 
     # ========================================================
-    # INITIAL INPUT STATE
+    # INITIAL KEYBOARD STATE
     # ========================================================
 
     command = (
@@ -2694,7 +2836,7 @@ def run_walk(
     )
 
     # ========================================================
-    # RUNTIME
+    # RUNTIME STATE
     # ========================================================
 
     phase_time = 0.0
@@ -2778,15 +2920,19 @@ def run_walk(
     print()
 
     print(
-        "Velocity arrows:"
+        "Visualization:"
     )
 
     print(
-        "  BLUE : command velocity"
+        "  BLUE   : command velocity"
     )
 
     print(
-        "  RED  : actual CoM velocity"
+        "  RED    : actual CoM velocity"
+    )
+
+    print(
+        "  ORANGE : external push force at LIPM CoM"
     )
 
     print()
@@ -2859,9 +3005,7 @@ def run_walk(
         # ====================================================
         # SPACE PRESSED
         #
-        # Start/restart one finite-duration push.
-        #
-        # No wall-clock timing is used.
+        # Start / restart a finite-duration external push.
         # ====================================================
 
         if (
@@ -2945,6 +3089,10 @@ def run_walk(
                     right_rotation.copy()
                 )
 
+            # =================================================
+            # SAVE COMPLETED FOOTSTEP
+            # =================================================
+
             visual_history.add_footstep(
 
                 current_time=(
@@ -2967,10 +3115,9 @@ def run_walk(
             # =================================================
             # SUPPORT SWITCH
             #
-            # The manual push is NOT reset here.
+            # u0(k+1) = uT(k)
             #
-            # If its 50 ms interval crosses touchdown,
-            # it continues across the support switch.
+            # Push is NOT reset here.
             # =================================================
 
             stance_side = (
@@ -3400,6 +3547,16 @@ def run_walk(
         )
 
         # ====================================================
+        # PUSH STATE
+        # ====================================================
+
+        push_active = (
+            push_time_remaining
+            >
+            TIME_TOLERANCE
+        )
+
+        # ====================================================
         # POINT-FOOT ZMP
         # ====================================================
 
@@ -3426,11 +3583,7 @@ def run_walk(
             TIME_TOLERANCE
         ):
 
-            if (
-                push_time_remaining
-                >
-                TIME_TOLERANCE
-            ):
+            if push_active:
 
                 push_text = "ON"
 
@@ -3470,6 +3623,10 @@ def run_walk(
             TIME_TOLERANCE
         ):
 
+            # =================================================
+            # RECENT HISTORY
+            # =================================================
+
             visual_history.record(
 
                 current_time=(
@@ -3490,6 +3647,10 @@ def run_walk(
                 walking_visualizer
             )
 
+            # =================================================
+            # GAIT STATE
+            # =================================================
+
             visual_state = (
                 VisualWalkingState(
 
@@ -3504,6 +3665,10 @@ def run_walk(
                 )
             )
 
+            # =================================================
+            # STANDARD WALKING VISUALIZATION
+            # =================================================
+
             walking_visualizer.update(
 
                 viewer,
@@ -3512,6 +3677,10 @@ def run_walk(
 
                 visual_state,
             )
+
+            # =================================================
+            # RECENT ZMP TRAIL
+            # =================================================
 
             draw_recent_zmp_trail(
 
@@ -3523,6 +3692,10 @@ def run_walk(
                     visual_history
                 ),
             )
+
+            # =================================================
+            # LIPM COM / DCM / uT
+            # =================================================
 
             draw_adaptive_overlay(
 
@@ -3559,6 +3732,16 @@ def run_walk(
                 ),
             )
 
+            # =================================================
+            # VELOCITY ARROWS ABOVE ROBOT
+            #
+            # BLUE:
+            #     command
+            #
+            # RED:
+            #     actual CoM velocity
+            # =================================================
+
             draw_velocity_arrows(
 
                 viewer=(
@@ -3586,6 +3769,39 @@ def run_walk(
                 ),
             )
 
+            # =================================================
+            # PUSH FORCE ARROW
+            #
+            # ORANGE:
+            #
+            #     origin = LIPM CoM
+            #
+            #     direction = push-force direction
+            #
+            #     length proportional to force magnitude
+            #
+            # Visible only while push_active == True.
+            # =================================================
+
+            draw_push_force_arrow(
+
+                viewer=(
+                    viewer
+                ),
+
+                com_position=(
+                    lipm_sample.position
+                ),
+
+                push_active=(
+                    push_active
+                ),
+            )
+
+            # =================================================
+            # CURRENT ZMP
+            # =================================================
+
             zmp_visualizer.draw_overlay(
                 viewer
             )
@@ -3597,8 +3813,8 @@ def run_walk(
         # ====================================================
         # EXACT LIPM PROPAGATION
         #
-        # If SPACE was pressed, the configured push force is
-        # applied during this propagation interval.
+        # Push force is physically represented in the
+        # reduced-order LIPM only while push_time_remaining > 0.
         # ====================================================
 
         push_time_remaining = (
@@ -3639,7 +3855,7 @@ def run_walk(
         )
 
         # ====================================================
-        # REALTIME PLAYBACK
+        # REAL-TIME PLAYBACK
         # ====================================================
 
         if REALTIME_PLAYBACK:
