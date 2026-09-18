@@ -81,6 +81,10 @@ if __package__:
         plot_simulation_results,
     )
 
+    from .contact_stability import (
+        ContactStabilityChecker,
+    )
+
 else:
 
     from adaptive_step_planner import (
@@ -100,6 +104,10 @@ else:
     from simulation_plot import (
         SimulationLog,
         plot_simulation_results,
+    )
+
+    from contact_stability import (
+        ContactStabilityChecker,
     )
 
 
@@ -1075,6 +1083,18 @@ def run_walk(
     robot_mass = (
         compute_robot_mass(
             mj_model
+        )
+    )
+
+    # ========================================================
+    # CONTACT STABILITY CHECKER
+    # ========================================================
+
+    contact_stability_checker = (
+        ContactStabilityChecker(
+            mj_model=(
+                mj_model
+            )
         )
     )
 
@@ -2059,6 +2079,51 @@ def run_walk(
             robot.get_right_foot_pose()
         )
 
+        # ====================================================
+        # CONTACT STABILITY RAW SAMPLE
+        # ====================================================
+        #
+        # Only raw full-body/contact data are recorded here.
+        # The contact-feasibility QPs are solved after the
+        # walking simulation has finished so the derivatives
+        #
+        #     a_G = d(v_G)/dt
+        #     dL_G/dt
+        #
+        # can be reconstructed from the complete trajectory.
+        # ====================================================
+
+        contact_stability_checker.record_sample(
+
+            time=(
+                kinematic_time
+            ),
+
+            mj_data=(
+                mj_data
+            ),
+
+            whole_body_com_position=(
+                whole_body_com_position
+            ),
+
+            whole_body_com_velocity=(
+                whole_body_com_velocity
+            ),
+
+            angular_momentum=(
+                whole_body_angular_momentum
+            ),
+
+            left_foot_position=(
+                left_foot_position_log
+            ),
+
+            right_foot_position=(
+                right_foot_position_log
+            ),
+        )
+
         simulation_log.append(
             time=(
                 kinematic_time
@@ -2227,8 +2292,26 @@ def run_walk(
         f"{automatic_push_applied}"
     )
 
+    # ========================================================
+    # OFFLINE CONTACT STABILITY CHECK
+    # ========================================================
+
+    print()
+    print(
+        "Solving contact-stability QPs..."
+    )
+
+    contact_stability_results = (
+        contact_stability_checker.solve_all()
+    )
+
+    contact_stability_checker.print_summary(
+        contact_stability_results
+    )
+
     return (
-        simulation_log
+        simulation_log,
+        contact_stability_results,
     )
 
 
@@ -2408,7 +2491,10 @@ def main():
             show_right_ui=True,
         ) as viewer:
 
-            simulation_log = (
+            (
+                simulation_log,
+                contact_stability_results,
+            ) = (
                 run_walk(
                     mj_model=(
                         mj_model
@@ -2430,7 +2516,10 @@ def main():
 
     else:
 
-        simulation_log = (
+        (
+            simulation_log,
+            contact_stability_results,
+        ) = (
             run_walk(
                 mj_model=(
                     mj_model
@@ -2454,6 +2543,19 @@ def main():
 
     plot_simulation_results(
         simulation_log
+    )
+
+    # contact_stability_results is intentionally kept in memory.
+    # It contains:
+    #
+    #   - optimal force at every MuJoCo contact point,
+    #   - resultant left/right foot wrench,
+    #   - friction utilization,
+    #   - QP feasibility status and residuals.
+    #
+    # No contact-wrench plot/video is generated at this stage.
+    _ = (
+        contact_stability_results
     )
 
 
