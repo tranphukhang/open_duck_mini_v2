@@ -1,16 +1,22 @@
 # step_timing_adaptation/run.py
+#
+# Automatic 9-second experiment:
+#   0 <= t < 3 s : vx = +0.10 m/s, vy =  0.00 m/s
+#   3 <= t < 6 s : vx = +0.10 m/s, vy = -0.05 m/s
+#   6 <= t <= 9 s: vx = +0.10 m/s, vy =  0.00 m/s
+#
+# One external push is applied automatically at t = 5.0 s.
+#
+# After the simulation finishes, logged data are plotted by
+# simulation_plot.py.
 
 from __future__ import annotations
 
 import sys
 import time
-import threading
-
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
-import glfw
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -24,10 +30,7 @@ CURRENT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = CURRENT_DIR.parent
 
 if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(
-        0,
-        str(ROOT_DIR),
-    )
+    sys.path.insert(0, str(ROOT_DIR))
 
 
 ROBOT_XML = (
@@ -44,7 +47,7 @@ SCENE_XML = (
 
 
 # ============================================================
-# STEP TIMING ADAPTATION
+# LOCAL MODULES
 # ============================================================
 
 if __package__:
@@ -63,6 +66,11 @@ if __package__:
         PointFootLIPM,
     )
 
+    from .simulation_plot import (
+        SimulationLog,
+        plot_simulation_results,
+    )
+
 else:
 
     from adaptive_step_planner import (
@@ -79,24 +87,19 @@ else:
         PointFootLIPM,
     )
 
+    from simulation_plot import (
+        SimulationLog,
+        plot_simulation_results,
+    )
+
 
 # ============================================================
-# SETTLING / ZMP VISUALIZATION
+# EXISTING PROJECT MODULES
 # ============================================================
 
 from lipm_mpc.run import (
     settle_robot,
 )
-
-from lipm_mpc.zmp_visualization import (
-    ZMPVisualizationConfig,
-    LIPMZMPVisualizer,
-)
-
-
-# ============================================================
-# WHOLE-BODY KINEMATICS
-# ============================================================
 
 from footstep_planning.pinocchio_model import (
     PinocchioModel,
@@ -108,23 +111,6 @@ from footstep_planning.differential_ik import (
 )
 
 
-# ============================================================
-# WALKING VISUALIZATION
-# ============================================================
-
-from footstep_planning.walking_fsm import (
-    WalkingPhase,
-)
-
-from footstep_planning.walking_visualization import (
-    WalkingVisualizer,
-    PlannedFootstep,
-    add_sphere,
-    add_line,
-    draw_polyline,
-)
-
-
 np.set_printoptions(
     precision=6,
     suppress=True,
@@ -132,33 +118,59 @@ np.set_printoptions(
 
 
 # ============================================================
-# EXECUTOR
+# EXECUTOR / EXPERIMENT
 # ============================================================
 
 DT = 0.0005
 
+SIMULATION_DURATION = 9.0
 
-# ============================================================
-# FIRST SUPPORT
-# ============================================================
+DATA_LOG_PERIOD = 0.005
 
 FIRST_STANCE_SIDE = "left"
 
+SHOW_VIEWER = True
+REALTIME_PLAYBACK = True
+VIEWER_SYNC_PERIOD = 0.02
+STATUS_PRINT_PERIOD = 0.10
+
+TIME_TOLERANCE = 1.0e-10
+
 
 # ============================================================
-# INITIAL WALKING COMMAND
+# AUTOMATIC VELOCITY COMMAND
 # ============================================================
 
-INITIAL_DESIRED_VELOCITY_X = 0.0
-INITIAL_DESIRED_VELOCITY_Y = 0.0
+# Required experiment:
+#
+#   0 -> 3 s : vx = 0.10, vy =  0.00
+#   3 -> 6 s : vx = 0.10, vy = -0.05
+#   6 -> 9 s : vx = 0.10, vy =  0.00
 
+def automatic_velocity_profile(
+    current_time: float,
+) -> tuple[float, float]:
 
-# ============================================================
-# KEYBOARD VELOCITY STEP
-# ============================================================
+    t = float(current_time)
 
-VELOCITY_X_STEP = 0.05
-VELOCITY_Y_STEP = 0.05
+    if t < 3.0:
+
+        return (
+            0.10,
+            0.00,
+        )
+
+    if t < 6.0:
+
+        return (
+            0.10,
+            -0.05,
+        )
+
+    return (
+        0.10,
+        0.00,
+    )
 
 
 # ============================================================
@@ -171,69 +183,15 @@ COM_HEIGHT = 0.2044
 
 
 # ============================================================
-# MANUAL COM PUSH
-#
-# Trigger:
-#
-#     SPACE
-#
-# World-frame force:
-#
-#     +X : forward
-#     -X : backward
-#
-#     +Y : left
-#     -Y : right
-#
-# Reduced-order LIPM dynamics:
-#
-#     c_ddot
-#       =
-#       omega^2 (c-u0)
-#       +
-#       F_push / m
+# AUTOMATIC PUSH
 # ============================================================
+
+PUSH_TIME = 5.0
 
 PUSH_FORCE_X = +2.5
 PUSH_FORCE_Y = +2.5
 
 PUSH_DURATION = 0.05
-
-
-# ============================================================
-# PUSH FORCE VISUALIZATION
-#
-# Native MuJoCo arrow located at the LIPM CoM.
-#
-# Displayed vector:
-#
-#     Delta p
-#       =
-#       PUSH_FORCE_ARROW_SCALE
-#       *
-#       [Fx, Fy, 0]
-#
-# Unit:
-#
-#     m displayed / N
-# ============================================================
-
-PUSH_FORCE_ARROW_SCALE = 0.1
-
-PUSH_FORCE_ARROW_WIDTH = 0.006
-
-PUSH_FORCE_ARROW_MIN_NORM = 1.0e-6
-
-
-PUSH_FORCE_ARROW_RGBA = np.array(
-    [
-        1.00,
-        0.50,
-        0.00,
-        1.00,
-    ],
-    dtype=np.float32,
-)
 
 
 # ============================================================
@@ -251,44 +209,12 @@ STEP_TIME_MAX = 0.30
 
 
 # ============================================================
-# COMMAND LIMITS
-# ============================================================
-
-VELOCITY_X_MIN = (
-    STEP_LENGTH_MIN
-    /
-    STEP_TIME_MIN
-)
-
-VELOCITY_X_MAX = (
-    STEP_LENGTH_MAX
-    /
-    STEP_TIME_MIN
-)
-
-VELOCITY_Y_MIN = (
-    STEP_WIDTH_MIN
-    /
-    STEP_TIME_MIN
-)
-
-VELOCITY_Y_MAX = (
-    STEP_WIDTH_MAX
-    /
-    STEP_TIME_MIN
-)
-
-
-# ============================================================
 # STEP QP
 # ============================================================
 
 STEP_QP_ALPHA_LOCATION = 1.0
-
 STEP_QP_ALPHA_TIMING = 5.0
-
 STEP_QP_ALPHA_DCM = 1000.0
-
 STEP_QP_ALPHA_VIABILITY = 1.0e6
 
 
@@ -320,806 +246,14 @@ TRUNK_ORIENTATION_KP = 10.0
 
 
 # ============================================================
-# GUI / TERMINAL
-# ============================================================
-
-SHOW_VIEWER = True
-
-REALTIME_PLAYBACK = True
-
-VIEWER_SYNC_PERIOD = 0.02
-
-STATUS_PRINT_PERIOD = 0.10
-
-
-# ============================================================
-# VISUAL HISTORY
-# ============================================================
-
-VISUAL_HISTORY_DURATION = 2.0
-
-
-# ============================================================
-# NUMERICAL
-# ============================================================
-
-TIME_TOLERANCE = 1.0e-10
-
-
-# ============================================================
-# VELOCITY ARROW VISUALIZATION
-#
-# Blue:
-#     command
-#
-# Red:
-#     actual robot CoM velocity
-# ============================================================
-
-VELOCITY_ARROW_HEIGHT_OFFSET = 0.16
-
-VELOCITY_ARROW_SCALE = 0.45
-
-VELOCITY_ARROW_MIN_NORM = 1.0e-5
-
-
-COMMAND_ARROW_WIDTH = 0.008
-
-CURRENT_VELOCITY_ARROW_WIDTH = 0.0045
-
-
-COMMAND_ARROW_RGBA = np.array(
-    [
-        0.00,
-        0.35,
-        1.00,
-        1.00,
-    ],
-    dtype=np.float32,
-)
-
-
-CURRENT_VELOCITY_ARROW_RGBA = np.array(
-    [
-        1.00,
-        0.05,
-        0.05,
-        1.00,
-    ],
-    dtype=np.float32,
-)
-
-
-# ============================================================
-# ZMP VISUALIZATION
-# ============================================================
-
-ZMP_VISUALIZATION_CONFIG = (
-    ZMPVisualizationConfig(
-
-        show_current=True,
-
-        show_trail=False,
-
-        show_preview=False,
-
-        current_z=0.010,
-
-        trail_z=0.008,
-
-        preview_z=0.007,
-
-        current_radius=0.007,
-
-        preview_radius=0.0028,
-
-        trail_width=5.0,
-
-        preview_width=2.5,
-
-        trail_min_distance=5.0e-4,
-
-        trail_max_points=2,
-
-        preview_point_stride=2,
-
-        current_rgba=np.array(
-            [
-                1.00,
-                0.00,
-                1.00,
-                1.00,
-            ],
-            dtype=np.float32,
-        ),
-
-        trail_rgba=np.array(
-            [
-                0.90,
-                0.10,
-                0.95,
-                0.80,
-            ],
-            dtype=np.float32,
-        ),
-
-        preview_rgba=np.array(
-            [
-                0.72,
-                0.28,
-                1.00,
-                0.72,
-            ],
-            dtype=np.float32,
-        ),
-
-        preview_line_rgba=np.array(
-            [
-                0.72,
-                0.28,
-                1.00,
-                0.55,
-            ],
-            dtype=np.float32,
-        ),
-    )
-)
-
-
-# ============================================================
-# RECENT ZMP TRAIL
-# ============================================================
-
-RECENT_ZMP_TRAIL_WIDTH = 5.0
-
-RECENT_ZMP_TRAIL_RGBA = np.array(
-    [
-        0.90,
-        0.10,
-        0.95,
-        0.80,
-    ],
-    dtype=np.float32,
-)
-
-
-# ============================================================
-# ADAPTIVE VISUALIZATION
-# ============================================================
-
-COM_GROUND_Z = 0.012
-
-COM_GROUND_RADIUS = 0.006
-
-
-COM_GROUND_RGBA = np.array(
-    [
-        0.05,
-        0.40,
-        1.00,
-        1.00,
-    ],
-    dtype=np.float32,
-)
-
-
-DCM_GROUND_Z = 0.014
-
-DCM_RADIUS = 0.007
-
-
-DCM_RGBA = np.array(
-    [
-        1.00,
-        0.90,
-        0.00,
-        1.00,
-    ],
-    dtype=np.float32,
-)
-
-
-PLANNER_TARGET_Z = 0.016
-
-PLANNER_TARGET_RADIUS = 0.006
-
-
-PLANNER_TARGET_RGBA = np.array(
-    [
-        0.00,
-        1.00,
-        0.85,
-        1.00,
-    ],
-    dtype=np.float32,
-)
-
-
-COM_VERTICAL_LINE_WIDTH = 2.5
-
-
-COM_VERTICAL_RGBA = np.array(
-    [
-        0.10,
-        0.40,
-        1.00,
-        0.55,
-    ],
-    dtype=np.float32,
-)
-
-
-COM_DCM_LINE_WIDTH = 3.0
-
-
-COM_DCM_LINE_RGBA = np.array(
-    [
-        1.00,
-        0.80,
-        0.05,
-        0.70,
-    ],
-    dtype=np.float32,
-)
-
-
-# ============================================================
-# KEYBOARD INPUT
+# COMMAND SNAPSHOT
 # ============================================================
 
 @dataclass(frozen=True)
 class VelocityCommandSnapshot:
 
     x: float
-
     y: float
-
-    version: int
-
-    push_request_count: int
-
-
-class VelocityCommand:
-
-    def __init__(
-        self,
-        *,
-        initial_x,
-        initial_y,
-    ):
-
-        self._lock = (
-            threading.Lock()
-        )
-
-        self._x = float(
-            np.clip(
-                initial_x,
-                VELOCITY_X_MIN,
-                VELOCITY_X_MAX,
-            )
-        )
-
-        self._y = float(
-            np.clip(
-                initial_y,
-                VELOCITY_Y_MIN,
-                VELOCITY_Y_MAX,
-            )
-        )
-
-        self._version = 0
-
-        self._push_request_count = 0
-
-
-    def snapshot(
-        self,
-    ) -> VelocityCommandSnapshot:
-
-        with self._lock:
-
-            return VelocityCommandSnapshot(
-
-                x=float(
-                    self._x
-                ),
-
-                y=float(
-                    self._y
-                ),
-
-                version=int(
-                    self._version
-                ),
-
-                push_request_count=int(
-                    self._push_request_count
-                ),
-            )
-
-
-    def key_callback(
-        self,
-        keycode,
-    ):
-
-        with self._lock:
-
-            old_x = (
-                self._x
-            )
-
-            old_y = (
-                self._y
-            )
-
-            # =================================================
-            # SPACE -> MANUAL PUSH
-            # =================================================
-
-            if keycode == glfw.KEY_SPACE:
-
-                self._push_request_count += 1
-
-                return
-
-            # =================================================
-            # VELOCITY COMMAND
-            # =================================================
-
-            if keycode == glfw.KEY_UP:
-
-                self._x = float(
-                    np.clip(
-                        self._x
-                        +
-                        VELOCITY_X_STEP,
-
-                        VELOCITY_X_MIN,
-                        VELOCITY_X_MAX,
-                    )
-                )
-
-            elif keycode == glfw.KEY_DOWN:
-
-                self._x = float(
-                    np.clip(
-                        self._x
-                        -
-                        VELOCITY_X_STEP,
-
-                        VELOCITY_X_MIN,
-                        VELOCITY_X_MAX,
-                    )
-                )
-
-            elif keycode == glfw.KEY_LEFT:
-
-                self._y = float(
-                    np.clip(
-                        self._y
-                        +
-                        VELOCITY_Y_STEP,
-
-                        VELOCITY_Y_MIN,
-                        VELOCITY_Y_MAX,
-                    )
-                )
-
-            elif keycode == glfw.KEY_RIGHT:
-
-                self._y = float(
-                    np.clip(
-                        self._y
-                        -
-                        VELOCITY_Y_STEP,
-
-                        VELOCITY_Y_MIN,
-                        VELOCITY_Y_MAX,
-                    )
-                )
-
-            else:
-
-                return
-
-            self._x = float(
-                np.round(
-                    self._x,
-                    6,
-                )
-            )
-
-            self._y = float(
-                np.round(
-                    self._y,
-                    6,
-                )
-            )
-
-            changed = (
-                not np.isclose(
-                    old_x,
-                    self._x,
-                )
-                or
-                not np.isclose(
-                    old_y,
-                    self._y,
-                )
-            )
-
-            if changed:
-
-                self._version += 1
-
-
-# ============================================================
-# VISUAL STATE
-# ============================================================
-
-@dataclass
-class VisualWalkingState:
-
-    phase: WalkingPhase
-
-    support_side: str
-
-
-# ============================================================
-# TIMED FOOTSTEP
-# ============================================================
-
-@dataclass
-class TimedFootstep:
-
-    time: float
-
-    footstep: PlannedFootstep
-
-
-# ============================================================
-# RECENT VISUAL HISTORY
-# ============================================================
-
-class RecentVisualHistory:
-
-    def __init__(
-        self,
-        *,
-        duration,
-    ):
-
-        self.duration = float(
-            duration
-        )
-
-        if self.duration <= 0.0:
-
-            raise ValueError(
-                "Visual history duration must be positive."
-            )
-
-        self.left_trail = deque()
-
-        self.right_trail = deque()
-
-        self.com_trail = deque()
-
-        self.zmp_trail = deque()
-
-        self.footsteps = deque()
-
-
-    def _prune_deque(
-        self,
-        data,
-        current_time,
-    ):
-
-        threshold = (
-            current_time
-            -
-            self.duration
-        )
-
-        while (
-            len(data) > 0
-            and
-            data[0][0]
-            <
-            threshold
-            -
-            TIME_TOLERANCE
-        ):
-
-            data.popleft()
-
-
-    def prune(
-        self,
-        current_time,
-    ):
-
-        self._prune_deque(
-            self.left_trail,
-            current_time,
-        )
-
-        self._prune_deque(
-            self.right_trail,
-            current_time,
-        )
-
-        self._prune_deque(
-            self.com_trail,
-            current_time,
-        )
-
-        self._prune_deque(
-            self.zmp_trail,
-            current_time,
-        )
-
-        threshold = (
-            current_time
-            -
-            self.duration
-        )
-
-        while (
-            len(
-                self.footsteps
-            ) > 0
-            and
-            self.footsteps[0].time
-            <
-            threshold
-            -
-            TIME_TOLERANCE
-        ):
-
-            self.footsteps.popleft()
-
-
-    def initialize(
-        self,
-        *,
-        current_time,
-        robot,
-        zmp_world,
-    ):
-
-        (
-            p_left,
-            R_left,
-        ) = (
-            robot.get_left_foot_pose()
-        )
-
-        (
-            p_right,
-            R_right,
-        ) = (
-            robot.get_right_foot_pose()
-        )
-
-        p_com = (
-            robot.get_com()
-        )
-
-        self.left_trail.append(
-            (
-                current_time,
-                p_left.copy(),
-            )
-        )
-
-        self.right_trail.append(
-            (
-                current_time,
-                p_right.copy(),
-            )
-        )
-
-        self.com_trail.append(
-            (
-                current_time,
-                p_com.copy(),
-            )
-        )
-
-        self.zmp_trail.append(
-            (
-                current_time,
-                np.asarray(
-                    zmp_world,
-                    dtype=float,
-                ).copy(),
-            )
-        )
-
-        self.footsteps.append(
-            TimedFootstep(
-
-                time=(
-                    current_time
-                ),
-
-                footstep=PlannedFootstep(
-
-                    side="left",
-
-                    position=(
-                        p_left.copy()
-                    ),
-
-                    rotation=(
-                        R_left.copy()
-                    ),
-                ),
-            )
-        )
-
-        self.footsteps.append(
-            TimedFootstep(
-
-                time=(
-                    current_time
-                ),
-
-                footstep=PlannedFootstep(
-
-                    side="right",
-
-                    position=(
-                        p_right.copy()
-                    ),
-
-                    rotation=(
-                        R_right.copy()
-                    ),
-                ),
-            )
-        )
-
-
-    def record(
-        self,
-        *,
-        current_time,
-        robot,
-        zmp_world,
-    ):
-
-        p_left, _ = (
-            robot.get_left_foot_pose()
-        )
-
-        p_right, _ = (
-            robot.get_right_foot_pose()
-        )
-
-        p_com = (
-            robot.get_com()
-        )
-
-        self.left_trail.append(
-            (
-                current_time,
-                p_left.copy(),
-            )
-        )
-
-        self.right_trail.append(
-            (
-                current_time,
-                p_right.copy(),
-            )
-        )
-
-        self.com_trail.append(
-            (
-                current_time,
-                p_com.copy(),
-            )
-        )
-
-        self.zmp_trail.append(
-            (
-                current_time,
-                np.asarray(
-                    zmp_world,
-                    dtype=float,
-                ).copy(),
-            )
-        )
-
-        self.prune(
-            current_time
-        )
-
-
-    def add_footstep(
-        self,
-        *,
-        current_time,
-        side,
-        position,
-        rotation,
-    ):
-
-        self.footsteps.append(
-            TimedFootstep(
-
-                time=(
-                    current_time
-                ),
-
-                footstep=PlannedFootstep(
-
-                    side=(
-                        side
-                    ),
-
-                    position=np.asarray(
-                        position,
-                        dtype=float,
-                    ).copy(),
-
-                    rotation=np.asarray(
-                        rotation,
-                        dtype=float,
-                    ).copy(),
-                ),
-            )
-        )
-
-        self.prune(
-            current_time
-        )
-
-
-    def apply_to_walking_visualizer(
-        self,
-        walking_visualizer,
-    ):
-
-        walking_visualizer.left_trail = [
-            point.copy()
-            for _, point
-            in self.left_trail
-        ]
-
-        walking_visualizer.right_trail = [
-            point.copy()
-            for _, point
-            in self.right_trail
-        ]
-
-        walking_visualizer.com_trail = [
-            point.copy()
-            for _, point
-            in self.com_trail
-        ]
-
-        walking_visualizer.planned_footsteps = [
-            item.footstep
-            for item
-            in self.footsteps
-        ]
-
-
-    def get_zmp_points(
-        self,
-    ):
-
-        return [
-            point.copy()
-            for _, point
-            in self.zmp_trail
-        ]
 
 
 # ============================================================
@@ -1127,15 +261,13 @@ class RecentVisualHistory:
 # ============================================================
 
 def opposite_side(
-    side,
-):
+    side: str,
+) -> str:
 
     if side == "left":
-
         return "right"
 
     if side == "right":
-
         return "left"
 
     raise ValueError(
@@ -1144,15 +276,13 @@ def opposite_side(
 
 
 def stance_leg_from_side(
-    side,
-):
+    side: str,
+) -> StanceLeg:
 
     if side == "left":
-
         return StanceLeg.LEFT
 
     if side == "right":
-
         return StanceLeg.RIGHT
 
     raise ValueError(
@@ -1167,11 +297,9 @@ def get_contact_position(
 ):
 
     if side == "left":
-
         return left_contact
 
     if side == "right":
-
         return right_contact
 
     raise ValueError(
@@ -1180,6 +308,7 @@ def get_contact_position(
 
 
 def update_mujoco_from_pinocchio(
+    *,
     robot,
     q_pin,
     mj_model,
@@ -1192,10 +321,10 @@ def update_mujoco_from_pinocchio(
         )
     )
 
-    mj_data.qpos[:] = (
-        q_mj
-    )
+    mj_data.qpos[:] = q_mj
 
+    # This run.py is kinematic at the full-body level:
+    # q is supplied by differential IK.
     mj_data.qvel[:] = 0.0
 
     mujoco.mj_forward(
@@ -1204,13 +333,9 @@ def update_mujoco_from_pinocchio(
     )
 
 
-# ============================================================
-# ROBOT MASS
-# ============================================================
-
 def compute_robot_mass(
     mj_model,
-):
+) -> float:
 
     mass = float(
         np.sum(
@@ -1219,9 +344,7 @@ def compute_robot_mass(
     )
 
     if (
-        not np.isfinite(
-            mass
-        )
+        not np.isfinite(mass)
         or
         mass <= 0.0
     ):
@@ -1231,51 +354,6 @@ def compute_robot_mass(
         )
 
     return mass
-
-
-# ============================================================
-# VIEWER CONFIGURATION
-# ============================================================
-
-def configure_step_timing_viewer(
-    *,
-    viewer,
-    walking_visualizer,
-):
-
-    with viewer.lock():
-
-        # ====================================================
-        # TRACKING CAMERA
-        #
-        # Rendering -> Frame is intentionally untouched.
-        # ====================================================
-
-        viewer.cam.type = (
-            mujoco.mjtCamera
-            .mjCAMERA_TRACKING
-        )
-
-        viewer.cam.trackbodyid = (
-            walking_visualizer
-            .base_body_id
-        )
-
-        # ====================================================
-        # MODEL ELEMENTS
-        # ====================================================
-
-        viewer.opt.flags[
-            mujoco.mjtVisFlag
-            .mjVIS_CONTACTFORCE
-        ] = True
-
-        viewer.opt.flags[
-            mujoco.mjtVisFlag
-            .mjVIS_TRANSPARENT
-        ] = True
-
-    viewer.sync()
 
 
 # ============================================================
@@ -1319,9 +397,7 @@ def compute_nominal_steps(
     nominal_left = (
         compute_nominal_step(
 
-            planner=(
-                planner
-            ),
+            planner=planner,
 
             stance_side="left",
 
@@ -1338,9 +414,7 @@ def compute_nominal_steps(
     nominal_right = (
         compute_nominal_step(
 
-            planner=(
-                planner
-            ),
+            planner=planner,
 
             stance_side="right",
 
@@ -1385,9 +459,7 @@ def solve_adaptive_step(
             ),
 
             stance_position=(
-                stance_position[
-                    0:2
-                ]
+                stance_position[0:2]
             ),
 
             elapsed_time=(
@@ -1428,9 +500,7 @@ def compute_nominal_initial_dcm(
 ):
 
     u0 = np.asarray(
-        stance_position[
-            0:2
-        ],
+        stance_position[0:2],
         dtype=float,
     )
 
@@ -1463,10 +533,6 @@ def compute_nominal_initial_dcm(
     )
 
 
-# ============================================================
-# CONSISTENT INITIAL COM VELOCITY
-# ============================================================
-
 def compute_consistent_initial_com_velocity(
     *,
     planner,
@@ -1489,9 +555,7 @@ def compute_consistent_initial_com_velocity(
     )
 
     com_xy = np.asarray(
-        com_position[
-            0:2
-        ],
+        com_position[0:2],
         dtype=float,
     )
 
@@ -1518,650 +582,6 @@ def compute_consistent_initial_com_velocity(
         velocity,
         xi0,
     )
-
-
-# ============================================================
-# ADAPTIVE OVERLAY
-# ============================================================
-
-def draw_adaptive_overlay(
-    *,
-    viewer,
-    walking_visualizer,
-    com_position,
-    dcm,
-    swing_side,
-    landing_position,
-    left_rotation,
-    right_rotation,
-):
-
-    with viewer.lock():
-
-        scene = (
-            viewer.user_scn
-        )
-
-        # ====================================================
-        # LIPM COM GROUND PROJECTION
-        # ====================================================
-
-        com_ground = np.array(
-            [
-                com_position[0],
-                com_position[1],
-                COM_GROUND_Z,
-            ],
-            dtype=float,
-        )
-
-        add_sphere(
-            scene,
-            com_ground,
-            COM_GROUND_RADIUS,
-            COM_GROUND_RGBA,
-        )
-
-        add_line(
-            scene,
-            com_position,
-            com_ground,
-            COM_VERTICAL_LINE_WIDTH,
-            COM_VERTICAL_RGBA,
-        )
-
-        # ====================================================
-        # DCM
-        # ====================================================
-
-        dcm_ground = np.array(
-            [
-                dcm[0],
-                dcm[1],
-                DCM_GROUND_Z,
-            ],
-            dtype=float,
-        )
-
-        add_sphere(
-            scene,
-            dcm_ground,
-            DCM_RADIUS,
-            DCM_RGBA,
-        )
-
-        add_line(
-            scene,
-            com_ground,
-            dcm_ground,
-            COM_DCM_LINE_WIDTH,
-            COM_DCM_LINE_RGBA,
-        )
-
-        # ====================================================
-        # CURRENT ADAPTIVE FOOTHOLD
-        # ====================================================
-
-        if swing_side == "left":
-
-            target_rotation = (
-                left_rotation
-            )
-
-        else:
-
-            target_rotation = (
-                right_rotation
-            )
-
-        current_target = PlannedFootstep(
-
-            side=(
-                swing_side
-            ),
-
-            position=(
-                landing_position.copy()
-            ),
-
-            rotation=(
-                target_rotation.copy()
-            ),
-        )
-
-        walking_visualizer.draw_planned_footprint(
-            scene,
-            current_target,
-        )
-
-        target_marker = np.array(
-            [
-                landing_position[0],
-                landing_position[1],
-                PLANNER_TARGET_Z,
-            ],
-            dtype=float,
-        )
-
-        add_sphere(
-            scene,
-            target_marker,
-            PLANNER_TARGET_RADIUS,
-            PLANNER_TARGET_RGBA,
-        )
-
-
-# ============================================================
-# RECENT ZMP TRAIL
-# ============================================================
-
-def draw_recent_zmp_trail(
-    *,
-    viewer,
-    visual_history,
-):
-
-    points = (
-        visual_history
-        .get_zmp_points()
-    )
-
-    if len(
-        points
-    ) < 2:
-
-        return
-
-    with viewer.lock():
-
-        draw_polyline(
-
-            viewer.user_scn,
-
-            points,
-
-            RECENT_ZMP_TRAIL_WIDTH,
-
-            RECENT_ZMP_TRAIL_RGBA,
-        )
-
-
-# ============================================================
-# USER-SCENE GEOMETRY
-# ============================================================
-
-def allocate_user_geom(
-    scene,
-):
-
-    if (
-        scene.ngeom
-        >=
-        scene.maxgeom
-    ):
-
-        return None
-
-    geom = (
-        scene.geoms[
-            scene.ngeom
-        ]
-    )
-
-    scene.ngeom += 1
-
-    return geom
-
-
-# ============================================================
-# NATIVE MUJOCO ARROW
-# ============================================================
-
-def add_mujoco_arrow(
-    *,
-    scene,
-    start,
-    end,
-    width,
-    rgba,
-):
-
-    start = np.asarray(
-        start,
-        dtype=float,
-    ).reshape(
-        3
-    )
-
-    end = np.asarray(
-        end,
-        dtype=float,
-    ).reshape(
-        3
-    )
-
-    if (
-        np.linalg.norm(
-            end
-            -
-            start
-        )
-        <
-        1.0e-10
-    ):
-
-        return
-
-    geom = (
-        allocate_user_geom(
-            scene
-        )
-    )
-
-    if geom is None:
-
-        return
-
-    mujoco.mjv_initGeom(
-
-        geom,
-
-        type=(
-            mujoco.mjtGeom
-            .mjGEOM_ARROW
-        ),
-
-        size=np.zeros(
-            3,
-            dtype=float,
-        ),
-
-        pos=np.zeros(
-            3,
-            dtype=float,
-        ),
-
-        mat=np.eye(
-            3,
-            dtype=float,
-        ).reshape(
-            9
-        ),
-
-        rgba=np.asarray(
-            rgba,
-            dtype=np.float32,
-        ),
-    )
-
-    if hasattr(
-        mujoco,
-        "mjv_connector",
-    ):
-
-        mujoco.mjv_connector(
-
-            geom=(
-                geom
-            ),
-
-            type=(
-                mujoco.mjtGeom
-                .mjGEOM_ARROW
-            ),
-
-            width=float(
-                width
-            ),
-
-            from_=(
-                start
-            ),
-
-            to=(
-                end
-            ),
-        )
-
-    else:
-
-        mujoco.mjv_makeConnector(
-
-            geom,
-
-            mujoco.mjtGeom
-            .mjGEOM_ARROW,
-
-            float(
-                width
-            ),
-
-            float(
-                start[0]
-            ),
-
-            float(
-                start[1]
-            ),
-
-            float(
-                start[2]
-            ),
-
-            float(
-                end[0]
-            ),
-
-            float(
-                end[1]
-            ),
-
-            float(
-                end[2]
-            ),
-        )
-
-
-# ============================================================
-# VELOCITY ARROW
-# ============================================================
-
-def draw_velocity_arrow(
-    *,
-    scene,
-    origin,
-    velocity_xy,
-    rgba,
-    width,
-):
-
-    origin = np.asarray(
-        origin,
-        dtype=float,
-    ).reshape(
-        3
-    )
-
-    velocity_xy = np.asarray(
-        velocity_xy,
-        dtype=float,
-    ).reshape(
-        2
-    )
-
-    if not np.all(
-        np.isfinite(
-            velocity_xy
-        )
-    ):
-
-        return
-
-    speed = float(
-        np.linalg.norm(
-            velocity_xy
-        )
-    )
-
-    if (
-        speed
-        <
-        VELOCITY_ARROW_MIN_NORM
-    ):
-
-        return
-
-    velocity_world = np.array(
-        [
-            velocity_xy[0],
-            velocity_xy[1],
-            0.0,
-        ],
-        dtype=float,
-    )
-
-    endpoint = (
-        origin
-        +
-        VELOCITY_ARROW_SCALE
-        *
-        velocity_world
-    )
-
-    add_mujoco_arrow(
-
-        scene=(
-            scene
-        ),
-
-        start=(
-            origin
-        ),
-
-        end=(
-            endpoint
-        ),
-
-        width=(
-            width
-        ),
-
-        rgba=(
-            rgba
-        ),
-    )
-
-
-# ============================================================
-# COMMAND + ACTUAL VELOCITY ARROWS
-# ============================================================
-
-def draw_velocity_arrows(
-    *,
-    viewer,
-    robot,
-    command_velocity,
-    current_velocity,
-):
-
-    (
-        trunk_position,
-        _,
-    ) = (
-        robot.get_frame_pose(
-            TRUNK_FRAME
-        )
-    )
-
-    arrow_origin = (
-        trunk_position.copy()
-    )
-
-    arrow_origin[2] += (
-        VELOCITY_ARROW_HEIGHT_OFFSET
-    )
-
-    with viewer.lock():
-
-        scene = (
-            viewer.user_scn
-        )
-
-        # ====================================================
-        # BLUE COMMAND
-        # ====================================================
-
-        draw_velocity_arrow(
-
-            scene=(
-                scene
-            ),
-
-            origin=(
-                arrow_origin
-            ),
-
-            velocity_xy=(
-                command_velocity
-            ),
-
-            rgba=(
-                COMMAND_ARROW_RGBA
-            ),
-
-            width=(
-                COMMAND_ARROW_WIDTH
-            ),
-        )
-
-        # ====================================================
-        # RED ACTUAL CoM VELOCITY
-        # ====================================================
-
-        draw_velocity_arrow(
-
-            scene=(
-                scene
-            ),
-
-            origin=(
-                arrow_origin
-            ),
-
-            velocity_xy=(
-                current_velocity
-            ),
-
-            rgba=(
-                CURRENT_VELOCITY_ARROW_RGBA
-            ),
-
-            width=(
-                CURRENT_VELOCITY_ARROW_WIDTH
-            ),
-        )
-
-
-# ============================================================
-# PUSH FORCE ARROW AT LIPM COM
-# ============================================================
-
-def draw_push_force_arrow(
-    *,
-    viewer,
-    com_position,
-    push_active,
-):
-    """
-    Draw the external push force at the LIPM CoM.
-
-    The arrow is visible ONLY while the push is active.
-
-    Origin:
-
-        p_start = c_LIPM
-
-    End:
-
-        p_end
-          =
-          c_LIPM
-          +
-          PUSH_FORCE_ARROW_SCALE
-          *
-          [Fx, Fy, 0]
-
-    Therefore:
-
-        arrow direction
-            -> force direction
-
-        arrow length
-            -> proportional to force magnitude
-    """
-
-    if not push_active:
-
-        return
-
-    force_xy = np.array(
-        [
-            PUSH_FORCE_X,
-            PUSH_FORCE_Y,
-        ],
-        dtype=float,
-    )
-
-    if not np.all(
-        np.isfinite(
-            force_xy
-        )
-    ):
-
-        return
-
-    force_norm = float(
-        np.linalg.norm(
-            force_xy
-        )
-    )
-
-    if (
-        force_norm
-        <
-        PUSH_FORCE_ARROW_MIN_NORM
-    ):
-
-        return
-
-    origin = np.asarray(
-        com_position,
-        dtype=float,
-    ).reshape(
-        3
-    ).copy()
-
-    force_world = np.array(
-        [
-            force_xy[0],
-            force_xy[1],
-            0.0,
-        ],
-        dtype=float,
-    )
-
-    endpoint = (
-        origin
-        +
-        PUSH_FORCE_ARROW_SCALE
-        *
-        force_world
-    )
-
-    with viewer.lock():
-
-        add_mujoco_arrow(
-
-            scene=(
-                viewer.user_scn
-            ),
-
-            start=(
-                origin
-            ),
-
-            end=(
-                endpoint
-            ),
-
-            width=(
-                PUSH_FORCE_ARROW_WIDTH
-            ),
-
-            rgba=(
-                PUSH_FORCE_ARROW_RGBA
-            ),
-        )
 
 
 # ============================================================
@@ -2268,13 +688,11 @@ def start_new_step(
     )
 
     landing_position[0] = (
-        planner_result
-        .step_location_x
+        planner_result.step_location_x
     )
 
     landing_position[1] = (
-        planner_result
-        .step_location_y
+        planner_result.step_location_y
     )
 
     landing_position[2] = (
@@ -2310,7 +728,7 @@ def start_new_step(
 
 
 # ============================================================
-# ADVANCE LIPM WITH OPTIONAL MANUAL PUSH
+# ADVANCE LIPM WITH OPTIONAL PUSH
 # ============================================================
 
 def advance_lipm(
@@ -2332,10 +750,6 @@ def advance_lipm(
         ),
     )
 
-    # ========================================================
-    # NO PUSH
-    # ========================================================
-
     if (
         push_time_remaining
         <=
@@ -2347,10 +761,6 @@ def advance_lipm(
         )
 
         return 0.0
-
-    # ========================================================
-    # PUSH ACTIVE
-    # ========================================================
 
     push_dt = min(
         dt,
@@ -2377,10 +787,6 @@ def advance_lipm(
             robot_mass
         ),
     )
-
-    # ========================================================
-    # PUSH ENDS INSIDE CURRENT DT
-    # ========================================================
 
     remaining_dt = (
         dt
@@ -2416,14 +822,8 @@ def run_walk(
     mj_data,
     robot,
     planner,
-    measured_step_width,
-    velocity_command,
     viewer,
 ):
-
-    # ========================================================
-    # ROBOT MASS
-    # ========================================================
 
     robot_mass = (
         compute_robot_mass(
@@ -2525,32 +925,26 @@ def run_walk(
     )
 
     # ========================================================
-    # INITIAL KEYBOARD STATE
-    # ========================================================
-
-    command = (
-        velocity_command
-        .snapshot()
-    )
-
-    command_version = (
-        command.version
-    )
-
-    processed_push_request_count = (
-        command.push_request_count
-    )
-
-    push_time_remaining = 0.0
-
-    # ========================================================
-    # INITIAL NOMINAL GAIT
+    # INITIAL COMMAND: profile at t = 0
     # ========================================================
 
     (
-        nominal_left_step,
-        nominal_right_step,
+        command_x,
+        command_y,
     ) = (
+        automatic_velocity_profile(
+            0.0
+        )
+    )
+
+    command = (
+        VelocityCommandSnapshot(
+            x=command_x,
+            y=command_y,
+        )
+    )
+
+    nominal_left_step, nominal_right_step = (
         compute_nominal_steps(
 
             planner=(
@@ -2734,118 +1128,18 @@ def run_walk(
     )
 
     # ========================================================
-    # WALKING VISUALIZER
-    # ========================================================
-
-    walking_visualizer = (
-        WalkingVisualizer(
-            mj_model
-        )
-    )
-
-    walking_visualizer.initialize(
-        robot
-    )
-
-    configure_step_timing_viewer(
-
-        viewer=(
-            viewer
-        ),
-
-        walking_visualizer=(
-            walking_visualizer
-        ),
-    )
-
-    # ========================================================
-    # ZMP VISUALIZER
-    # ========================================================
-
-    zmp_visualizer = (
-        LIPMZMPVisualizer(
-
-            config=(
-                ZMP_VISUALIZATION_CONFIG
-            ),
-
-            com_height=(
-                COM_HEIGHT
-            ),
-
-            gravity=(
-                GRAVITY
-            ),
-        )
-    )
-
-    x_initial = np.array(
-        [
-            lipm_sample.position[0],
-            lipm_sample.velocity[0],
-            lipm_sample.acceleration[0],
-        ],
-        dtype=float,
-    )
-
-    y_initial = np.array(
-        [
-            lipm_sample.position[1],
-            lipm_sample.velocity[1],
-            lipm_sample.acceleration[1],
-        ],
-        dtype=float,
-    )
-
-    zmp_visualizer.initialize_from_states(
-
-        x_state=(
-            x_initial
-        ),
-
-        y_state=(
-            y_initial
-        ),
-    )
-
-    # ========================================================
-    # RECENT VISUAL HISTORY
-    # ========================================================
-
-    visual_history = (
-        RecentVisualHistory(
-
-            duration=(
-                VISUAL_HISTORY_DURATION
-            )
-        )
-    )
-
-    visual_history.initialize(
-
-        current_time=0.0,
-
-        robot=(
-            robot
-        ),
-
-        zmp_world=(
-            zmp_visualizer
-            .current_zmp_world
-        ),
-    )
-
-    # ========================================================
     # RUNTIME STATE
     # ========================================================
 
     phase_time = 0.0
-
     kinematic_time = 0.0
 
     step_index = 1
 
     planner_frozen = False
+
+    push_time_remaining = 0.0
+    automatic_push_applied = False
 
     previous_com_actual = (
         initial_com_actual.copy()
@@ -2856,85 +1150,47 @@ def run_walk(
         dtype=float,
     )
 
-    next_print_time = 0.0
+    simulation_log = (
+        SimulationLog()
+    )
 
+    next_log_time = 0.0
+    next_print_time = 0.0
     next_viewer_sync_time = 0.0
 
     wall_start = (
         time.perf_counter()
     )
 
-    # ========================================================
-    # HEADER
-    # ========================================================
-
     print()
-
     print(
         "Point-foot LIPM Step Timing Adaptation"
     )
-
     print(
-        "Close MuJoCo GUI to stop."
+        f"Automatic experiment duration: "
+        f"{SIMULATION_DURATION:.1f} s"
     )
-
-    print()
-
     print(
-        "Keyboard:"
+        "Velocity profile:"
     )
-
     print(
-        "  UP    : vx +0.05 m/s"
+        "  0 <= t < 3 s : "
+        "vx=+0.10 m/s, vy=+0.00 m/s"
     )
-
     print(
-        "  DOWN  : vx -0.05 m/s"
+        "  3 <= t < 6 s : "
+        "vx=+0.10 m/s, vy=-0.05 m/s"
     )
-
     print(
-        "  LEFT  : vy +0.05 m/s"
+        "  6 <= t <=9 s: "
+        "vx=+0.10 m/s, vy=+0.00 m/s"
     )
-
     print(
-        "  RIGHT : vy -0.05 m/s"
-    )
-
-    print(
-        "  SPACE : apply one CoM push"
-    )
-
-    print()
-
-    print(
-        "Manual CoM push:"
-    )
-
-    print(
-        f"  F=({PUSH_FORCE_X:+.2f}, "
+        f"Automatic push: t={PUSH_TIME:.2f} s"
+        f" | F=({PUSH_FORCE_X:+.2f}, "
         f"{PUSH_FORCE_Y:+.2f}) N"
         f" | duration={PUSH_DURATION:.3f} s"
-        f" | robot mass={robot_mass:.3f} kg"
     )
-
-    print()
-
-    print(
-        "Visualization:"
-    )
-
-    print(
-        "  BLUE   : command velocity"
-    )
-
-    print(
-        "  RED    : actual CoM velocity"
-    )
-
-    print(
-        "  ORANGE : external push force at LIPM CoM"
-    )
-
     print()
 
     # ========================================================
@@ -2943,35 +1199,56 @@ def run_walk(
 
     while True:
 
-        if not viewer.is_running():
+        if (
+            viewer is not None
+            and
+            not viewer.is_running()
+        ):
+
+            break
+
+        if (
+            kinematic_time
+            >=
+            SIMULATION_DURATION
+            -
+            TIME_TOLERANCE
+        ):
 
             break
 
         # ====================================================
-        # READ KEYBOARD INPUT
+        # AUTOMATIC VELOCITY PROFILE
         # ====================================================
 
-        latest_command = (
-            velocity_command
-            .snapshot()
+        (
+            new_command_x,
+            new_command_y,
+        ) = (
+            automatic_velocity_profile(
+                kinematic_time
+            )
         )
 
-        # ====================================================
-        # VELOCITY COMMAND CHANGED
-        # ====================================================
+        command_changed = (
+            not np.isclose(
+                command.x,
+                new_command_x,
+            )
+            or
+            not np.isclose(
+                command.y,
+                new_command_y,
+            )
+        )
 
-        if (
-            latest_command.version
-            !=
-            command_version
-        ):
+        if command_changed:
 
             command = (
-                latest_command
-            )
-
-            command_version = (
-                command.version
+                VelocityCommandSnapshot(
+                    x=new_command_x,
+                    y=new_command_y,
+                )
             )
 
             (
@@ -3002,25 +1279,39 @@ def run_walk(
                     nominal_right_step
                 )
 
+            print(
+                f"[COMMAND] t={kinematic_time:.3f} s"
+                f" -> vx={command.x:+.3f} m/s"
+                f", vy={command.y:+.3f} m/s"
+            )
+
         # ====================================================
-        # SPACE PRESSED
-        #
-        # Start / restart a finite-duration external push.
+        # AUTOMATIC PUSH -- EXACTLY ONCE
         # ====================================================
 
         if (
-            latest_command.push_request_count
-            !=
-            processed_push_request_count
+            not automatic_push_applied
+            and
+            kinematic_time
+            >=
+            PUSH_TIME
+            -
+            TIME_TOLERANCE
         ):
-
-            processed_push_request_count = (
-                latest_command
-                .push_request_count
-            )
 
             push_time_remaining = (
                 PUSH_DURATION
+            )
+
+            automatic_push_applied = (
+                True
+            )
+
+            print(
+                f"[PUSH] t={kinematic_time:.3f} s"
+                f" -> F=({PUSH_FORCE_X:+.2f},"
+                f" {PUSH_FORCE_Y:+.2f}) N"
+                f" for {PUSH_DURATION:.3f} s"
             )
 
         # ====================================================
@@ -3032,7 +1323,7 @@ def run_walk(
         )
 
         # ====================================================
-        # TOUCHDOWN
+        # TOUCHDOWN / SUPPORT SWITCH
         # ====================================================
 
         if (
@@ -3064,10 +1355,6 @@ def run_walk(
                     actual_rotation.copy()
                 )
 
-                landing_rotation = (
-                    left_rotation.copy()
-                )
-
             else:
 
                 (
@@ -3085,41 +1372,6 @@ def run_walk(
                     actual_rotation.copy()
                 )
 
-                landing_rotation = (
-                    right_rotation.copy()
-                )
-
-            # =================================================
-            # SAVE COMPLETED FOOTSTEP
-            # =================================================
-
-            visual_history.add_footstep(
-
-                current_time=(
-                    kinematic_time
-                ),
-
-                side=(
-                    swing_side
-                ),
-
-                position=(
-                    landing_position
-                ),
-
-                rotation=(
-                    landing_rotation
-                ),
-            )
-
-            # =================================================
-            # SUPPORT SWITCH
-            #
-            # u0(k+1) = uT(k)
-            #
-            # Push is NOT reset here.
-            # =================================================
-
             stance_side = (
                 swing_side
             )
@@ -3131,10 +1383,6 @@ def run_walk(
             lipm_sample = (
                 lipm.sample()
             )
-
-            # =================================================
-            # NEXT STEP
-            # =================================================
 
             step_index += 1
 
@@ -3258,18 +1506,15 @@ def run_walk(
                     )
 
                     landing_position[0] = (
-                        planner_result
-                        .step_location_x
+                        planner_result.step_location_x
                     )
 
                     landing_position[1] = (
-                        planner_result
-                        .step_location_y
+                        planner_result.step_location_y
                     )
 
                     current_step_time = (
-                        planner_result
-                        .step_time
+                        planner_result.step_time
                     )
 
                     if (
@@ -3289,9 +1534,7 @@ def run_walk(
                     if (
                         "timing adaptation window is closed"
                         in
-                        str(
-                            error
-                        ).lower()
+                        str(error).lower()
                     ):
 
                         planner_frozen = True
@@ -3309,19 +1552,15 @@ def run_walk(
         )
 
         com_position_ref = (
-            lipm_sample
-            .position
-            .copy()
+            lipm_sample.position.copy()
         )
 
         com_velocity_ref = (
-            lipm_sample
-            .velocity
-            .copy()
+            lipm_sample.velocity.copy()
         )
 
         # ====================================================
-        # ONLINE SWING
+        # ONLINE SWING TRAJECTORY
         # ====================================================
 
         swing_sample = (
@@ -3351,27 +1590,21 @@ def run_walk(
         if swing_side == "left":
 
             p_left_ref = (
-                swing_sample
-                .position
-                .copy()
+                swing_sample.position.copy()
             )
 
             p_right_ref = (
-                right_contact_position
-                .copy()
+                right_contact_position.copy()
             )
 
         else:
 
             p_left_ref = (
-                left_contact_position
-                .copy()
+                left_contact_position.copy()
             )
 
             p_right_ref = (
-                swing_sample
-                .position
-                .copy()
+                swing_sample.position.copy()
             )
 
         support_position_ref = (
@@ -3428,8 +1661,7 @@ def run_walk(
                 ),
 
                 swing_linear_velocity_ref=(
-                    swing_sample
-                    .velocity
+                    swing_sample.velocity
                 ),
 
                 com_position_ref=(
@@ -3506,7 +1738,7 @@ def run_walk(
         )
 
         # ====================================================
-        # MUJOCO SET-STATE
+        # MUJOCO SET STATE
         # ====================================================
 
         update_mujoco_from_pinocchio(
@@ -3546,10 +1778,6 @@ def run_walk(
             p_com_actual.copy()
         )
 
-        # ====================================================
-        # PUSH STATE
-        # ====================================================
-
         push_active = (
             push_time_remaining
             >
@@ -3557,19 +1785,77 @@ def run_walk(
         )
 
         # ====================================================
-        # POINT-FOOT ZMP
+        # DATA LOG
         # ====================================================
 
-        zmp_visualizer.update_current(
+        if (
+            kinematic_time
+            >=
+            next_log_time
+            -
+            TIME_TOLERANCE
+        ):
 
-            com_position=(
-                lipm_sample.position
-            ),
+            (
+                left_foot_position_log,
+                _,
+            ) = (
+                robot.get_left_foot_pose()
+            )
 
-            com_acceleration=(
-                lipm_sample.acceleration
-            ),
-        )
+            (
+                right_foot_position_log,
+                _,
+            ) = (
+                robot.get_right_foot_pose()
+            )
+
+            simulation_log.append(
+
+                time=(
+                    kinematic_time
+                ),
+
+                command_vx=(
+                    command.x
+                ),
+
+                command_vy=(
+                    command.y
+                ),
+
+                left_foot_position=(
+                    left_foot_position_log
+                ),
+
+                right_foot_position=(
+                    right_foot_position_log
+                ),
+
+                com_position=(
+                    lipm_sample.position
+                ),
+
+                dcm=(
+                    lipm_sample.dcm
+                ),
+
+                landing_position=(
+                    landing_position
+                ),
+
+                step_time=(
+                    current_step_time
+                ),
+
+                push_active=(
+                    push_active
+                ),
+            )
+
+            next_log_time += (
+                DATA_LOG_PERIOD
+            )
 
         # ====================================================
         # TERMINAL STATUS
@@ -3583,14 +1869,6 @@ def run_walk(
             TIME_TOLERANCE
         ):
 
-            if push_active:
-
-                push_text = "ON"
-
-            else:
-
-                push_text = "OFF"
-
             print(
                 f"t={kinematic_time:7.3f}"
                 f" | step={step_index:03d}"
@@ -3601,10 +1879,11 @@ def run_walk(
                 f"({landing_position[0]:+.4f},"
                 f"{landing_position[1]:+.4f}) m"
                 f" | T={current_step_time:.4f} s"
-                f" | vCoM="
+                f" | vCoM_actual="
                 f"({com_velocity_actual[0]:+.4f},"
                 f"{com_velocity_actual[1]:+.4f}) m/s"
-                f" | push={push_text}"
+                f" | push="
+                f"{'ON' if push_active else 'OFF'}"
             )
 
             next_print_time += (
@@ -3616,6 +1895,8 @@ def run_walk(
         # ====================================================
 
         if (
+            viewer is not None
+            and
             kinematic_time
             >=
             next_viewer_sync_time
@@ -3623,188 +1904,7 @@ def run_walk(
             TIME_TOLERANCE
         ):
 
-            # =================================================
-            # RECENT HISTORY
-            # =================================================
-
-            visual_history.record(
-
-                current_time=(
-                    kinematic_time
-                ),
-
-                robot=(
-                    robot
-                ),
-
-                zmp_world=(
-                    zmp_visualizer
-                    .current_zmp_world
-                ),
-            )
-
-            visual_history.apply_to_walking_visualizer(
-                walking_visualizer
-            )
-
-            # =================================================
-            # GAIT STATE
-            # =================================================
-
-            visual_state = (
-                VisualWalkingState(
-
-                    phase=(
-                        WalkingPhase
-                        .SINGLE_SUPPORT
-                    ),
-
-                    support_side=(
-                        stance_side
-                    ),
-                )
-            )
-
-            # =================================================
-            # STANDARD WALKING VISUALIZATION
-            # =================================================
-
-            walking_visualizer.update(
-
-                viewer,
-
-                robot,
-
-                visual_state,
-            )
-
-            # =================================================
-            # RECENT ZMP TRAIL
-            # =================================================
-
-            draw_recent_zmp_trail(
-
-                viewer=(
-                    viewer
-                ),
-
-                visual_history=(
-                    visual_history
-                ),
-            )
-
-            # =================================================
-            # LIPM COM / DCM / uT
-            # =================================================
-
-            draw_adaptive_overlay(
-
-                viewer=(
-                    viewer
-                ),
-
-                walking_visualizer=(
-                    walking_visualizer
-                ),
-
-                com_position=(
-                    lipm_sample.position
-                ),
-
-                dcm=(
-                    lipm_sample.dcm
-                ),
-
-                swing_side=(
-                    swing_side
-                ),
-
-                landing_position=(
-                    landing_position
-                ),
-
-                left_rotation=(
-                    left_rotation
-                ),
-
-                right_rotation=(
-                    right_rotation
-                ),
-            )
-
-            # =================================================
-            # VELOCITY ARROWS ABOVE ROBOT
-            #
-            # BLUE:
-            #     command
-            #
-            # RED:
-            #     actual CoM velocity
-            # =================================================
-
-            draw_velocity_arrows(
-
-                viewer=(
-                    viewer
-                ),
-
-                robot=(
-                    robot
-                ),
-
-                command_velocity=np.array(
-                    [
-                        command.x,
-                        command.y,
-                    ],
-                    dtype=float,
-                ),
-
-                current_velocity=np.array(
-                    [
-                        com_velocity_actual[0],
-                        com_velocity_actual[1],
-                    ],
-                    dtype=float,
-                ),
-            )
-
-            # =================================================
-            # PUSH FORCE ARROW
-            #
-            # ORANGE:
-            #
-            #     origin = LIPM CoM
-            #
-            #     direction = push-force direction
-            #
-            #     length proportional to force magnitude
-            #
-            # Visible only while push_active == True.
-            # =================================================
-
-            draw_push_force_arrow(
-
-                viewer=(
-                    viewer
-                ),
-
-                com_position=(
-                    lipm_sample.position
-                ),
-
-                push_active=(
-                    push_active
-                ),
-            )
-
-            # =================================================
-            # CURRENT ZMP
-            # =================================================
-
-            zmp_visualizer.draw_overlay(
-                viewer
-            )
+            viewer.sync()
 
             next_viewer_sync_time += (
                 VIEWER_SYNC_PERIOD
@@ -3812,9 +1912,6 @@ def run_walk(
 
         # ====================================================
         # EXACT LIPM PROPAGATION
-        #
-        # Push force is physically represented in the
-        # reduced-order LIPM only while push_time_remaining > 0.
         # ====================================================
 
         push_time_remaining = (
@@ -3878,16 +1975,18 @@ def run_walk(
                     remaining
                 )
 
-    # ========================================================
-    # STOP
-    # ========================================================
-
     print()
 
     print(
         f"Walking stopped"
         f" | t={kinematic_time:.3f} s"
         f" | steps={step_index}"
+        f" | auto_push_applied="
+        f"{automatic_push_applied}"
+    )
+
+    return (
+        simulation_log
     )
 
 
@@ -4017,6 +2116,11 @@ def main():
             f"{measured_step_width}"
         )
 
+    print(
+        f"Measured default step width: "
+        f"{measured_step_width:.6f} m"
+    )
+
     # ========================================================
     # ADAPTIVE STEP PLANNER
     # ========================================================
@@ -4066,77 +2170,95 @@ def main():
     )
 
     # ========================================================
-    # KEYBOARD INPUT
+    # RUN SIMULATION
     # ========================================================
 
-    velocity_command = (
-        VelocityCommand(
+    if SHOW_VIEWER:
 
-            initial_x=(
-                INITIAL_DESIRED_VELOCITY_X
-            ),
+        with mujoco.viewer.launch_passive(
 
-            initial_y=(
-                INITIAL_DESIRED_VELOCITY_Y
-            ),
+            mj_model,
+            mj_data,
+
+            show_right_ui=True,
+
+        ) as viewer:
+
+            simulation_log = (
+                run_walk(
+
+                    mj_model=(
+                        mj_model
+                    ),
+
+                    mj_data=(
+                        mj_data
+                    ),
+
+                    robot=(
+                        robot
+                    ),
+
+                    planner=(
+                        planner
+                    ),
+
+                    viewer=(
+                        viewer
+                    ),
+                )
+            )
+
+    else:
+
+        simulation_log = (
+            run_walk(
+
+                mj_model=(
+                    mj_model
+                ),
+
+                mj_data=(
+                    mj_data
+                ),
+
+                robot=(
+                    robot
+                ),
+
+                planner=(
+                    planner
+                ),
+
+                viewer=None,
+            )
         )
-    )
 
     # ========================================================
-    # VIEWER
+    # PLOT RESULTS AFTER SIMULATION
     # ========================================================
 
-    if not SHOW_VIEWER:
+    plot_simulation_results(
 
-        raise RuntimeError(
-            "SHOW_VIEWER must be True."
-        )
+        simulation_log,
 
-    with mujoco.viewer.launch_passive(
-
-        mj_model,
-
-        mj_data,
-
-        key_callback=(
-            velocity_command
-            .key_callback
+        save_directory=(
+            CURRENT_DIR
+            /
+            "results"
         ),
 
-        show_right_ui=True,
+        push_time=(
+            PUSH_TIME
+        ),
 
-    ) as viewer:
+        command_change_times=(
+            3.0,
+            6.0,
+        ),
 
-        run_walk(
-
-            mj_model=(
-                mj_model
-            ),
-
-            mj_data=(
-                mj_data
-            ),
-
-            robot=(
-                robot
-            ),
-
-            planner=(
-                planner
-            ),
-
-            measured_step_width=(
-                measured_step_width
-            ),
-
-            velocity_command=(
-                velocity_command
-            ),
-
-            viewer=(
-                viewer
-            ),
-        )
+        show=True,
+    )
 
 
 # ============================================================
