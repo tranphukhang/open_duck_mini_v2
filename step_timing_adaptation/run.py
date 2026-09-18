@@ -125,7 +125,9 @@ DT = 0.0005
 
 SIMULATION_DURATION = 9.0
 
-DATA_LOG_PERIOD = 0.005
+# Centroidal/whole-body data are sampled at every physics step.
+# The MuJoCo XML currently uses timestep = 0.0005 s, and run_walk()
+# verifies that it matches DT before starting the experiment.
 
 FIRST_STANCE_SIDE = "left"
 
@@ -313,7 +315,20 @@ def update_mujoco_from_pinocchio(
     q_pin,
     mj_model,
     mj_data,
+    previous_qpos_mj,
+    dt,
 ):
+    """
+    Update MuJoCo from the kinematic whole-body trajectory.
+
+    qpos is supplied by differential IK / Pinocchio integration.
+    qvel is reconstructed from two consecutive MuJoCo qpos samples
+    using mj_differentiatePos(), which correctly handles the free-joint
+    quaternion.
+
+    MuJoCo is used here as a rigid-body quantity evaluator; this does
+    not turn the current executor into a torque-driven simulation.
+    """
 
     q_mj = (
         robot.pin_to_mujoco(
@@ -321,15 +336,122 @@ def update_mujoco_from_pinocchio(
         )
     )
 
-    mj_data.qpos[:] = q_mj
+    previous_qpos_mj = np.asarray(
+        previous_qpos_mj,
+        dtype=float,
+    )
 
-    # This run.py is kinematic at the full-body level:
-    # q is supplied by differential IK.
-    mj_data.qvel[:] = 0.0
+    if previous_qpos_mj.shape != (
+        mj_model.nq,
+    ):
+
+        raise ValueError(
+            "previous_qpos_mj has wrong shape."
+        )
+
+    dt = float(dt)
+
+    if (
+        not np.isfinite(dt)
+        or
+        dt <= 0.0
+    ):
+
+        raise ValueError(
+            "dt must be positive and finite."
+        )
+
+    qvel_mj = np.zeros(
+        mj_model.nv,
+        dtype=float,
+    )
+
+    mujoco.mj_differentiatePos(
+        mj_model,
+        qvel_mj,
+        dt,
+        previous_qpos_mj,
+        q_mj,
+    )
+
+    mj_data.qpos[:] = q_mj
+    mj_data.qvel[:] = qvel_mj
 
     mujoco.mj_forward(
         mj_model,
         mj_data,
+    )
+
+    # Compute subtree CoM velocity and angular momentum explicitly.
+    mujoco.mj_subtreeVel(
+        mj_model,
+        mj_data,
+    )
+
+    return (
+        q_mj,
+        qvel_mj,
+    )
+
+
+def get_mujoco_centroidal_quantities(
+    *,
+    mj_data,
+    robot_root_body_id,
+):
+    """
+    Return whole-robot centroidal quantities for the subtree rooted
+    at the robot base body.
+
+    All returned vectors are expressed in the world frame:
+        p_G      : whole-body CoM position
+        v_G      : whole-body CoM linear velocity
+        L_G      : angular momentum about the whole-body CoM
+    """
+
+    body_id = int(
+        robot_root_body_id
+    )
+
+    p_G = (
+        mj_data.subtree_com[
+            body_id
+        ].copy()
+    )
+
+    v_G = (
+        mj_data.subtree_linvel[
+            body_id
+        ].copy()
+    )
+
+    L_G = (
+        mj_data.subtree_angmom[
+            body_id
+        ].copy()
+    )
+
+    for name, value in (
+        ("p_G", p_G),
+        ("v_G", v_G),
+        ("L_G", L_G),
+    ):
+
+        if not np.all(
+            np.isfinite(
+                value
+            )
+        ):
+
+            raise RuntimeError(
+                f"MuJoCo centroidal quantity {name} "
+                "contains NaN/Inf."
+            )
+
+    return (
+        p_G,
+        v_G,
+        L_G,
     )
 
 
@@ -825,6 +947,37 @@ def run_walk(
     viewer,
 ):
 
+    physics_dt = float(
+        mj_model.opt.timestep
+    )
+
+    if not np.isclose(
+        physics_dt,
+        DT,
+        rtol=0.0,
+        atol=1.0e-12,
+    ):
+
+        raise RuntimeError(
+            "MuJoCo physics timestep does not match DT: "
+            f"model={physics_dt:.12f} s, "
+            f"DT={DT:.12f} s"
+        )
+
+    robot_root_body_id = int(
+        mujoco.mj_name2id(
+            mj_model,
+            mujoco.mjtObj.mjOBJ_BODY,
+            "base",
+        )
+    )
+
+    if robot_root_body_id < 0:
+
+        raise RuntimeError(
+            "MuJoCo body 'base' was not found."
+        )
+
     robot_mass = (
         compute_robot_mass(
             mj_model
@@ -1154,7 +1307,12 @@ def run_walk(
         SimulationLog()
     )
 
-    next_log_time = 0.0
+    # Previous MuJoCo configuration is needed to reconstruct qvel at
+    # every physics step with mj_differentiatePos().
+    previous_qpos_mj = (
+        mj_data.qpos.copy()
+    )
+
     next_print_time = 0.0
     next_viewer_sync_time = 0.0
 
@@ -1169,6 +1327,10 @@ def run_walk(
     print(
         f"Automatic experiment duration: "
         f"{SIMULATION_DURATION:.1f} s"
+    )
+    print(
+        f"Physics/data sampling: dt={physics_dt:.7f} s"
+        f" | fs={1.0 / physics_dt:.1f} Hz"
     )
     print(
         "Velocity profile:"
@@ -1741,23 +1903,57 @@ def run_walk(
         # MUJOCO SET STATE
         # ====================================================
 
-        update_mujoco_from_pinocchio(
+        (
+            current_qpos_mj,
+            _,
+        ) = (
+            update_mujoco_from_pinocchio(
 
-            robot=(
-                robot
-            ),
+                robot=(
+                    robot
+                ),
 
-            q_pin=(
-                q_pin
-            ),
+                q_pin=(
+                    q_pin
+                ),
 
-            mj_model=(
-                mj_model
-            ),
+                mj_model=(
+                    mj_model
+                ),
 
-            mj_data=(
-                mj_data
-            ),
+                mj_data=(
+                    mj_data
+                ),
+
+                previous_qpos_mj=(
+                    previous_qpos_mj
+                ),
+
+                dt=(
+                    physics_dt
+                ),
+            )
+        )
+
+        previous_qpos_mj = (
+            current_qpos_mj.copy()
+        )
+
+        (
+            whole_body_com_position,
+            whole_body_com_velocity,
+            whole_body_angular_momentum,
+        ) = (
+            get_mujoco_centroidal_quantities(
+
+                mj_data=(
+                    mj_data
+                ),
+
+                robot_root_body_id=(
+                    robot_root_body_id
+                ),
+            )
         )
 
         # ====================================================
@@ -1785,77 +1981,77 @@ def run_walk(
         )
 
         # ====================================================
-        # DATA LOG
+        # DATA LOG -- EVERY PHYSICS STEP
         # ====================================================
 
-        if (
-            kinematic_time
-            >=
-            next_log_time
-            -
-            TIME_TOLERANCE
-        ):
+        (
+            left_foot_position_log,
+            _,
+        ) = (
+            robot.get_left_foot_pose()
+        )
 
-            (
-                left_foot_position_log,
-                _,
-            ) = (
-                robot.get_left_foot_pose()
-            )
+        (
+            right_foot_position_log,
+            _,
+        ) = (
+            robot.get_right_foot_pose()
+        )
 
-            (
-                right_foot_position_log,
-                _,
-            ) = (
-                robot.get_right_foot_pose()
-            )
+        simulation_log.append(
 
-            simulation_log.append(
+            time=(
+                kinematic_time
+            ),
 
-                time=(
-                    kinematic_time
-                ),
+            command_vx=(
+                command.x
+            ),
 
-                command_vx=(
-                    command.x
-                ),
+            command_vy=(
+                command.y
+            ),
 
-                command_vy=(
-                    command.y
-                ),
+            left_foot_position=(
+                left_foot_position_log
+            ),
 
-                left_foot_position=(
-                    left_foot_position_log
-                ),
+            right_foot_position=(
+                right_foot_position_log
+            ),
 
-                right_foot_position=(
-                    right_foot_position_log
-                ),
+            com_position=(
+                lipm_sample.position
+            ),
 
-                com_position=(
-                    lipm_sample.position
-                ),
+            dcm=(
+                lipm_sample.dcm
+            ),
 
-                dcm=(
-                    lipm_sample.dcm
-                ),
+            landing_position=(
+                landing_position
+            ),
 
-                landing_position=(
-                    landing_position
-                ),
+            step_time=(
+                current_step_time
+            ),
 
-                step_time=(
-                    current_step_time
-                ),
+            push_active=(
+                push_active
+            ),
 
-                push_active=(
-                    push_active
-                ),
-            )
+            whole_body_com_position=(
+                whole_body_com_position
+            ),
 
-            next_log_time += (
-                DATA_LOG_PERIOD
-            )
+            whole_body_com_velocity=(
+                whole_body_com_velocity
+            ),
+
+            angular_momentum=(
+                whole_body_angular_momentum
+            ),
+        )
 
         # ====================================================
         # TERMINAL STATUS
