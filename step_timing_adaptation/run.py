@@ -188,8 +188,8 @@ COM_HEIGHT = 0.2044
 
 PUSH_TIME = 5.0
 
-PUSH_FORCE_X = +2.5
-PUSH_FORCE_Y = +2.5
+PUSH_FORCE_X = +0.0
+PUSH_FORCE_Y = +3.5
 
 PUSH_DURATION = 0.05
 
@@ -2239,25 +2239,7 @@ def main():
     # ========================================================
 
     plot_simulation_results(
-
-        simulation_log,
-
-        save_directory=(
-            CURRENT_DIR
-            /
-            "results"
-        ),
-
-        push_time=(
-            PUSH_TIME
-        ),
-
-        command_change_times=(
-            3.0,
-            6.0,
-        ),
-
-        show=True,
+        simulation_log
     )
 
 

@@ -17,10 +17,6 @@ class SimulationLog:
 
     time: list = field(default_factory=list)
 
-    # --------------------------------------------------------
-    # FOOT POSITION
-    # --------------------------------------------------------
-
     left_foot_x: list = field(default_factory=list)
     left_foot_y: list = field(default_factory=list)
     left_foot_z: list = field(default_factory=list)
@@ -29,24 +25,11 @@ class SimulationLog:
     right_foot_y: list = field(default_factory=list)
     right_foot_z: list = field(default_factory=list)
 
-    # --------------------------------------------------------
-    # LIPM COM
-    # --------------------------------------------------------
-
     com_x: list = field(default_factory=list)
     com_y: list = field(default_factory=list)
 
-    # --------------------------------------------------------
-    # DCM
-    # --------------------------------------------------------
-
     dcm_x: list = field(default_factory=list)
     dcm_y: list = field(default_factory=list)
-
-
-    # ========================================================
-    # APPEND
-    # ========================================================
 
     def append(
         self,
@@ -63,108 +46,27 @@ class SimulationLog:
         push_active,
     ):
 
-        # ----------------------------------------------------
-        # Time
-        # ----------------------------------------------------
+        self.time.append(float(time))
 
-        self.time.append(
-            float(time)
-        )
+        self.left_foot_x.append(float(left_foot_position[0]))
+        self.left_foot_y.append(float(left_foot_position[1]))
+        self.left_foot_z.append(float(left_foot_position[2]))
 
-        # ----------------------------------------------------
-        # Left foot
-        # ----------------------------------------------------
+        self.right_foot_x.append(float(right_foot_position[0]))
+        self.right_foot_y.append(float(right_foot_position[1]))
+        self.right_foot_z.append(float(right_foot_position[2]))
 
-        self.left_foot_x.append(
-            float(
-                left_foot_position[0]
-            )
-        )
+        self.com_x.append(float(com_position[0]))
+        self.com_y.append(float(com_position[1]))
 
-        self.left_foot_y.append(
-            float(
-                left_foot_position[1]
-            )
-        )
+        self.dcm_x.append(float(dcm[0]))
+        self.dcm_y.append(float(dcm[1]))
 
-        self.left_foot_z.append(
-            float(
-                left_foot_position[2]
-            )
-        )
-
-        # ----------------------------------------------------
-        # Right foot
-        # ----------------------------------------------------
-
-        self.right_foot_x.append(
-            float(
-                right_foot_position[0]
-            )
-        )
-
-        self.right_foot_y.append(
-            float(
-                right_foot_position[1]
-            )
-        )
-
-        self.right_foot_z.append(
-            float(
-                right_foot_position[2]
-            )
-        )
-
-        # ----------------------------------------------------
-        # CoM
-        # ----------------------------------------------------
-
-        self.com_x.append(
-            float(
-                com_position[0]
-            )
-        )
-
-        self.com_y.append(
-            float(
-                com_position[1]
-            )
-        )
-
-        # ----------------------------------------------------
-        # DCM
-        # ----------------------------------------------------
-
-        self.dcm_x.append(
-            float(
-                dcm[0]
-            )
-        )
-
-        self.dcm_y.append(
-            float(
-                dcm[1]
-            )
-        )
-
-
-    # ========================================================
-    # CONVERT TO NUMPY
-    # ========================================================
-
-    def as_numpy(
-        self,
-    ):
+    def as_numpy(self):
 
         return {
-
-            name: np.asarray(
-                values,
-                dtype=float,
-            )
-
-            for name, values
-            in vars(self).items()
+            name: np.asarray(values, dtype=float)
+            for name, values in vars(self).items()
         }
 
 
@@ -176,61 +78,30 @@ def plot_simulation_results(
     simulation_log: SimulationLog,
 ):
 
-    data = (
-        simulation_log
-        .as_numpy()
-    )
+    data = simulation_log.as_numpy()
 
-    if (
-        data["time"].size
-        ==
-        0
-    ):
-
-        print(
-            "No simulation data available for plotting."
-        )
-
+    if data["time"].size == 0:
+        print("No simulation data available for plotting.")
         return
 
-    time = (
-        data["time"]
+    time = data["time"]
+
+    # ========================================================
+    # THREE SUBPLOTS:
+    #   1. X: Right, Left, CoM, DCM
+    #   2. Y: Right, Left, CoM, DCM
+    #   3. Z: Right and Left foot height
+    # ========================================================
+
+    figure, axes = plt.subplots(
+        3,
+        1,
+        figsize=(11, 10),
+        sharex=True,
     )
 
     # ========================================================
-    # CREATE FIGURE
-    #
-    # 3 plots:
-    #
-    #   1. X:
-    #       Right foot
-    #       Left foot
-    #       CoM
-    #       DCM
-    #
-    #   2. Y:
-    #       Right foot
-    #       Left foot
-    #       CoM
-    #       DCM
-    #
-    #   3. Z:
-    #       Right foot
-    #       Left foot
-    # ========================================================
-
-    figure, axes = (
-        plt.subplots(
-            3,
-            1,
-            figsize=(11, 10),
-            sharex=True,
-        )
-    )
-
-
-    # ========================================================
-    # PLOT 1 — X DIRECTION
+    # 1. X DIRECTION
     # ========================================================
 
     axes[0].plot(
@@ -267,27 +138,13 @@ def plot_simulation_results(
         label="DCM",
     )
 
-    axes[0].set_ylabel(
-        "X (m)"
-    )
-
-    axes[0].set_title(
-        "Sagittal Motion"
-    )
-
-    axes[0].grid(
-        True,
-        alpha=0.3,
-    )
-
-    axes[0].legend(
-        loc="best",
-        ncol=4,
-    )
-
+    axes[0].set_ylabel("X (m)")
+    axes[0].set_title("Sagittal Motion")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend(loc="best", ncol=4)
 
     # ========================================================
-    # PLOT 2 — Y DIRECTION
+    # 2. Y DIRECTION
     # ========================================================
 
     axes[1].plot(
@@ -324,27 +181,13 @@ def plot_simulation_results(
         label="DCM",
     )
 
-    axes[1].set_ylabel(
-        "Y (m)"
-    )
-
-    axes[1].set_title(
-        "Lateral Motion"
-    )
-
-    axes[1].grid(
-        True,
-        alpha=0.3,
-    )
-
-    axes[1].legend(
-        loc="best",
-        ncol=4,
-    )
-
+    axes[1].set_ylabel("Y (m)")
+    axes[1].set_title("Lateral Motion")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend(loc="best", ncol=4)
 
     # ========================================================
-    # PLOT 3 — SWING FOOT HEIGHT
+    # 3. SWING FOOT HEIGHT
     # ========================================================
 
     axes[2].plot(
@@ -363,32 +206,13 @@ def plot_simulation_results(
         label="Left",
     )
 
-    axes[2].set_xlabel(
-        "Time (s)"
-    )
-
-    axes[2].set_ylabel(
-        "Z (m)"
-    )
-
-    axes[2].set_title(
-        "Swing Foot Height"
-    )
-
-    axes[2].grid(
-        True,
-        alpha=0.3,
-    )
-
-    axes[2].legend(
-        loc="best",
-    )
-
-
-    # ========================================================
-    # FINAL
-    # ========================================================
+    axes[2].set_xlabel("Time (s)")
+    axes[2].set_ylabel("Z (m)")
+    axes[2].set_title("Swing Foot Height")
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend(loc="best")
 
     figure.tight_layout()
 
+    # Show only. No file is saved.
     plt.show()
