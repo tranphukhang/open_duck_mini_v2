@@ -9,6 +9,17 @@
 #
 # After the simulation finishes, logged data are plotted by
 # simulation_plot.py.
+#
+# Additional logging in this version:
+#   - 10 leg joint angles
+#   - joint position limits read directly from the MuJoCo model
+#
+# Leg joints:
+#   left/right hip yaw
+#   left/right hip roll
+#   left/right hip pitch
+#   left/right knee
+#   left/right ankle
 
 from __future__ import annotations
 
@@ -31,7 +42,6 @@ ROOT_DIR = CURRENT_DIR.parent
 
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
-
 
 ROBOT_XML = (
     ROOT_DIR
@@ -122,10 +132,11 @@ np.set_printoptions(
 # ============================================================
 
 DT = 0.0005
-
 SIMULATION_DURATION = 9.0
 
-DATA_LOG_PERIOD = 0.005
+# Centroidal/whole-body data are sampled at every physics step.
+# The MuJoCo XML currently uses timestep = 0.0005 s, and run_walk()
+# verifies that it matches DT before starting the experiment.
 
 FIRST_STANCE_SIDE = "left"
 
@@ -141,12 +152,6 @@ TIME_TOLERANCE = 1.0e-10
 # AUTOMATIC VELOCITY COMMAND
 # ============================================================
 
-# Required experiment:
-#
-#   0 -> 3 s : vx = 0.10, vy =  0.00
-#   3 -> 6 s : vx = 0.10, vy = -0.05
-#   6 -> 9 s : vx = 0.10, vy =  0.00
-
 def automatic_velocity_profile(
     current_time: float,
 ) -> tuple[float, float]:
@@ -154,14 +159,12 @@ def automatic_velocity_profile(
     t = float(current_time)
 
     if t < 3.0:
-
         return (
             0.10,
             0.00,
         )
 
     if t < 6.0:
-
         return (
             0.10,
             -0.05,
@@ -178,7 +181,6 @@ def automatic_velocity_profile(
 # ============================================================
 
 GRAVITY = 9.81
-
 COM_HEIGHT = 0.2044
 
 
@@ -246,6 +248,25 @@ TRUNK_ORIENTATION_KP = 10.0
 
 
 # ============================================================
+# LEG JOINTS FOR LOGGING
+# ============================================================
+
+LEG_JOINT_NAMES = (
+    "left_hip_yaw",
+    "left_hip_roll",
+    "left_hip_pitch",
+    "left_knee",
+    "left_ankle",
+
+    "right_hip_yaw",
+    "right_hip_roll",
+    "right_hip_pitch",
+    "right_knee",
+    "right_ankle",
+)
+
+
+# ============================================================
 # COMMAND SNAPSHOT
 # ============================================================
 
@@ -307,13 +328,155 @@ def get_contact_position(
     )
 
 
+# ============================================================
+# LEG JOINT LOGGING HELPERS
+# ============================================================
+
+def get_leg_joint_limits(
+    mj_model,
+):
+    """
+    Read leg-joint position limits directly from the MuJoCo model.
+
+    Returned values are in radians:
+
+        {
+            joint_name: (lower_limit, upper_limit)
+        }
+
+    If a joint is not limited, (-inf, +inf) is returned.
+    """
+
+    joint_limits = {}
+
+    for joint_name in LEG_JOINT_NAMES:
+
+        joint_id = int(
+            mujoco.mj_name2id(
+                mj_model,
+                mujoco.mjtObj.mjOBJ_JOINT,
+                joint_name,
+            )
+        )
+
+        if joint_id < 0:
+            raise RuntimeError(
+                f"Joint '{joint_name}' was not found."
+            )
+
+        if bool(
+            mj_model.jnt_limited[
+                joint_id
+            ]
+        ):
+
+            lower = float(
+                mj_model.jnt_range[
+                    joint_id,
+                    0,
+                ]
+            )
+
+            upper = float(
+                mj_model.jnt_range[
+                    joint_id,
+                    1,
+                ]
+            )
+
+        else:
+
+            lower = -np.inf
+            upper = +np.inf
+
+        joint_limits[
+            joint_name
+        ] = (
+            lower,
+            upper,
+        )
+
+    return joint_limits
+
+
+def get_leg_joint_angles(
+    *,
+    mj_model,
+    mj_data,
+):
+    """
+    Return the current 10 leg-joint positions from MuJoCo qpos.
+
+    Returned angles are in radians.
+    """
+
+    joint_angles = {}
+
+    for joint_name in LEG_JOINT_NAMES:
+
+        joint_id = int(
+            mujoco.mj_name2id(
+                mj_model,
+                mujoco.mjtObj.mjOBJ_JOINT,
+                joint_name,
+            )
+        )
+
+        if joint_id < 0:
+            raise RuntimeError(
+                f"Joint '{joint_name}' was not found."
+            )
+
+        qpos_address = int(
+            mj_model.jnt_qposadr[
+                joint_id
+            ]
+        )
+
+        angle = float(
+            mj_data.qpos[
+                qpos_address
+            ]
+        )
+
+        if not np.isfinite(
+            angle
+        ):
+            raise RuntimeError(
+                f"Joint '{joint_name}' contains NaN/Inf."
+            )
+
+        joint_angles[
+            joint_name
+        ] = angle
+
+    return joint_angles
+
+
+# ============================================================
+# MUJOCO STATE UPDATE
+# ============================================================
+
 def update_mujoco_from_pinocchio(
     *,
     robot,
     q_pin,
     mj_model,
     mj_data,
+    previous_qpos_mj,
+    dt,
 ):
+    """
+    Update MuJoCo from the kinematic whole-body trajectory.
+
+    qpos is supplied by differential IK / Pinocchio integration.
+    qvel is reconstructed from two consecutive MuJoCo qpos samples
+    using mj_differentiatePos(), which correctly handles the free-joint
+    quaternion.
+
+    MuJoCo is used here as a rigid-body quantity evaluator; this does
+    not turn the current executor into a torque-driven simulation.
+    """
 
     q_mj = (
         robot.pin_to_mujoco(
@@ -321,15 +484,120 @@ def update_mujoco_from_pinocchio(
         )
     )
 
-    mj_data.qpos[:] = q_mj
+    previous_qpos_mj = np.asarray(
+        previous_qpos_mj,
+        dtype=float,
+    )
 
-    # This run.py is kinematic at the full-body level:
-    # q is supplied by differential IK.
-    mj_data.qvel[:] = 0.0
+    if previous_qpos_mj.shape != (
+        mj_model.nq,
+    ):
+        raise ValueError(
+            "previous_qpos_mj has wrong shape."
+        )
+
+    dt = float(dt)
+
+    if (
+        not np.isfinite(dt)
+        or
+        dt <= 0.0
+    ):
+        raise ValueError(
+            "dt must be positive and finite."
+        )
+
+    qvel_mj = np.zeros(
+        mj_model.nv,
+        dtype=float,
+    )
+
+    mujoco.mj_differentiatePos(
+        mj_model,
+        qvel_mj,
+        dt,
+        previous_qpos_mj,
+        q_mj,
+    )
+
+    mj_data.qpos[:] = q_mj
+    mj_data.qvel[:] = qvel_mj
 
     mujoco.mj_forward(
         mj_model,
         mj_data,
+    )
+
+    # Compute subtree CoM velocity and angular momentum explicitly.
+    mujoco.mj_subtreeVel(
+        mj_model,
+        mj_data,
+    )
+
+    return (
+        q_mj,
+        qvel_mj,
+    )
+
+
+def get_mujoco_centroidal_quantities(
+    *,
+    mj_data,
+    robot_root_body_id,
+):
+    """
+    Return whole-robot centroidal quantities for the subtree rooted
+    at the robot base body.
+
+    All returned vectors are expressed in the world frame:
+
+        p_G : whole-body CoM position
+        v_G : whole-body CoM linear velocity
+        L_G : angular momentum about the whole-body CoM
+    """
+
+    body_id = int(
+        robot_root_body_id
+    )
+
+    p_G = (
+        mj_data.subtree_com[
+            body_id
+        ].copy()
+    )
+
+    v_G = (
+        mj_data.subtree_linvel[
+            body_id
+        ].copy()
+    )
+
+    L_G = (
+        mj_data.subtree_angmom[
+            body_id
+        ].copy()
+    )
+
+    for name, value in (
+        ("p_G", p_G),
+        ("v_G", v_G),
+        ("L_G", L_G),
+    ):
+
+        if not np.all(
+            np.isfinite(
+                value
+            )
+        ):
+            raise RuntimeError(
+                f"MuJoCo centroidal quantity {name} "
+                "contains NaN/Inf."
+            )
+
+    return (
+        p_G,
+        v_G,
+        L_G,
     )
 
 
@@ -348,7 +616,6 @@ def compute_robot_mass(
         or
         mass <= 0.0
     ):
-
         raise RuntimeError(
             f"Invalid robot mass: {mass}"
         )
@@ -368,23 +635,18 @@ def compute_nominal_step(
     desired_velocity_y,
 ):
 
-    return (
-        planner.compute_nominal_step(
-
-            desired_velocity_x=(
-                desired_velocity_x
-            ),
-
-            desired_velocity_y=(
-                desired_velocity_y
-            ),
-
-            stance_leg=(
-                stance_leg_from_side(
-                    stance_side
-                )
-            ),
-        )
+    return planner.compute_nominal_step(
+        desired_velocity_x=(
+            desired_velocity_x
+        ),
+        desired_velocity_y=(
+            desired_velocity_y
+        ),
+        stance_leg=(
+            stance_leg_from_side(
+                stance_side
+            )
+        ),
     )
 
 
@@ -396,15 +658,11 @@ def compute_nominal_steps(
 
     nominal_left = (
         compute_nominal_step(
-
             planner=planner,
-
             stance_side="left",
-
             desired_velocity_x=(
                 velocity_command.x
             ),
-
             desired_velocity_y=(
                 velocity_command.y
             ),
@@ -413,15 +671,11 @@ def compute_nominal_steps(
 
     nominal_right = (
         compute_nominal_step(
-
             planner=planner,
-
             stance_side="right",
-
             desired_velocity_x=(
                 velocity_command.x
             ),
-
             desired_velocity_y=(
                 velocity_command.y
             ),
@@ -447,45 +701,34 @@ def solve_adaptive_step(
     elapsed_time,
 ):
 
-    return (
-        planner.solve_adaptive_step(
-
-            nominal_step=(
-                nominal_step
-            ),
-
-            dcm_measured=(
-                dcm
-            ),
-
-            stance_position=(
-                stance_position[0:2]
-            ),
-
-            elapsed_time=(
-                elapsed_time
-            ),
-
-            alpha_location=(
-                STEP_QP_ALPHA_LOCATION
-            ),
-
-            alpha_timing=(
-                STEP_QP_ALPHA_TIMING
-            ),
-
-            alpha_dcm=(
-                STEP_QP_ALPHA_DCM
-            ),
-
-            alpha_viability=(
-                STEP_QP_ALPHA_VIABILITY
-            ),
-
-            timing_gap=(
-                STEP_TIMING_GAP
-            ),
-        )
+    return planner.solve_adaptive_step(
+        nominal_step=(
+            nominal_step
+        ),
+        dcm_measured=(
+            dcm
+        ),
+        stance_position=(
+            stance_position[0:2]
+        ),
+        elapsed_time=(
+            elapsed_time
+        ),
+        alpha_location=(
+            STEP_QP_ALPHA_LOCATION
+        ),
+        alpha_timing=(
+            STEP_QP_ALPHA_TIMING
+        ),
+        alpha_dcm=(
+            STEP_QP_ALPHA_DCM
+        ),
+        alpha_viability=(
+            STEP_QP_ALPHA_VIABILITY
+        ),
+        timing_gap=(
+            STEP_TIMING_GAP
+        ),
     )
 
 
@@ -543,11 +786,9 @@ def compute_consistent_initial_com_velocity(
 
     xi0 = (
         compute_nominal_initial_dcm(
-
             nominal_step=(
                 nominal_step
             ),
-
             stance_position=(
                 stance_position
             ),
@@ -593,15 +834,11 @@ def start_new_step(
     planner,
     robot,
     swing_trajectory,
-
     stance_side,
-
     left_contact_position,
     right_contact_position,
-
     nominal_left_step,
     nominal_right_step,
-
     current_dcm,
 ):
 
@@ -612,47 +849,36 @@ def start_new_step(
     )
 
     if stance_side == "left":
-
         nominal_step = (
             nominal_left_step
         )
-
     else:
-
         nominal_step = (
             nominal_right_step
         )
 
     stance_position = (
         get_contact_position(
-
             stance_side,
-
             left_contact_position,
-
             right_contact_position,
         )
     )
 
     planner_result = (
         solve_adaptive_step(
-
             planner=(
                 planner
             ),
-
             nominal_step=(
                 nominal_step
             ),
-
             dcm=(
                 current_dcm
             ),
-
             stance_position=(
                 stance_position
             ),
-
             elapsed_time=0.0,
         )
     )
@@ -700,21 +926,17 @@ def start_new_step(
     )
 
     swing_trajectory.reset(
-
         initial_position=(
             swing_start
         ),
-
         initial_velocity=np.zeros(
             3,
             dtype=float,
         ),
-
         initial_acceleration=np.zeros(
             3,
             dtype=float,
         ),
-
         start_time=0.0,
     )
 
@@ -776,13 +998,10 @@ def advance_lipm(
     )
 
     lipm.advance(
-
         push_dt,
-
         external_force_xy=(
             force_xy
         ),
-
         mass=(
             robot_mass
         ),
@@ -799,7 +1018,6 @@ def advance_lipm(
         >
         TIME_TOLERANCE
     ):
-
         lipm.advance(
             remaining_dt
         )
@@ -824,6 +1042,35 @@ def run_walk(
     planner,
     viewer,
 ):
+
+    physics_dt = float(
+        mj_model.opt.timestep
+    )
+
+    if not np.isclose(
+        physics_dt,
+        DT,
+        rtol=0.0,
+        atol=1.0e-12,
+    ):
+        raise RuntimeError(
+            "MuJoCo physics timestep does not match DT: "
+            f"model={physics_dt:.12f} s, "
+            f"DT={DT:.12f} s"
+        )
+
+    robot_root_body_id = int(
+        mujoco.mj_name2id(
+            mj_model,
+            mujoco.mjtObj.mjOBJ_BODY,
+            "base",
+        )
+    )
+
+    if robot_root_body_id < 0:
+        raise RuntimeError(
+            "MuJoCo body 'base' was not found."
+        )
 
     robot_mass = (
         compute_robot_mass(
@@ -925,7 +1172,7 @@ def run_walk(
     )
 
     # ========================================================
-    # INITIAL COMMAND: profile at t = 0
+    # INITIAL COMMAND
     # ========================================================
 
     (
@@ -944,13 +1191,14 @@ def run_walk(
         )
     )
 
-    nominal_left_step, nominal_right_step = (
+    (
+        nominal_left_step,
+        nominal_right_step,
+    ) = (
         compute_nominal_steps(
-
             planner=(
                 planner
             ),
-
             velocity_command=(
                 command
             ),
@@ -967,23 +1215,17 @@ def run_walk(
 
     stance_position = (
         get_contact_position(
-
             stance_side,
-
             left_contact_position,
-
             right_contact_position,
         )
     )
 
     if stance_side == "left":
-
         first_nominal_step = (
             nominal_left_step
         )
-
     else:
-
         first_nominal_step = (
             nominal_right_step
         )
@@ -997,19 +1239,15 @@ def run_walk(
         initial_dcm,
     ) = (
         compute_consistent_initial_com_velocity(
-
             planner=(
                 planner
             ),
-
             com_position=(
                 initial_com_reference
             ),
-
             nominal_step=(
                 first_nominal_step
             ),
-
             stance_position=(
                 stance_position
             ),
@@ -1022,23 +1260,18 @@ def run_walk(
 
     lipm = (
         PointFootLIPM(
-
             gravity=(
                 GRAVITY
             ),
-
             com_height=(
                 COM_HEIGHT
             ),
-
             initial_position=(
                 initial_com_reference
             ),
-
             initial_velocity=(
                 initial_com_velocity
             ),
-
             support_position=(
                 stance_position
             ),
@@ -1062,7 +1295,6 @@ def run_walk(
         >
         1.0e-10
     ):
-
         raise RuntimeError(
             "Initial DCM mismatch: "
             f"{initial_dcm_error:.3e}"
@@ -1088,39 +1320,30 @@ def run_walk(
         current_step_time,
     ) = (
         start_new_step(
-
             planner=(
                 planner
             ),
-
             robot=(
                 robot
             ),
-
             swing_trajectory=(
                 swing_trajectory
             ),
-
             stance_side=(
                 stance_side
             ),
-
             left_contact_position=(
                 left_contact_position
             ),
-
             right_contact_position=(
                 right_contact_position
             ),
-
             nominal_left_step=(
                 nominal_left_step
             ),
-
             nominal_right_step=(
                 nominal_right_step
             ),
-
             current_dcm=(
                 lipm_sample.dcm
             ),
@@ -1150,11 +1373,35 @@ def run_walk(
         dtype=float,
     )
 
-    simulation_log = (
-        SimulationLog()
+    # ========================================================
+    # LEG JOINT LIMITS / LOG
+    # ========================================================
+
+    leg_joint_limits = (
+        get_leg_joint_limits(
+            mj_model
+        )
     )
 
-    next_log_time = 0.0
+    simulation_log = (
+        SimulationLog(
+            leg_joint_angles={
+                joint_name: []
+                for joint_name
+                in LEG_JOINT_NAMES
+            },
+            leg_joint_limits=(
+                leg_joint_limits
+            ),
+        )
+    )
+
+    # Previous MuJoCo configuration is needed to reconstruct qvel at
+    # every physics step with mj_differentiatePos().
+    previous_qpos_mj = (
+        mj_data.qpos.copy()
+    )
+
     next_print_time = 0.0
     next_viewer_sync_time = 0.0
 
@@ -1169,6 +1416,10 @@ def run_walk(
     print(
         f"Automatic experiment duration: "
         f"{SIMULATION_DURATION:.1f} s"
+    )
+    print(
+        f"Physics/data sampling: dt={physics_dt:.7f} s"
+        f" | fs={1.0 / physics_dt:.1f} Hz"
     )
     print(
         "Velocity profile:"
@@ -1191,6 +1442,26 @@ def run_walk(
         f"{PUSH_FORCE_Y:+.2f}) N"
         f" | duration={PUSH_DURATION:.3f} s"
     )
+
+    print()
+    print(
+        "Leg joint limits:"
+    )
+
+    for joint_name in LEG_JOINT_NAMES:
+
+        lower, upper = (
+            leg_joint_limits[
+                joint_name
+            ]
+        )
+
+        print(
+            f"  {joint_name:>18s}: "
+            f"[{np.rad2deg(lower):+8.3f}, "
+            f"{np.rad2deg(upper):+8.3f}] deg"
+        )
+
     print()
 
     # ========================================================
@@ -1204,7 +1475,6 @@ def run_walk(
             and
             not viewer.is_running()
         ):
-
             break
 
         if (
@@ -1214,7 +1484,6 @@ def run_walk(
             -
             TIME_TOLERANCE
         ):
-
             break
 
         # ====================================================
@@ -1256,11 +1525,9 @@ def run_walk(
                 nominal_right_step,
             ) = (
                 compute_nominal_steps(
-
                     planner=(
                         planner
                     ),
-
                     velocity_command=(
                         command
                     ),
@@ -1268,13 +1535,10 @@ def run_walk(
             )
 
             if stance_side == "left":
-
                 current_nominal_step = (
                     nominal_left_step
                 )
-
             else:
-
                 current_nominal_step = (
                     nominal_right_step
                 )
@@ -1385,9 +1649,7 @@ def run_walk(
             )
 
             step_index += 1
-
             phase_time = 0.0
-
             planner_frozen = False
 
             (
@@ -1398,39 +1660,30 @@ def run_walk(
                 current_step_time,
             ) = (
                 start_new_step(
-
                     planner=(
                         planner
                     ),
-
                     robot=(
                         robot
                     ),
-
                     swing_trajectory=(
                         swing_trajectory
                     ),
-
                     stance_side=(
                         stance_side
                     ),
-
                     left_contact_position=(
                         left_contact_position
                     ),
-
                     right_contact_position=(
                         right_contact_position
                     ),
-
                     nominal_left_step=(
                         nominal_left_step
                     ),
-
                     nominal_right_step=(
                         nominal_right_step
                     ),
-
                     current_dcm=(
                         lipm_sample.dcm
                     ),
@@ -1465,11 +1718,8 @@ def run_walk(
 
                 stance_position = (
                     get_contact_position(
-
                         stance_side,
-
                         left_contact_position,
-
                         right_contact_position,
                     )
                 )
@@ -1478,23 +1728,18 @@ def run_walk(
 
                     new_result = (
                         solve_adaptive_step(
-
                             planner=(
                                 planner
                             ),
-
                             nominal_step=(
                                 current_nominal_step
                             ),
-
                             dcm=(
                                 lipm_sample.dcm
                             ),
-
                             stance_position=(
                                 stance_position
                             ),
-
                             elapsed_time=(
                                 phase_time
                             ),
@@ -1526,7 +1771,6 @@ def run_walk(
                         -
                         TIME_TOLERANCE
                     ):
-
                         planner_frozen = True
 
                 except RuntimeError as error:
@@ -1536,11 +1780,8 @@ def run_walk(
                         in
                         str(error).lower()
                     ):
-
                         planner_frozen = True
-
                     else:
-
                         raise
 
         # ====================================================
@@ -1565,22 +1806,18 @@ def run_walk(
 
         swing_sample = (
             swing_trajectory.update(
-
                 current_time=(
                     min(
                         phase_time,
                         current_step_time,
                     )
                 ),
-
                 landing_time=(
                     current_step_time
                 ),
-
                 target_position=(
                     landing_position
                 ),
-
                 swing_height=(
                     SWING_HEIGHT
                 ),
@@ -1609,22 +1846,16 @@ def run_walk(
 
         support_position_ref = (
             get_contact_position(
-
                 stance_side,
-
                 p_left_ref,
-
                 p_right_ref,
             )
         )
 
         swing_position_ref = (
             get_contact_position(
-
                 swing_side,
-
                 p_left_ref,
-
                 p_right_ref,
             )
         )
@@ -1639,63 +1870,48 @@ def run_walk(
             _,
         ) = (
             solve_single_support_ik(
-
                 robot=(
                     robot
                 ),
-
                 q_pin=(
                     q_pin
                 ),
-
                 support_side=(
                     stance_side
                 ),
-
                 support_position_ref=(
                     support_position_ref
                 ),
-
                 swing_position_ref=(
                     swing_position_ref
                 ),
-
                 swing_linear_velocity_ref=(
                     swing_sample.velocity
                 ),
-
                 com_position_ref=(
                     com_position_ref
                 ),
-
                 com_velocity_ref=(
                     com_velocity_ref
                 ),
-
                 trunk_rotation_ref=(
                     trunk_rotation_ref
                 ),
-
                 support_position_gain=(
                     SUPPORT_POSITION_KP
                 ),
-
                 swing_position_gain=(
                     SWING_POSITION_KP
                 ),
-
                 com_position_gain=(
                     COM_POSITION_KP
                 ),
-
                 trunk_orientation_gain=(
                     TRUNK_ORIENTATION_KP
                 ),
-
                 damping=(
                     IK_DAMPING
                 ),
-
                 rcond=(
                     IK_RCOND
                 ),
@@ -1707,7 +1923,6 @@ def run_walk(
                 qdot_full
             )
         ):
-
             raise RuntimeError(
                 "Differential IK returned NaN/Inf."
             )
@@ -1718,15 +1933,12 @@ def run_walk(
 
         q_pin = (
             robot.integrate(
-
                 q_pin=(
                     q_pin
                 ),
-
                 v_pin=(
                     qdot_full
                 ),
-
                 dt=(
                     DT
                 ),
@@ -1741,23 +1953,68 @@ def run_walk(
         # MUJOCO SET STATE
         # ====================================================
 
-        update_mujoco_from_pinocchio(
+        (
+            current_qpos_mj,
+            _,
+        ) = (
+            update_mujoco_from_pinocchio(
+                robot=(
+                    robot
+                ),
+                q_pin=(
+                    q_pin
+                ),
+                mj_model=(
+                    mj_model
+                ),
+                mj_data=(
+                    mj_data
+                ),
+                previous_qpos_mj=(
+                    previous_qpos_mj
+                ),
+                dt=(
+                    physics_dt
+                ),
+            )
+        )
 
-            robot=(
-                robot
-            ),
+        previous_qpos_mj = (
+            current_qpos_mj.copy()
+        )
 
-            q_pin=(
-                q_pin
-            ),
+        # ====================================================
+        # LEG JOINT ANGLES
+        # ====================================================
 
-            mj_model=(
-                mj_model
-            ),
+        leg_joint_angles = (
+            get_leg_joint_angles(
+                mj_model=(
+                    mj_model
+                ),
+                mj_data=(
+                    mj_data
+                ),
+            )
+        )
 
-            mj_data=(
-                mj_data
-            ),
+        # ====================================================
+        # WHOLE-BODY CENTROIDAL QUANTITIES
+        # ====================================================
+
+        (
+            whole_body_com_position,
+            whole_body_com_velocity,
+            whole_body_angular_momentum,
+        ) = (
+            get_mujoco_centroidal_quantities(
+                mj_data=(
+                    mj_data
+                ),
+                robot_root_body_id=(
+                    robot_root_body_id
+                ),
+            )
         )
 
         # ====================================================
@@ -1785,77 +2042,67 @@ def run_walk(
         )
 
         # ====================================================
-        # DATA LOG
+        # DATA LOG -- EVERY PHYSICS STEP
         # ====================================================
 
-        if (
-            kinematic_time
-            >=
-            next_log_time
-            -
-            TIME_TOLERANCE
-        ):
+        (
+            left_foot_position_log,
+            _,
+        ) = (
+            robot.get_left_foot_pose()
+        )
 
-            (
-                left_foot_position_log,
-                _,
-            ) = (
-                robot.get_left_foot_pose()
-            )
+        (
+            right_foot_position_log,
+            _,
+        ) = (
+            robot.get_right_foot_pose()
+        )
 
-            (
-                right_foot_position_log,
-                _,
-            ) = (
-                robot.get_right_foot_pose()
-            )
-
-            simulation_log.append(
-
-                time=(
-                    kinematic_time
-                ),
-
-                command_vx=(
-                    command.x
-                ),
-
-                command_vy=(
-                    command.y
-                ),
-
-                left_foot_position=(
-                    left_foot_position_log
-                ),
-
-                right_foot_position=(
-                    right_foot_position_log
-                ),
-
-                com_position=(
-                    lipm_sample.position
-                ),
-
-                dcm=(
-                    lipm_sample.dcm
-                ),
-
-                landing_position=(
-                    landing_position
-                ),
-
-                step_time=(
-                    current_step_time
-                ),
-
-                push_active=(
-                    push_active
-                ),
-            )
-
-            next_log_time += (
-                DATA_LOG_PERIOD
-            )
+        simulation_log.append(
+            time=(
+                kinematic_time
+            ),
+            command_vx=(
+                command.x
+            ),
+            command_vy=(
+                command.y
+            ),
+            left_foot_position=(
+                left_foot_position_log
+            ),
+            right_foot_position=(
+                right_foot_position_log
+            ),
+            com_position=(
+                lipm_sample.position
+            ),
+            dcm=(
+                lipm_sample.dcm
+            ),
+            landing_position=(
+                landing_position
+            ),
+            step_time=(
+                current_step_time
+            ),
+            push_active=(
+                push_active
+            ),
+            whole_body_com_position=(
+                whole_body_com_position
+            ),
+            whole_body_com_velocity=(
+                whole_body_com_velocity
+            ),
+            angular_momentum=(
+                whole_body_angular_momentum
+            ),
+            leg_joint_angles=(
+                leg_joint_angles
+            ),
+        )
 
         # ====================================================
         # TERMINAL STATUS
@@ -1916,19 +2163,15 @@ def run_walk(
 
         push_time_remaining = (
             advance_lipm(
-
                 lipm=(
                     lipm
                 ),
-
                 dt=(
                     DT
                 ),
-
                 robot_mass=(
                     robot_mass
                 ),
-
                 push_time_remaining=(
                     push_time_remaining
                 ),
@@ -1970,7 +2213,6 @@ def run_walk(
             )
 
             if remaining > 0.0:
-
                 time.sleep(
                     remaining
                 )
@@ -2001,14 +2243,12 @@ def main():
     # ========================================================
 
     if not SCENE_XML.exists():
-
         raise FileNotFoundError(
             f"Scene file not found: "
             f"{SCENE_XML}"
         )
 
     if not ROBOT_XML.exists():
-
         raise FileNotFoundError(
             f"Robot XML not found: "
             f"{ROBOT_XML}"
@@ -2054,11 +2294,9 @@ def main():
 
     robot = (
         PinocchioModel(
-
             mjcf_path=(
                 ROBOT_XML
             ),
-
             mujoco_model=(
                 mj_model
             ),
@@ -2110,7 +2348,6 @@ def main():
         <=
         1.0e-6
     ):
-
         raise RuntimeError(
             "Invalid measured foot separation: "
             f"{measured_step_width}"
@@ -2127,41 +2364,31 @@ def main():
 
     planner = (
         AdaptiveStepPlanner(
-
             StepPlannerParameters(
-
                 gravity=(
                     GRAVITY
                 ),
-
                 com_height=(
                     COM_HEIGHT
                 ),
-
                 default_step_width=(
                     measured_step_width
                 ),
-
                 step_length_min=(
                     STEP_LENGTH_MIN
                 ),
-
                 step_length_max=(
                     STEP_LENGTH_MAX
                 ),
-
                 step_width_min=(
                     STEP_WIDTH_MIN
                 ),
-
                 step_width_max=(
                     STEP_WIDTH_MAX
                 ),
-
                 step_time_min=(
                     STEP_TIME_MIN
                 ),
-
                 step_time_max=(
                     STEP_TIME_MAX
                 ),
@@ -2176,33 +2403,25 @@ def main():
     if SHOW_VIEWER:
 
         with mujoco.viewer.launch_passive(
-
             mj_model,
             mj_data,
-
             show_right_ui=True,
-
         ) as viewer:
 
             simulation_log = (
                 run_walk(
-
                     mj_model=(
                         mj_model
                     ),
-
                     mj_data=(
                         mj_data
                     ),
-
                     robot=(
                         robot
                     ),
-
                     planner=(
                         planner
                     ),
-
                     viewer=(
                         viewer
                     ),
@@ -2213,23 +2432,18 @@ def main():
 
         simulation_log = (
             run_walk(
-
                 mj_model=(
                     mj_model
                 ),
-
                 mj_data=(
                     mj_data
                 ),
-
                 robot=(
                     robot
                 ),
-
                 planner=(
                     planner
                 ),
-
                 viewer=None,
             )
         )
