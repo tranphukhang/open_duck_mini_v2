@@ -1,14 +1,26 @@
 # step_timing_adaptation/run.py
 #
-# TEST C:
-#   - friction in XML remains mu = 0.6
-#   - external push is completely disabled
-#   - velocity commands are reduced to 50% of the baseline
+# Current experiment:
+#   - 9 s automatic walking
+#   - vx = +0.035 m/s
+#   - vy = -0.020 m/s
+#   - COM_HEIGHT = 0.215 m
+#   - SWING_HEIGHT = 0.020 m
+#   - external push disabled
 #
-# Automatic 9-second experiment:
-#   0 <= t < 3 s : vx = +0.05 m/s, vy =  0.000 m/s
-#   3 <= t < 6 s : vx = +0.05 m/s, vy = -0.025 m/s
-#   6 <= t <=9 s: vx = +0.05 m/s, vy =  0.000 m/s
+# Contact processing:
+#   - old contact_stability.py is no longer used
+#   - no friction cone / unilateral-force / torque-limit check
+#   - q, qdot are recorded during the kinematic walking trajectory
+#   - qdd is reconstructed offline from qdot
+#   - MuJoCo provides M(q), qfrc_bias, qfrc_passive,
+#     contact points, and contact Jacobians
+#   - only the first six floating-base equations are used:
+#
+#       M_b(q) qdd + h_b(q, qdot) = J_c,b(q)^T f_c
+#
+#   - when the contact-force distribution is underdetermined,
+#     the minimum-norm solution is selected
 
 from __future__ import annotations
 
@@ -61,8 +73,8 @@ if __package__:
         plot_simulation_results,
     )
 
-    from .contact_stability import (
-        ContactStabilityChecker,
+    from .contact_force_reconstruction import (
+        ContactForceReconstructor,
     )
 
 else:
@@ -86,8 +98,8 @@ else:
         plot_simulation_results,
     )
 
-    from contact_stability import (
-        ContactStabilityChecker,
+    from contact_force_reconstruction import (
+        ContactForceReconstructor,
     )
 
 
@@ -132,54 +144,39 @@ TIME_TOLERANCE = 1.0e-10
 
 
 # ============================================================
-# OPTIONAL CONTACT STABILITY CHECK
+# CONTACT FORCE RECONSTRUCTION
 # ============================================================
-#
-# False:
-#   - do NOT create ContactStabilityChecker
-#   - do NOT record contact/centroidal samples for the checker
-#   - do NOT solve contact-stability QPs after walking
 #
 # True:
-#   - record data every simulation step
-#   - run the full offline contact-stability diagnostic at the end
+#   - record qpos/qvel at every generated trajectory sample
+#   - reconstruct qdd offline
+#   - reconstruct point-contact forces from the first six
+#     floating-base dynamic equations
 #
-# Keep this False for normal walking tests because the offline QP
-# evaluation is computationally expensive.
+# False:
+#   - skip this reconstruction completely
+#
+# No friction-cone or unilateral-force constraints are applied.
 # ============================================================
 
-ENABLE_CONTACT_STABILITY_CHECK = True
+ENABLE_CONTACT_FORCE_RECONSTRUCTION = True
 
 
 # ============================================================
-# TEST C - VELOCITY COMMAND
+# VELOCITY COMMAND
 # ============================================================
 
 def automatic_velocity_profile(
     current_time: float,
 ) -> tuple[float, float]:
 
-    t = float(
+    _ = float(
         current_time
     )
 
-    if t < 3.0:
-
-        return (
-            0.035,
-            -0.02,
-        )
-
-    if t < 6.0:
-
-        return (
-            0.035,
-            -0.02,
-        )
-
     return (
         0.035,
-        -0.02,
+        -0.020,
     )
 
 
@@ -192,13 +189,7 @@ COM_HEIGHT = 0.215
 
 
 # ============================================================
-# TEST C - EXTERNAL PUSH
-# ============================================================
-#
-# Push is completely disabled in this experiment.
-#
-# PUSH_TIME / PUSH_DURATION are retained only so the same code path
-# can be re-enabled later without restructuring run.py.
+# EXTERNAL PUSH
 # ============================================================
 
 ENABLE_AUTOMATIC_PUSH = False
@@ -272,7 +263,6 @@ LEG_JOINT_NAMES = (
     "left_hip_pitch",
     "left_knee",
     "left_ankle",
-
     "right_hip_yaw",
     "right_hip_roll",
     "right_hip_pitch",
@@ -287,7 +277,6 @@ LEG_JOINT_NAMES = (
 
 @dataclass(frozen=True)
 class VelocityCommandSnapshot:
-
     x: float
     y: float
 
@@ -1095,13 +1084,13 @@ def run_walk(
     )
 
     # ========================================================
-    # CONTACT STABILITY CHECKER
+    # CONTACT FORCE RECONSTRUCTOR
     # ========================================================
 
-    if ENABLE_CONTACT_STABILITY_CHECK:
+    if ENABLE_CONTACT_FORCE_RECONSTRUCTION:
 
-        contact_stability_checker = (
-            ContactStabilityChecker(
+        contact_force_reconstructor = (
+            ContactForceReconstructor(
                 mj_model=(
                     mj_model
                 )
@@ -1110,7 +1099,7 @@ def run_walk(
 
     else:
 
-        contact_stability_checker = None
+        contact_force_reconstructor = None
 
     # ========================================================
     # INITIAL SETTLED CONFIGURATION
@@ -1201,6 +1190,24 @@ def run_walk(
         2
     ] = (
         com_world_z
+    )
+
+    measured_settled_com_height = float(
+        initial_com_actual[
+            2
+        ]
+        -
+        support_plane_z
+    )
+
+    print(
+        f"Settled CoM height above support plane: "
+        f"{measured_settled_com_height:.6f} m"
+    )
+
+    print(
+        f"Configured LIPM CoM height: "
+        f"{COM_HEIGHT:.6f} m"
     )
 
     # ========================================================
@@ -1449,7 +1456,7 @@ def run_walk(
 
     print()
     print(
-        "Point-foot LIPM Step Timing Adaptation - TEST C"
+        "Point-foot LIPM Step Timing Adaptation"
     )
 
     print(
@@ -1463,31 +1470,27 @@ def run_walk(
     )
 
     print(
-        "Velocity profile:"
+        "Velocity command:"
     )
 
     print(
-        "  0 <= t < 3 s : "
-        "vx=+0.050 m/s, vy=+0.000 m/s"
+        f"  vx={command.x:+.3f} m/s, "
+        f"vy={command.y:+.3f} m/s"
     )
 
     print(
-        "  3 <= t < 6 s : "
-        "vx=+0.050 m/s, vy=-0.025 m/s"
+        f"COM height: {COM_HEIGHT:.3f} m"
+        f" | swing height: {SWING_HEIGHT:.3f} m"
     )
 
     print(
-        "  6 <= t <=9 s: "
-        "vx=+0.050 m/s, vy=+0.000 m/s"
+        "Automatic push: "
+        f"{'ENABLED' if ENABLE_AUTOMATIC_PUSH else 'DISABLED'}"
     )
 
     print(
-        "Automatic push: DISABLED"
-    )
-
-    print(
-        "Contact stability check: "
-        f"{'ENABLED' if ENABLE_CONTACT_STABILITY_CHECK else 'DISABLED'}"
+        "Floating-base contact-force reconstruction: "
+        f"{'ENABLED' if ENABLE_CONTACT_FORCE_RECONSTRUCTION else 'DISABLED'}"
     )
 
     print()
@@ -1608,9 +1611,6 @@ def run_walk(
 
         # ====================================================
         # AUTOMATIC PUSH
-        # ====================================================
-        #
-        # Explicitly disabled in Test C.
         # ====================================================
 
         if (
@@ -2033,6 +2033,21 @@ def run_walk(
         )
 
         # ====================================================
+        # RECORD q, qdot FOR FLOATING-BASE INVERSE DYNAMICS
+        # ====================================================
+
+        if ENABLE_CONTACT_FORCE_RECONSTRUCTION:
+
+            contact_force_reconstructor.record_sample(
+                time=(
+                    kinematic_time
+                ),
+                mj_data=(
+                    mj_data
+                ),
+            )
+
+        # ====================================================
         # LEG JOINT ANGLES
         # ====================================================
 
@@ -2109,36 +2124,6 @@ def run_walk(
         ) = (
             robot.get_right_foot_pose()
         )
-
-        # ====================================================
-        # CONTACT STABILITY RAW SAMPLE
-        # ====================================================
-
-        if ENABLE_CONTACT_STABILITY_CHECK:
-
-            contact_stability_checker.record_sample(
-                time=(
-                    kinematic_time
-                ),
-                mj_data=(
-                    mj_data
-                ),
-                whole_body_com_position=(
-                    whole_body_com_position
-                ),
-                whole_body_com_velocity=(
-                    whole_body_com_velocity
-                ),
-                angular_momentum=(
-                    whole_body_angular_momentum
-                ),
-                left_foot_position=(
-                    left_foot_position_log
-                ),
-                right_foot_position=(
-                    right_foot_position_log
-                ),
-            )
 
         simulation_log.append(
             time=(
@@ -2310,23 +2295,24 @@ def run_walk(
     )
 
     # ========================================================
-    # OPTIONAL OFFLINE CONTACT STABILITY CHECK
+    # OFFLINE FLOATING-BASE CONTACT FORCE RECONSTRUCTION
     # ========================================================
 
-    if ENABLE_CONTACT_STABILITY_CHECK:
+    if ENABLE_CONTACT_FORCE_RECONSTRUCTION:
 
         print()
 
         print(
-            "Solving contact-stability QPs..."
+            "Reconstructing contact forces from "
+            "floating-base dynamics..."
         )
 
-        contact_stability_results = (
-            contact_stability_checker.solve_all()
+        contact_force_results = (
+            contact_force_reconstructor.solve_all()
         )
 
-        contact_stability_checker.print_summary(
-            contact_stability_results
+        contact_force_reconstructor.print_summary(
+            contact_force_results
         )
 
     else:
@@ -2334,15 +2320,15 @@ def run_walk(
         print()
 
         print(
-            "Contact-stability check skipped "
-            "(ENABLE_CONTACT_STABILITY_CHECK=False)."
+            "Contact-force reconstruction skipped "
+            "(ENABLE_CONTACT_FORCE_RECONSTRUCTION=False)."
         )
 
-        contact_stability_results = None
+        contact_force_results = None
 
     return (
         simulation_log,
-        contact_stability_results,
+        contact_force_results,
     )
 
 
@@ -2531,7 +2517,7 @@ def main():
 
             (
                 simulation_log,
-                contact_stability_results,
+                contact_force_results,
             ) = (
                 run_walk(
                     mj_model=(
@@ -2556,7 +2542,7 @@ def main():
 
         (
             simulation_log,
-            contact_stability_results,
+            contact_force_results,
         ) = (
             run_walk(
                 mj_model=(
@@ -2583,10 +2569,8 @@ def main():
         simulation_log
     )
 
-    # When ENABLE_CONTACT_STABILITY_CHECK is False,
-    # contact_stability_results is None.
     _ = (
-        contact_stability_results
+        contact_force_results
     )
 
 
