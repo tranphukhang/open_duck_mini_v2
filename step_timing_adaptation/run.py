@@ -148,7 +148,7 @@ TIME_TOLERANCE = 1.0e-10
 # evaluation is computationally expensive.
 # ============================================================
 
-ENABLE_CONTACT_STABILITY_CHECK = False
+ENABLE_CONTACT_STABILITY_CHECK = True
 
 
 # ============================================================
