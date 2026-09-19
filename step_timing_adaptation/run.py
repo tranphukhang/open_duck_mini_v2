@@ -132,6 +132,26 @@ TIME_TOLERANCE = 1.0e-10
 
 
 # ============================================================
+# OPTIONAL CONTACT STABILITY CHECK
+# ============================================================
+#
+# False:
+#   - do NOT create ContactStabilityChecker
+#   - do NOT record contact/centroidal samples for the checker
+#   - do NOT solve contact-stability QPs after walking
+#
+# True:
+#   - record data every simulation step
+#   - run the full offline contact-stability diagnostic at the end
+#
+# Keep this False for normal walking tests because the offline QP
+# evaluation is computationally expensive.
+# ============================================================
+
+ENABLE_CONTACT_STABILITY_CHECK = False
+
+
+# ============================================================
 # TEST C - VELOCITY COMMAND
 # ============================================================
 
@@ -1078,13 +1098,19 @@ def run_walk(
     # CONTACT STABILITY CHECKER
     # ========================================================
 
-    contact_stability_checker = (
-        ContactStabilityChecker(
-            mj_model=(
-                mj_model
+    if ENABLE_CONTACT_STABILITY_CHECK:
+
+        contact_stability_checker = (
+            ContactStabilityChecker(
+                mj_model=(
+                    mj_model
+                )
             )
         )
-    )
+
+    else:
+
+        contact_stability_checker = None
 
     # ========================================================
     # INITIAL SETTLED CONFIGURATION
@@ -1457,6 +1483,11 @@ def run_walk(
 
     print(
         "Automatic push: DISABLED"
+    )
+
+    print(
+        "Contact stability check: "
+        f"{'ENABLED' if ENABLE_CONTACT_STABILITY_CHECK else 'DISABLED'}"
     )
 
     print()
@@ -2083,29 +2114,31 @@ def run_walk(
         # CONTACT STABILITY RAW SAMPLE
         # ====================================================
 
-        contact_stability_checker.record_sample(
-            time=(
-                kinematic_time
-            ),
-            mj_data=(
-                mj_data
-            ),
-            whole_body_com_position=(
-                whole_body_com_position
-            ),
-            whole_body_com_velocity=(
-                whole_body_com_velocity
-            ),
-            angular_momentum=(
-                whole_body_angular_momentum
-            ),
-            left_foot_position=(
-                left_foot_position_log
-            ),
-            right_foot_position=(
-                right_foot_position_log
-            ),
-        )
+        if ENABLE_CONTACT_STABILITY_CHECK:
+
+            contact_stability_checker.record_sample(
+                time=(
+                    kinematic_time
+                ),
+                mj_data=(
+                    mj_data
+                ),
+                whole_body_com_position=(
+                    whole_body_com_position
+                ),
+                whole_body_com_velocity=(
+                    whole_body_com_velocity
+                ),
+                angular_momentum=(
+                    whole_body_angular_momentum
+                ),
+                left_foot_position=(
+                    left_foot_position_log
+                ),
+                right_foot_position=(
+                    right_foot_position_log
+                ),
+            )
 
         simulation_log.append(
             time=(
@@ -2277,22 +2310,35 @@ def run_walk(
     )
 
     # ========================================================
-    # OFFLINE CONTACT STABILITY CHECK
+    # OPTIONAL OFFLINE CONTACT STABILITY CHECK
     # ========================================================
 
-    print()
+    if ENABLE_CONTACT_STABILITY_CHECK:
 
-    print(
-        "Solving contact-stability QPs..."
-    )
+        print()
 
-    contact_stability_results = (
-        contact_stability_checker.solve_all()
-    )
+        print(
+            "Solving contact-stability QPs..."
+        )
 
-    contact_stability_checker.print_summary(
-        contact_stability_results
-    )
+        contact_stability_results = (
+            contact_stability_checker.solve_all()
+        )
+
+        contact_stability_checker.print_summary(
+            contact_stability_results
+        )
+
+    else:
+
+        print()
+
+        print(
+            "Contact-stability check skipped "
+            "(ENABLE_CONTACT_STABILITY_CHECK=False)."
+        )
+
+        contact_stability_results = None
 
     return (
         simulation_log,
@@ -2537,6 +2583,8 @@ def main():
         simulation_log
     )
 
+    # When ENABLE_CONTACT_STABILITY_CHECK is False,
+    # contact_stability_results is None.
     _ = (
         contact_stability_results
     )
