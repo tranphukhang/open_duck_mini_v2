@@ -167,19 +167,19 @@ def automatic_velocity_profile(
 
         return (
             0.035,
-            0.00,
+            -0.02,
         )
 
     if t < 6.0:
 
         return (
             0.035,
-            0.00,
+            -0.02,
         )
 
     return (
         0.035,
-        0.00,
+        -0.02,
     )
 
 
