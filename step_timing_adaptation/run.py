@@ -1,25 +1,14 @@
 # step_timing_adaptation/run.py
 #
+# TEST C:
+#   - friction in XML remains mu = 0.6
+#   - external push is completely disabled
+#   - velocity commands are reduced to 50% of the baseline
+#
 # Automatic 9-second experiment:
-#   0 <= t < 3 s : vx = +0.10 m/s, vy =  0.00 m/s
-#   3 <= t < 6 s : vx = +0.10 m/s, vy = -0.05 m/s
-#   6 <= t <= 9 s: vx = +0.10 m/s, vy =  0.00 m/s
-#
-# One external push is applied automatically at t = 5.0 s.
-#
-# After the simulation finishes, logged data are plotted by
-# simulation_plot.py.
-#
-# Additional logging in this version:
-#   - 10 leg joint angles
-#   - joint position limits read directly from the MuJoCo model
-#
-# Leg joints:
-#   left/right hip yaw
-#   left/right hip roll
-#   left/right hip pitch
-#   left/right knee
-#   left/right ankle
+#   0 <= t < 3 s : vx = +0.05 m/s, vy =  0.000 m/s
+#   3 <= t < 6 s : vx = +0.05 m/s, vy = -0.025 m/s
+#   6 <= t <=9 s: vx = +0.05 m/s, vy =  0.000 m/s
 
 from __future__ import annotations
 
@@ -43,17 +32,8 @@ ROOT_DIR = CURRENT_DIR.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-ROBOT_XML = (
-    ROOT_DIR
-    / "xmls"
-    / "open_duck_mini_v2.xml"
-)
-
-SCENE_XML = (
-    ROOT_DIR
-    / "xmls"
-    / "scene_flat_terrain.xml"
-)
+ROBOT_XML = ROOT_DIR / "xmls" / "open_duck_mini_v2.xml"
+SCENE_XML = ROOT_DIR / "xmls" / "scene_flat_terrain.xml"
 
 
 # ============================================================
@@ -115,9 +95,7 @@ else:
 # EXISTING PROJECT MODULES
 # ============================================================
 
-from lipm_mpc.run import (
-    settle_robot,
-)
+from lipm_mpc.run import settle_robot
 
 from footstep_planning.pinocchio_model import (
     PinocchioModel,
@@ -142,14 +120,11 @@ np.set_printoptions(
 DT = 0.0005
 SIMULATION_DURATION = 9.0
 
-# Centroidal/whole-body data are sampled at every physics step.
-# The MuJoCo XML currently uses timestep = 0.0005 s, and run_walk()
-# verifies that it matches DT before starting the experiment.
-
 FIRST_STANCE_SIDE = "left"
 
 SHOW_VIEWER = True
 REALTIME_PLAYBACK = True
+
 VIEWER_SYNC_PERIOD = 0.02
 STATUS_PRINT_PERIOD = 0.10
 
@@ -157,30 +132,34 @@ TIME_TOLERANCE = 1.0e-10
 
 
 # ============================================================
-# AUTOMATIC VELOCITY COMMAND
+# TEST C - VELOCITY COMMAND
 # ============================================================
 
 def automatic_velocity_profile(
     current_time: float,
 ) -> tuple[float, float]:
 
-    t = float(current_time)
+    t = float(
+        current_time
+    )
 
     if t < 3.0:
+
         return (
-            0.10,
-            0.00,
+            0.05,
+            0.000,
         )
 
     if t < 6.0:
+
         return (
-            0.10,
-            -0.05,
+            0.05,
+            -0.025,
         )
 
     return (
-        0.10,
-        0.00,
+        0.05,
+        0.000,
     )
 
 
@@ -193,13 +172,21 @@ COM_HEIGHT = 0.2044
 
 
 # ============================================================
-# AUTOMATIC PUSH
+# TEST C - EXTERNAL PUSH
 # ============================================================
+#
+# Push is completely disabled in this experiment.
+#
+# PUSH_TIME / PUSH_DURATION are retained only so the same code path
+# can be re-enabled later without restructuring run.py.
+# ============================================================
+
+ENABLE_AUTOMATIC_PUSH = False
 
 PUSH_TIME = 5.0
 
-PUSH_FORCE_X = +5.0
-PUSH_FORCE_Y = +2.5
+PUSH_FORCE_X = 0.0
+PUSH_FORCE_Y = 0.0
 
 PUSH_DURATION = 0.05
 
@@ -337,23 +324,12 @@ def get_contact_position(
 
 
 # ============================================================
-# LEG JOINT LOGGING HELPERS
+# LEG JOINT LOGGING
 # ============================================================
 
 def get_leg_joint_limits(
     mj_model,
 ):
-    """
-    Read leg-joint position limits directly from the MuJoCo model.
-
-    Returned values are in radians:
-
-        {
-            joint_name: (lower_limit, upper_limit)
-        }
-
-    If a joint is not limited, (-inf, +inf) is returned.
-    """
 
     joint_limits = {}
 
@@ -368,6 +344,7 @@ def get_leg_joint_limits(
         )
 
         if joint_id < 0:
+
             raise RuntimeError(
                 f"Joint '{joint_name}' was not found."
             )
@@ -412,11 +389,6 @@ def get_leg_joint_angles(
     mj_model,
     mj_data,
 ):
-    """
-    Return the current 10 leg-joint positions from MuJoCo qpos.
-
-    Returned angles are in radians.
-    """
 
     joint_angles = {}
 
@@ -431,6 +403,7 @@ def get_leg_joint_angles(
         )
 
         if joint_id < 0:
+
             raise RuntimeError(
                 f"Joint '{joint_name}' was not found."
             )
@@ -450,6 +423,7 @@ def get_leg_joint_angles(
         if not np.isfinite(
             angle
         ):
+
             raise RuntimeError(
                 f"Joint '{joint_name}' contains NaN/Inf."
             )
@@ -474,17 +448,6 @@ def update_mujoco_from_pinocchio(
     previous_qpos_mj,
     dt,
 ):
-    """
-    Update MuJoCo from the kinematic whole-body trajectory.
-
-    qpos is supplied by differential IK / Pinocchio integration.
-    qvel is reconstructed from two consecutive MuJoCo qpos samples
-    using mj_differentiatePos(), which correctly handles the free-joint
-    quaternion.
-
-    MuJoCo is used here as a rigid-body quantity evaluator; this does
-    not turn the current executor into a torque-driven simulation.
-    """
 
     q_mj = (
         robot.pin_to_mujoco(
@@ -500,17 +463,23 @@ def update_mujoco_from_pinocchio(
     if previous_qpos_mj.shape != (
         mj_model.nq,
     ):
+
         raise ValueError(
             "previous_qpos_mj has wrong shape."
         )
 
-    dt = float(dt)
+    dt = float(
+        dt
+    )
 
     if (
-        not np.isfinite(dt)
+        not np.isfinite(
+            dt
+        )
         or
         dt <= 0.0
     ):
+
         raise ValueError(
             "dt must be positive and finite."
         )
@@ -536,7 +505,6 @@ def update_mujoco_from_pinocchio(
         mj_data,
     )
 
-    # Compute subtree CoM velocity and angular momentum explicitly.
     mujoco.mj_subtreeVel(
         mj_model,
         mj_data,
@@ -553,16 +521,6 @@ def get_mujoco_centroidal_quantities(
     mj_data,
     robot_root_body_id,
 ):
-    """
-    Return whole-robot centroidal quantities for the subtree rooted
-    at the robot base body.
-
-    All returned vectors are expressed in the world frame:
-
-        p_G : whole-body CoM position
-        v_G : whole-body CoM linear velocity
-        L_G : angular momentum about the whole-body CoM
-    """
 
     body_id = int(
         robot_root_body_id
@@ -597,6 +555,7 @@ def get_mujoco_centroidal_quantities(
                 value
             )
         ):
+
             raise RuntimeError(
                 f"MuJoCo centroidal quantity {name} "
                 "contains NaN/Inf."
@@ -620,10 +579,13 @@ def compute_robot_mass(
     )
 
     if (
-        not np.isfinite(mass)
+        not np.isfinite(
+            mass
+        )
         or
         mass <= 0.0
     ):
+
         raise RuntimeError(
             f"Invalid robot mass: {mass}"
         )
@@ -666,7 +628,9 @@ def compute_nominal_steps(
 
     nominal_left = (
         compute_nominal_step(
-            planner=planner,
+            planner=(
+                planner
+            ),
             stance_side="left",
             desired_velocity_x=(
                 velocity_command.x
@@ -679,7 +643,9 @@ def compute_nominal_steps(
 
     nominal_right = (
         compute_nominal_step(
-            planner=planner,
+            planner=(
+                planner
+            ),
             stance_side="right",
             desired_velocity_x=(
                 velocity_command.x
@@ -717,7 +683,9 @@ def solve_adaptive_step(
             dcm
         ),
         stance_position=(
-            stance_position[0:2]
+            stance_position[
+                0:2
+            ]
         ),
         elapsed_time=(
             elapsed_time
@@ -751,7 +719,9 @@ def compute_nominal_initial_dcm(
 ):
 
     u0 = np.asarray(
-        stance_position[0:2],
+        stance_position[
+            0:2
+        ],
         dtype=float,
     )
 
@@ -804,7 +774,9 @@ def compute_consistent_initial_com_velocity(
     )
 
     com_xy = np.asarray(
-        com_position[0:2],
+        com_position[
+            0:2
+        ],
         dtype=float,
     )
 
@@ -857,10 +829,13 @@ def start_new_step(
     )
 
     if stance_side == "left":
+
         nominal_step = (
             nominal_left_step
         )
+
     else:
+
         nominal_step = (
             nominal_right_step
         )
@@ -901,7 +876,9 @@ def start_new_step(
         )
 
         landing_z = (
-            left_contact_position[2]
+            left_contact_position[
+                2
+            ]
         )
 
     else:
@@ -914,22 +891,30 @@ def start_new_step(
         )
 
         landing_z = (
-            right_contact_position[2]
+            right_contact_position[
+                2
+            ]
         )
 
     landing_position = (
         swing_start.copy()
     )
 
-    landing_position[0] = (
+    landing_position[
+        0
+    ] = (
         planner_result.step_location_x
     )
 
-    landing_position[1] = (
+    landing_position[
+        1
+    ] = (
         planner_result.step_location_y
     )
 
-    landing_position[2] = (
+    landing_position[
+        2
+    ] = (
         landing_z
     )
 
@@ -1026,6 +1011,7 @@ def advance_lipm(
         >
         TIME_TOLERANCE
     ):
+
         lipm.advance(
             remaining_dt
         )
@@ -1061,6 +1047,7 @@ def run_walk(
         rtol=0.0,
         atol=1.0e-12,
     ):
+
         raise RuntimeError(
             "MuJoCo physics timestep does not match DT: "
             f"model={physics_dt:.12f} s, "
@@ -1076,6 +1063,7 @@ def run_walk(
     )
 
     if robot_root_body_id < 0:
+
         raise RuntimeError(
             "MuJoCo body 'base' was not found."
         )
@@ -1114,14 +1102,14 @@ def run_walk(
 
     (
         left_contact_position,
-        left_rotation,
+        _,
     ) = (
         robot.get_left_foot_pose()
     )
 
     (
         right_contact_position,
-        right_rotation,
+        _,
     ) = (
         robot.get_right_foot_pose()
     )
@@ -1132,14 +1120,6 @@ def run_walk(
 
     right_contact_position = (
         right_contact_position.copy()
-    )
-
-    left_rotation = (
-        left_rotation.copy()
-    )
-
-    right_rotation = (
-        right_rotation.copy()
     )
 
     initial_com_actual = (
@@ -1171,9 +1151,13 @@ def run_walk(
         0.5
         *
         (
-            left_contact_position[2]
+            left_contact_position[
+                2
+            ]
             +
-            right_contact_position[2]
+            right_contact_position[
+                2
+            ]
         )
     )
 
@@ -1187,7 +1171,9 @@ def run_walk(
         initial_com_actual.copy()
     )
 
-    initial_com_reference[2] = (
+    initial_com_reference[
+        2
+    ] = (
         com_world_z
     )
 
@@ -1206,8 +1192,12 @@ def run_walk(
 
     command = (
         VelocityCommandSnapshot(
-            x=command_x,
-            y=command_y,
+            x=(
+                command_x
+            ),
+            y=(
+                command_y
+            ),
         )
     )
 
@@ -1242,10 +1232,13 @@ def run_walk(
     )
 
     if stance_side == "left":
+
         first_nominal_step = (
             nominal_left_step
         )
+
     else:
+
         first_nominal_step = (
             nominal_right_step
         )
@@ -1315,6 +1308,7 @@ def run_walk(
         >
         1.0e-10
     ):
+
         raise RuntimeError(
             "Initial DCM mismatch: "
             f"{initial_dcm_error:.3e}"
@@ -1416,8 +1410,6 @@ def run_walk(
         )
     )
 
-    # Previous MuJoCo configuration is needed to reconstruct qvel at
-    # every physics step with mj_differentiatePos().
     previous_qpos_mj = (
         mj_data.qpos.copy()
     )
@@ -1431,39 +1423,44 @@ def run_walk(
 
     print()
     print(
-        "Point-foot LIPM Step Timing Adaptation"
+        "Point-foot LIPM Step Timing Adaptation - TEST C"
     )
+
     print(
         f"Automatic experiment duration: "
         f"{SIMULATION_DURATION:.1f} s"
     )
+
     print(
         f"Physics/data sampling: dt={physics_dt:.7f} s"
         f" | fs={1.0 / physics_dt:.1f} Hz"
     )
+
     print(
         "Velocity profile:"
     )
+
     print(
         "  0 <= t < 3 s : "
-        "vx=+0.10 m/s, vy=+0.00 m/s"
+        "vx=+0.050 m/s, vy=+0.000 m/s"
     )
+
     print(
         "  3 <= t < 6 s : "
-        "vx=+0.10 m/s, vy=-0.05 m/s"
+        "vx=+0.050 m/s, vy=-0.025 m/s"
     )
+
     print(
         "  6 <= t <=9 s: "
-        "vx=+0.10 m/s, vy=+0.00 m/s"
+        "vx=+0.050 m/s, vy=+0.000 m/s"
     )
+
     print(
-        f"Automatic push: t={PUSH_TIME:.2f} s"
-        f" | F=({PUSH_FORCE_X:+.2f}, "
-        f"{PUSH_FORCE_Y:+.2f}) N"
-        f" | duration={PUSH_DURATION:.3f} s"
+        "Automatic push: DISABLED"
     )
 
     print()
+
     print(
         "Leg joint limits:"
     )
@@ -1495,6 +1492,7 @@ def run_walk(
             and
             not viewer.is_running()
         ):
+
             break
 
         if (
@@ -1504,6 +1502,7 @@ def run_walk(
             -
             TIME_TOLERANCE
         ):
+
             break
 
         # ====================================================
@@ -1535,8 +1534,12 @@ def run_walk(
 
             command = (
                 VelocityCommandSnapshot(
-                    x=new_command_x,
-                    y=new_command_y,
+                    x=(
+                        new_command_x
+                    ),
+                    y=(
+                        new_command_y
+                    ),
                 )
             )
 
@@ -1555,10 +1558,13 @@ def run_walk(
             )
 
             if stance_side == "left":
+
                 current_nominal_step = (
                     nominal_left_step
                 )
+
             else:
+
                 current_nominal_step = (
                     nominal_right_step
                 )
@@ -1570,10 +1576,15 @@ def run_walk(
             )
 
         # ====================================================
-        # AUTOMATIC PUSH -- EXACTLY ONCE
+        # AUTOMATIC PUSH
+        # ====================================================
+        #
+        # Explicitly disabled in Test C.
         # ====================================================
 
         if (
+            ENABLE_AUTOMATIC_PUSH
+            and
             not automatic_push_applied
             and
             kinematic_time
@@ -1587,9 +1598,7 @@ def run_walk(
                 PUSH_DURATION
             )
 
-            automatic_push_applied = (
-                True
-            )
+            automatic_push_applied = True
 
             print(
                 f"[PUSH] t={kinematic_time:.3f} s"
@@ -1624,36 +1633,14 @@ def run_walk(
 
             if swing_side == "left":
 
-                (
-                    _,
-                    actual_rotation,
-                ) = (
-                    robot.get_left_foot_pose()
-                )
-
                 left_contact_position = (
                     landing_position.copy()
                 )
 
-                left_rotation = (
-                    actual_rotation.copy()
-                )
-
             else:
-
-                (
-                    _,
-                    actual_rotation,
-                ) = (
-                    robot.get_right_foot_pose()
-                )
 
                 right_contact_position = (
                     landing_position.copy()
-                )
-
-                right_rotation = (
-                    actual_rotation.copy()
                 )
 
             stance_side = (
@@ -1770,11 +1757,15 @@ def run_walk(
                         new_result
                     )
 
-                    landing_position[0] = (
+                    landing_position[
+                        0
+                    ] = (
                         planner_result.step_location_x
                     )
 
-                    landing_position[1] = (
+                    landing_position[
+                        1
+                    ] = (
                         planner_result.step_location_y
                     )
 
@@ -1791,6 +1782,7 @@ def run_walk(
                         -
                         TIME_TOLERANCE
                     ):
+
                         planner_frozen = True
 
                 except RuntimeError as error:
@@ -1798,10 +1790,15 @@ def run_walk(
                     if (
                         "timing adaptation window is closed"
                         in
-                        str(error).lower()
+                        str(
+                            error
+                        ).lower()
                     ):
+
                         planner_frozen = True
+
                     else:
+
                         raise
 
         # ====================================================
@@ -1943,6 +1940,7 @@ def run_walk(
                 qdot_full
             )
         ):
+
             raise RuntimeError(
                 "Differential IK returned NaN/Inf."
             )
@@ -2056,6 +2054,8 @@ def run_walk(
         )
 
         push_active = (
+            ENABLE_AUTOMATIC_PUSH
+            and
             push_time_remaining
             >
             TIME_TOLERANCE
@@ -2082,43 +2082,26 @@ def run_walk(
         # ====================================================
         # CONTACT STABILITY RAW SAMPLE
         # ====================================================
-        #
-        # Only raw full-body/contact data are recorded here.
-        # The contact-feasibility QPs are solved after the
-        # walking simulation has finished so the derivatives
-        #
-        #     a_G = d(v_G)/dt
-        #     dL_G/dt
-        #
-        # can be reconstructed from the complete trajectory.
-        # ====================================================
 
         contact_stability_checker.record_sample(
-
             time=(
                 kinematic_time
             ),
-
             mj_data=(
                 mj_data
             ),
-
             whole_body_com_position=(
                 whole_body_com_position
             ),
-
             whole_body_com_velocity=(
                 whole_body_com_velocity
             ),
-
             angular_momentum=(
                 whole_body_angular_momentum
             ),
-
             left_foot_position=(
                 left_foot_position_log
             ),
-
             right_foot_position=(
                 right_foot_position_log
             ),
@@ -2278,6 +2261,7 @@ def run_walk(
             )
 
             if remaining > 0.0:
+
                 time.sleep(
                     remaining
                 )
@@ -2297,6 +2281,7 @@ def run_walk(
     # ========================================================
 
     print()
+
     print(
         "Solving contact-stability QPs..."
     )
@@ -2326,12 +2311,14 @@ def main():
     # ========================================================
 
     if not SCENE_XML.exists():
+
         raise FileNotFoundError(
             f"Scene file not found: "
             f"{SCENE_XML}"
         )
 
     if not ROBOT_XML.exists():
+
         raise FileNotFoundError(
             f"Robot XML not found: "
             f"{ROBOT_XML}"
@@ -2416,9 +2403,13 @@ def main():
 
     measured_step_width = float(
         abs(
-            left_position_initial[1]
+            left_position_initial[
+                1
+            ]
             -
-            right_position_initial[1]
+            right_position_initial[
+                1
+            ]
         )
     )
 
@@ -2431,6 +2422,7 @@ def main():
         <=
         1.0e-6
     ):
+
         raise RuntimeError(
             "Invalid measured foot separation: "
             f"{measured_step_width}"
@@ -2545,15 +2537,6 @@ def main():
         simulation_log
     )
 
-    # contact_stability_results is intentionally kept in memory.
-    # It contains:
-    #
-    #   - optimal force at every MuJoCo contact point,
-    #   - resultant left/right foot wrench,
-    #   - friction utilization,
-    #   - QP feasibility status and residuals.
-    #
-    # No contact-wrench plot/video is generated at this stage.
     _ = (
         contact_stability_results
     )
