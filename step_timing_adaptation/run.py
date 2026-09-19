@@ -75,6 +75,7 @@ if __package__:
 
     from .contact_force_reconstruction import (
         ContactForceReconstructor,
+        plot_contact_force_results,
     )
 
 else:
@@ -100,6 +101,7 @@ else:
 
     from contact_force_reconstruction import (
         ContactForceReconstructor,
+        plot_contact_force_results,
     )
 
 
@@ -2562,15 +2564,34 @@ def main():
         )
 
     # ========================================================
+    # CONTACT FORCE FIGURES
+    # ========================================================
+    #
+    # Create these figures first with show=False.
+    # plot_simulation_results() calls plt.show() at the end,
+    # therefore all motion, joint-angle, and contact-force
+    # figures are displayed together.
+    # ========================================================
+
+    if (
+        contact_force_results
+        is not None
+    ):
+
+        plot_contact_force_results(
+            contact_force_results,
+            mj_model=(
+                mj_model
+            ),
+            show=False,
+        )
+
+    # ========================================================
     # PLOT RESULTS AFTER SIMULATION
     # ========================================================
 
     plot_simulation_results(
         simulation_log
-    )
-
-    _ = (
-        contact_force_results
     )
 
 
