@@ -166,20 +166,20 @@ def automatic_velocity_profile(
     if t < 3.0:
 
         return (
-            0.05,
-            0.000,
+            0.03,
+            0.00,
         )
 
     if t < 6.0:
 
         return (
-            0.05,
-            -0.025,
+            0.03,
+            0.00,
         )
 
     return (
-        0.05,
-        0.000,
+        0.03,
+        0.00,
     )
 
 
@@ -215,14 +215,14 @@ PUSH_DURATION = 0.05
 # STEP BOUNDS
 # ============================================================
 
-STEP_LENGTH_MIN = -0.10
-STEP_LENGTH_MAX = +0.10
+STEP_LENGTH_MIN = -0.03
+STEP_LENGTH_MAX = +0.03
 
-STEP_WIDTH_MIN = -0.03
-STEP_WIDTH_MAX = +0.03
+STEP_WIDTH_MIN = -0.01
+STEP_WIDTH_MAX = +0.01
 
-STEP_TIME_MIN = 0.20
-STEP_TIME_MAX = 0.30
+STEP_TIME_MIN = 0.25
+STEP_TIME_MAX = 0.35
 
 
 # ============================================================
@@ -246,7 +246,7 @@ STEP_TIMING_GAP = 0.05
 # SWING FOOT
 # ============================================================
 
-SWING_HEIGHT = 0.04
+SWING_HEIGHT = 0.02
 
 
 # ============================================================
