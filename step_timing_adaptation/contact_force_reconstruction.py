@@ -1625,6 +1625,9 @@ class ContactForceReconstructor:
 # ============================================================
 # CONTACT FORCE PLOTTING
 # ============================================================
+# ============================================================
+# CONTACT FORCE PLOTTING
+# ============================================================
 
 def plot_contact_force_results(
     results,
@@ -1641,61 +1644,38 @@ def plot_contact_force_results(
         1) Fx: left foot, right foot, total
         2) Fy: left foot, right foot, total
         3) Fz: left foot, right foot, total
-        4) Resultant force norm: left, right, total
-        5) Resultant contact moments about each foot site
+        4) Resultant force norm: left foot, right foot, total
 
-    Important:
-        The six floating-base equations determine the required
-        net contact wrench, but they do not uniquely determine how
-        that wrench is distributed among multiple simultaneous
-        contact points.
-
-        Therefore, during multi-contact / double-support samples,
-        left-vs-right force sharing is the minimum-norm distribution
-        selected by np.linalg.lstsq(). The total force/wrench is the
-        quantity directly constrained by the six floating-base
-        equations.
+    Mx/My/Mz are intentionally not plotted at this stage.
     """
 
     import matplotlib.pyplot as plt
 
-    results = list(
-        results
-    )
+    results = list(results)
 
-    if len(
-        results
-    ) == 0:
-
+    if len(results) == 0:
         print(
             "No contact-force reconstruction results "
             "available for plotting."
         )
-
         return
 
     time = np.asarray(
-        [
-            result.time
-            for result
-            in results
-        ],
+        [result.time for result in results],
         dtype=float,
     )
 
     left_force = np.vstack(
         [
             result.left_resultant_force_world
-            for result
-            in results
+            for result in results
         ]
     )
 
     right_force = np.vstack(
         [
             result.right_resultant_force_world
-            for result
-            in results
+            for result in results
         ]
     )
 
@@ -1703,22 +1683,6 @@ def plot_contact_force_results(
         left_force
         +
         right_force
-    )
-
-    left_moment = np.vstack(
-        [
-            result.left_resultant_moment_world
-            for result
-            in results
-        ]
-    )
-
-    right_moment = np.vstack(
-        [
-            result.right_resultant_moment_world
-            for result
-            in results
-        ]
     )
 
     left_force_norm = np.linalg.norm(
@@ -1736,50 +1700,18 @@ def plot_contact_force_results(
         axis=1,
     )
 
-    # ========================================================
-    # BASIC SANITY CHECK
-    # ========================================================
-
     for name, value in (
-        (
-            "time",
-            time,
-        ),
-        (
-            "left_force",
-            left_force,
-        ),
-        (
-            "right_force",
-            right_force,
-        ),
-        (
-            "total_force",
-            total_force,
-        ),
-        (
-            "left_moment",
-            left_moment,
-        ),
-        (
-            "right_moment",
-            right_moment,
-        ),
+        ("time", time),
+        ("left_force", left_force),
+        ("right_force", right_force),
+        ("total_force", total_force),
     ):
-
         if not np.all(
-            np.isfinite(
-                value
-            )
+            np.isfinite(value)
         ):
-
             raise RuntimeError(
                 f"Plot data '{name}' contains NaN/Inf."
             )
-
-    # ========================================================
-    # OPTIONAL ROBOT WEIGHT
-    # ========================================================
 
     robot_weight = None
 
@@ -1794,9 +1726,7 @@ def plot_contact_force_results(
         gravity_vector = np.asarray(
             mj_model.opt.gravity,
             dtype=float,
-        ).reshape(
-            3
-        )
+        ).reshape(3)
 
         gravity_magnitude = float(
             np.linalg.norm(
@@ -1805,28 +1735,19 @@ def plot_contact_force_results(
         )
 
         if (
-            np.isfinite(
-                robot_mass
-            )
+            np.isfinite(robot_mass)
             and
             robot_mass > 0.0
             and
-            np.isfinite(
-                gravity_magnitude
-            )
+            np.isfinite(gravity_magnitude)
             and
             gravity_magnitude > 0.0
         ):
-
             robot_weight = (
                 robot_mass
                 *
                 gravity_magnitude
             )
-
-    # ========================================================
-    # FORCE COMPONENT FIGURES
-    # ========================================================
 
     component_names = (
         "Fx",
@@ -1880,7 +1801,6 @@ def plot_contact_force_results(
             and
             robot_weight is not None
         ):
-
             axis.axhline(
                 y=robot_weight,
                 linestyle="--",
@@ -1913,10 +1833,6 @@ def plot_contact_force_results(
         )
 
         figure.tight_layout()
-
-    # ========================================================
-    # FORCE NORM FIGURE
-    # ========================================================
 
     figure, axis = plt.subplots(
         figsize=(
@@ -1969,75 +1885,6 @@ def plot_contact_force_results(
 
     figure.tight_layout()
 
-    # ========================================================
-    # RESULTANT MOMENT FIGURES
-    # ========================================================
-
-    moment_names = (
-        "Mx",
-        "My",
-        "Mz",
-    )
-
-    for component_index, component_name in enumerate(
-        moment_names
-    ):
-
-        figure, axis = plt.subplots(
-            figsize=(
-                11,
-                5,
-            )
-        )
-
-        axis.plot(
-            time,
-            left_moment[
-                :,
-                component_index
-            ],
-            linewidth=1.3,
-            label="Left foot",
-        )
-
-        axis.plot(
-            time,
-            right_moment[
-                :,
-                component_index
-            ],
-            linewidth=1.3,
-            label="Right foot",
-        )
-
-        axis.set_title(
-            f"Resultant Contact Moment about Foot Site - "
-            f"{component_name}"
-        )
-
-        axis.set_xlabel(
-            "Time (s)"
-        )
-
-        axis.set_ylabel(
-            f"{component_name} (N m)"
-        )
-
-        axis.grid(
-            True,
-            alpha=0.3,
-        )
-
-        axis.legend(
-            loc="best"
-        )
-
-        figure.tight_layout()
-
-    # ========================================================
-    # PRINT COMPONENT STATISTICS
-    # ========================================================
-
     print()
 
     print(
@@ -2053,7 +1900,6 @@ def plot_contact_force_results(
     )
 
     if robot_weight is not None:
-
         print(
             f"Robot weight mg        : "
             f"{robot_weight:.6f} N"
@@ -2086,5 +1932,4 @@ def plot_contact_force_results(
     print()
 
     if show:
-
         plt.show()
