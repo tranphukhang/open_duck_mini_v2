@@ -16,6 +16,23 @@ import numpy as np
 MATRIX_RCOND = 1.0e-10
 CONTACT_DISTANCE_TOLERANCE = 1.0e-10
 
+# Numerical tolerances for the unilateral contact-force solve.
+#
+# The constrained problem is:
+#
+#     min  1/2 ||f_c||^2
+#
+#     s.t. A f_c = b
+#          Fz_i >= 0
+#
+# where each point-contact force is stored as:
+#
+#     [Fx_i, Fy_i, Fz_i].
+#
+# No friction-cone constraint is imposed yet.
+UNILATERAL_FORCE_TOLERANCE = 1.0e-10
+DYNAMICS_EQUALITY_TOLERANCE = 1.0e-9
+
 FLOOR_GEOM_NAME = "floor"
 
 LEFT_FOOT_GEOM_NAME = "left_foot_bottom_tpu"
@@ -88,6 +105,14 @@ class ContactForceResult:
     dynamics_residual_inf: float
     dynamics_residual_l2: float
 
+    # True only when a force distribution exists that satisfies
+    # both the six floating-base dynamic equations and:
+    #
+    #     Fz_i >= 0
+    #
+    # for every active point contact.
+    unilateral_feasible: bool
+
     point_contact_forces: tuple[PointContactForce, ...]
 
     left_resultant_force_world: np.ndarray
@@ -134,32 +159,43 @@ class ContactForceReconstructor:
     IMPORTANT
     ------------------------------------------------------------
 
-    This module intentionally DOES NOT impose:
+    This module imposes the unilateral normal-force constraint:
 
-        - f_n >= 0
+        Fz_i >= 0
+
+    for every active foot-ground point contact. Because the current
+    ground is horizontal in the MuJoCo world frame, world +z is the
+    contact-normal direction.
+
+    This module still DOES NOT impose:
+
         - friction cone / friction pyramid
         - CoP constraints
         - torque limits
-        - contact-stability classification
 
-    It only asks:
+    The reconstructed force distribution is obtained from:
 
-        "What point-contact force distribution is required by the
-         current q, qdot, qdd trajectory?"
-
-    When there are more force unknowns than the six floating-base
-    equations, the solution is not unique. We choose the minimum
-    Euclidean-norm solution:
-
-        min ||f_c||_2
+        min  1/2 ||f_c||_2^2
 
         subject to:
 
             J_c,b^T f_c
                 = M_b qdd + h_b
 
-    np.linalg.lstsq() returns this minimum-norm solution for the
-    underdetermined system.
+            Fz_i >= 0
+
+    When the unconstrained minimum-norm solution already satisfies
+    Fz_i >= 0, it is kept directly.
+
+    Otherwise, the code solves the same convex problem with an exact
+    active-set enumeration over the normal-force bounds Fz_i = 0.
+    With the current MuJoCo contact set (typically only a few point
+    contacts), this avoids adding an external QP-solver dependency.
+
+    If no force distribution can satisfy both the floating-base
+    dynamics and Fz_i >= 0 at one sample, that sample is explicitly
+    marked unilateral-infeasible rather than clipping a negative
+    normal force after the solve.
     """
 
     def __init__(
@@ -760,6 +796,373 @@ class ContactForceReconstructor:
 
 
     # ========================================================
+    # UNILATERAL MINIMUM-NORM FORCE SOLVER
+    # ========================================================
+
+    @staticmethod
+    def _solve_unilateral_minimum_norm(
+        *,
+        A,
+        b,
+        number_contacts,
+    ):
+        """
+        Solve the convex force-distribution problem:
+
+            min  1/2 ||f||^2
+
+            s.t. A f = b
+                 Fz_i >= 0
+
+        where:
+
+            f =
+                [Fx_1, Fy_1, Fz_1,
+                 Fx_2, Fy_2, Fz_2,
+                 ...]
+
+        The unconstrained minimum-norm solution is checked first.
+
+        If it violates Fz_i >= 0, the solver enumerates active sets
+        of the unilateral constraints. For one active constraint,
+        Fz_i is fixed exactly to zero. On each resulting affine face,
+        np.linalg.lstsq() gives the minimum-norm force vector.
+
+        Because the current contact set is small, this exact active-set
+        enumeration is practical and keeps this module independent of
+        external QP packages.
+
+        Returns
+        -------
+        contact_force_vector : np.ndarray | None
+            Minimum-norm unilateral-feasible force vector. None means
+            the equality dynamics and Fz >= 0 are jointly infeasible
+            within numerical tolerance.
+
+        residual_inf : float
+            Infinity norm of A f - b for the returned solution.
+
+        residual_l2 : float
+            Euclidean norm of A f - b for the returned solution.
+        """
+
+        A = np.asarray(
+            A,
+            dtype=float,
+        )
+
+        b = np.asarray(
+            b,
+            dtype=float,
+        ).reshape(
+            A.shape[0]
+        )
+
+        number_contacts = int(
+            number_contacts
+        )
+
+        number_force_variables = (
+            3
+            *
+            number_contacts
+        )
+
+        if A.shape[1] != number_force_variables:
+
+            raise ValueError(
+                "A has an unexpected number of force columns."
+            )
+
+        normal_indices = np.arange(
+            2,
+            number_force_variables,
+            3,
+            dtype=int,
+        )
+
+        equality_tolerance = (
+            DYNAMICS_EQUALITY_TOLERANCE
+            *
+            max(
+                1.0,
+                float(
+                    np.linalg.norm(
+                        b,
+                        ord=np.inf,
+                    )
+                ),
+            )
+        )
+
+        # ----------------------------------------------------
+        # First try the ordinary minimum-norm solution.
+        # ----------------------------------------------------
+
+        unconstrained_force, _, _, _ = (
+            np.linalg.lstsq(
+                A,
+                b,
+                rcond=MATRIX_RCOND,
+            )
+        )
+
+        unconstrained_residual = (
+            A
+            @
+            unconstrained_force
+            -
+            b
+        )
+
+        unconstrained_residual_inf = float(
+            np.linalg.norm(
+                unconstrained_residual,
+                ord=np.inf,
+            )
+        )
+
+        if (
+            unconstrained_residual_inf
+            <=
+            equality_tolerance
+            and
+            np.all(
+                unconstrained_force[
+                    normal_indices
+                ]
+                >=
+                0.0
+            )
+        ):
+
+            return (
+                unconstrained_force,
+                unconstrained_residual_inf,
+                float(
+                    np.linalg.norm(
+                        unconstrained_residual
+                    )
+                ),
+            )
+
+        # ----------------------------------------------------
+        # Exact active-set enumeration.
+        #
+        # If a normal-force inequality is active:
+        #
+        #     Fz_i = 0.
+        #
+        # All remaining variables are free. We solve the
+        # minimum-norm equality problem on that affine face.
+        # ----------------------------------------------------
+
+        best_force = None
+        best_norm_squared = float(
+            "inf"
+        )
+        best_residual_inf = float(
+            "nan"
+        )
+        best_residual_l2 = float(
+            "nan"
+        )
+
+        all_variable_indices = np.arange(
+            number_force_variables,
+            dtype=int,
+        )
+
+        number_active_set_combinations = (
+            1
+            <<
+            number_contacts
+        )
+
+        # mask = 0 was already tested by the unconstrained solve.
+        for active_mask in range(
+            1,
+            number_active_set_combinations,
+        ):
+
+            active_normal_indices = []
+
+            for contact_index in range(
+                number_contacts
+            ):
+
+                if (
+                    active_mask
+                    &
+                    (
+                        1
+                        <<
+                        contact_index
+                    )
+                ):
+
+                    active_normal_indices.append(
+                        int(
+                            normal_indices[
+                                contact_index
+                            ]
+                        )
+                    )
+
+            active_normal_indices = np.asarray(
+                active_normal_indices,
+                dtype=int,
+            )
+
+            free_variable_mask = np.ones(
+                number_force_variables,
+                dtype=bool,
+            )
+
+            free_variable_mask[
+                active_normal_indices
+            ] = False
+
+            free_variable_indices = (
+                all_variable_indices[
+                    free_variable_mask
+                ]
+            )
+
+            if free_variable_indices.size == 0:
+
+                continue
+
+            A_free = (
+                A[
+                    :,
+                    free_variable_indices
+                ]
+            )
+
+            free_force, _, _, _ = (
+                np.linalg.lstsq(
+                    A_free,
+                    b,
+                    rcond=MATRIX_RCOND,
+                )
+            )
+
+            candidate_force = np.zeros(
+                number_force_variables,
+                dtype=float,
+            )
+
+            candidate_force[
+                free_variable_indices
+            ] = (
+                free_force
+            )
+
+            # ------------------------------------------------
+            # Unilateral feasibility.
+            # ------------------------------------------------
+
+            candidate_normal_force = (
+                candidate_force[
+                    normal_indices
+                ]
+            )
+
+            if np.any(
+                candidate_normal_force
+                <
+                -UNILATERAL_FORCE_TOLERANCE
+            ):
+
+                continue
+
+            # Remove tiny negative round-off values only.
+            tiny_negative_normal = (
+                (
+                    candidate_normal_force
+                    <
+                    0.0
+                )
+                &
+                (
+                    candidate_normal_force
+                    >=
+                    -UNILATERAL_FORCE_TOLERANCE
+                )
+            )
+
+            if np.any(
+                tiny_negative_normal
+            ):
+
+                candidate_force[
+                    normal_indices[
+                        tiny_negative_normal
+                    ]
+                ] = 0.0
+
+            candidate_residual = (
+                A
+                @
+                candidate_force
+                -
+                b
+            )
+
+            candidate_residual_inf = float(
+                np.linalg.norm(
+                    candidate_residual,
+                    ord=np.inf,
+                )
+            )
+
+            if (
+                candidate_residual_inf
+                >
+                equality_tolerance
+            ):
+
+                continue
+
+            candidate_norm_squared = float(
+                candidate_force
+                @
+                candidate_force
+            )
+
+            if (
+                candidate_norm_squared
+                <
+                best_norm_squared
+            ):
+
+                best_force = (
+                    candidate_force.copy()
+                )
+
+                best_norm_squared = (
+                    candidate_norm_squared
+                )
+
+                best_residual_inf = (
+                    candidate_residual_inf
+                )
+
+                best_residual_l2 = float(
+                    np.linalg.norm(
+                        candidate_residual
+                    )
+                )
+
+        return (
+            best_force,
+            best_residual_inf,
+            best_residual_l2,
+        )
+
+
+    # ========================================================
     # SOLVE ONE SAMPLE
     # ========================================================
 
@@ -896,6 +1299,7 @@ class ContactForceReconstructor:
                 dynamics_residual_l2=float(
                     "nan"
                 ),
+                unilateral_feasible=False,
                 point_contact_forces=tuple(),
                 left_resultant_force_world=(
                     zero.copy()
@@ -970,47 +1374,94 @@ class ContactForceReconstructor:
         )
 
         # ----------------------------------------------------
-        # Minimum-norm force solution.
+        # Minimum-norm force solution with unilateral contact:
         #
-        # For the usual single-support case with 3 contact points:
+        #     min  1/2 ||f_c||^2
         #
-        #     A_base in R^(6 x 9)
-        #     f_c    in R^9
+        #     s.t. A_base f_c = base_required
+        #          Fz_i >= 0
         #
-        # so the force distribution is underdetermined.
-        #
-        # np.linalg.lstsq() returns the minimum-norm solution.
+        # No friction-cone constraint is imposed yet.
         # ----------------------------------------------------
 
-        contact_force_vector, _, _, _ = (
-            np.linalg.lstsq(
-                A_base,
-                base_required,
-                rcond=MATRIX_RCOND,
+        (
+            contact_force_vector,
+            residual_inf,
+            residual_l2,
+        ) = (
+            self._solve_unilateral_minimum_norm(
+                A=(
+                    A_base
+                ),
+                b=(
+                    base_required
+                ),
+                number_contacts=(
+                    number_contacts
+                ),
             )
         )
 
-        residual = (
-            A_base
-            @
+        unilateral_feasible = (
             contact_force_vector
-            -
-            base_required
+            is not None
         )
 
-        residual_inf = float(
-            np.max(
-                np.abs(
-                    residual
-                )
-            )
-        )
+        # ----------------------------------------------------
+        # If no unilateral-feasible force distribution exists,
+        # do not clip a negative Fz after the solve. That would
+        # destroy the dynamic equality A f = b.
+        #
+        # Instead mark this sample as infeasible. NaN resultants
+        # make the invalid interval appear as a gap in the plots.
+        # ----------------------------------------------------
 
-        residual_l2 = float(
-            np.linalg.norm(
-                residual
+        if not unilateral_feasible:
+
+            nan3 = np.full(
+                3,
+                np.nan,
+                dtype=float,
             )
-        )
+
+            return ContactForceResult(
+                time=float(
+                    sample.time
+                ),
+                number_contacts=int(
+                    number_contacts
+                ),
+                dynamics_rank=int(
+                    dynamics_rank
+                ),
+                dynamics_condition_number=float(
+                    condition_number
+                ),
+                qacc=qacc.copy(),
+                base_required_generalized_force=(
+                    base_required.copy()
+                ),
+                dynamics_residual_inf=float(
+                    "nan"
+                ),
+                dynamics_residual_l2=float(
+                    "nan"
+                ),
+                unilateral_feasible=False,
+                point_contact_forces=tuple(),
+                left_resultant_force_world=(
+                    nan3.copy()
+                ),
+                left_resultant_moment_world=(
+                    nan3.copy()
+                ),
+                right_resultant_force_world=(
+                    nan3.copy()
+                ),
+                right_resultant_moment_world=(
+                    nan3.copy()
+                ),
+            )
 
         # ----------------------------------------------------
         # Resultant force / moment for each foot.
@@ -1142,6 +1593,7 @@ class ContactForceReconstructor:
             dynamics_residual_l2=float(
                 residual_l2
             ),
+            unilateral_feasible=True,
             point_contact_forces=tuple(
                 point_forces
             ),
@@ -1381,16 +1833,30 @@ class ContactForceReconstructor:
             )
         )
 
+        unilateral_feasible = [
+            result
+            for result
+            in with_contact
+            if result.unilateral_feasible
+        ]
+
+        unilateral_infeasible = [
+            result
+            for result
+            in with_contact
+            if not result.unilateral_feasible
+        ]
+
         residual_inf = [
             result.dynamics_residual_inf
             for result
-            in with_contact
+            in unilateral_feasible
         ]
 
         condition_number = [
             result.dynamics_condition_number
             for result
-            in with_contact
+            in unilateral_feasible
         ]
 
         left_force_norm = [
@@ -1398,7 +1864,7 @@ class ContactForceReconstructor:
                 result.left_resultant_force_world
             )
             for result
-            in with_contact
+            in unilateral_feasible
         ]
 
         right_force_norm = [
@@ -1406,7 +1872,7 @@ class ContactForceReconstructor:
                 result.right_resultant_force_world
             )
             for result
-            in with_contact
+            in unilateral_feasible
         ]
 
         (
@@ -1478,6 +1944,14 @@ class ContactForceReconstructor:
 
         print(
             f"No-contact samples     : {no_contact_count}"
+        )
+
+        print(
+            f"Unilateral feasible    : {len(unilateral_feasible)}"
+        )
+
+        print(
+            f"Unilateral infeasible  : {len(unilateral_infeasible)}"
         )
 
         print()
@@ -1645,6 +2119,10 @@ def plot_contact_force_results(
 
     No total force of the two feet is calculated or plotted here.
     Mx/My/Mz are also intentionally not plotted at this stage.
+
+    Samples where the six floating-base equations cannot be satisfied
+    together with Fz_i >= 0 are stored as NaN and therefore appear as
+    gaps in the force plots.
     """
 
     import matplotlib.pyplot as plt
@@ -1666,6 +2144,27 @@ def plot_contact_force_results(
         )
 
         return
+
+    unilateral_infeasible_count = sum(
+        1
+        for result
+        in results
+        if (
+            result.number_contacts
+            >
+            0
+            and
+            not result.unilateral_feasible
+        )
+    )
+
+    if unilateral_infeasible_count > 0:
+
+        print(
+            f"Contact-force plot: "
+            f"{unilateral_infeasible_count} samples are "
+            "unilateral-infeasible and will appear as gaps."
+        )
 
     # ========================================================
     # DATA
@@ -1725,14 +2224,14 @@ def plot_contact_force_results(
         ),
     ):
 
-        if not np.all(
-            np.isfinite(
+        if np.any(
+            np.isinf(
                 value
             )
         ):
 
             raise RuntimeError(
-                f"Plot data '{name}' contains NaN/Inf."
+                f"Plot data '{name}' contains Inf."
             )
 
     # ========================================================
@@ -1892,13 +2391,30 @@ def plot_contact_force_results(
                 ]
             )
 
+            finite_component = (
+                component[
+                    np.isfinite(
+                        component
+                    )
+                ]
+            )
+
+            if finite_component.size == 0:
+
+                print(
+                    f"{component_name:>2s}"
+                    " | no unilateral-feasible samples"
+                )
+
+                continue
+
             print(
                 f"{component_name:>2s}"
-                f" | p50={np.percentile(component, 50.0):+.6f} N"
-                f" | p05={np.percentile(component, 5.0):+.6f} N"
-                f" | p95={np.percentile(component, 95.0):+.6f} N"
-                f" | min={np.min(component):+.6f} N"
-                f" | max={np.max(component):+.6f} N"
+                f" | p50={np.percentile(finite_component, 50.0):+.6f} N"
+                f" | p05={np.percentile(finite_component, 5.0):+.6f} N"
+                f" | p95={np.percentile(finite_component, 95.0):+.6f} N"
+                f" | min={np.min(finite_component):+.6f} N"
+                f" | max={np.max(finite_component):+.6f} N"
             )
 
     print(
