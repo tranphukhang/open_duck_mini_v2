@@ -29,9 +29,52 @@ CONTACT_DISTANCE_TOLERANCE = 1.0e-10
 #
 #     [Fx_i, Fy_i, Fz_i].
 #
-# No friction-cone constraint is imposed.
+# The friction cone is optional; see ENABLE_FRICTION_CONE below.
 UNILATERAL_FORCE_TOLERANCE = 1.0e-10
 DYNAMICS_EQUALITY_TOLERANCE = 1.0e-9
+
+
+# ============================================================
+# OPTIONAL FRICTION-CONE CONSTRAINT
+# ============================================================
+#
+# False:
+#   Keep the original solver behavior:
+#
+#       min 1/2 ||f_c||^2
+#
+#       s.t. A f_c = b
+#            Fz_i >= 0
+#
+# True:
+#   After finding a unilateral-feasible solution, additionally solve:
+#
+#       min 1/2 ||f_c||^2
+#
+#       s.t. A f_c = b
+#            Fz_i >= 0
+#            sqrt(Fx_i^2 + Fy_i^2) <= mu_i Fz_i
+#
+# for every active point contact.
+#
+# mu_i is read directly from MuJoCo's effective contact friction.
+#
+# Because the current ground is horizontal, world +z is the contact
+# normal and world x/y span the tangential plane.
+#
+# IMPORTANT:
+#   When this flag is False, friction ratios are still computed for
+#   diagnostic purposes, but the friction cone is NOT enforced.
+# ============================================================
+
+ENABLE_FRICTION_CONE = False
+
+FRICTION_CONE_TOLERANCE = 1.0e-8
+FRICTION_TANGENTIAL_EPS = 1.0e-12
+
+FRICTION_SOLVER_MAX_ITERATIONS = 300
+FRICTION_SOLVER_FTOL = 1.0e-12
+
 
 FLOOR_GEOM_NAME = "floor"
 
@@ -74,6 +117,19 @@ class PointContactForce:
     position_world: np.ndarray
     force_world: np.ndarray
 
+    # Effective sliding-friction coefficient used by the optional
+    # isotropic Coulomb friction cone.
+    friction_coefficient: float
+
+    # rho = sqrt(Fx^2 + Fy^2) / (mu * Fz)
+    #
+    # rho <= 1:
+    #     inside/on the friction cone
+    #
+    # rho > 1:
+    #     outside the friction cone
+    friction_ratio: float
+
 
 @dataclass(frozen=True)
 class ContactForceResult:
@@ -112,6 +168,24 @@ class ContactForceResult:
     #
     # for every active point contact.
     unilateral_feasible: bool
+
+    # True when the friction-cone constraint was enabled for this
+    # reconstruction run.
+    friction_cone_enabled: bool
+
+    # When friction_cone_enabled is:
+    #
+    #   False -> None
+    #   True  -> True/False depending on feasibility.
+    friction_cone_feasible: bool | None
+
+    # Maximum point-contact friction ratio for the accepted solution.
+    #
+    # If the friction cone is disabled, this is only a diagnostic
+    # value computed from the unilateral minimum-norm solution.
+    #
+    # NaN is used when no valid force solution exists.
+    max_friction_ratio: float
 
     point_contact_forces: tuple[PointContactForce, ...]
 
@@ -167,9 +241,18 @@ class ContactForceReconstructor:
     ground is horizontal in the MuJoCo world frame, world +z is the
     contact-normal direction.
 
-    This module still DOES NOT impose:
+    This module always imposes the unilateral normal-force constraint.
 
-        - friction cone / friction pyramid
+    The Coulomb friction cone can be enabled with:
+
+        ENABLE_FRICTION_CONE = True
+
+    When enabled, each active point contact additionally satisfies:
+
+        sqrt(Fx_i^2 + Fy_i^2) <= mu_i Fz_i
+
+    The module still DOES NOT impose:
+
         - CoP constraints
         - torque limits
 
@@ -582,11 +665,62 @@ class ContactForceReconstructor:
                 3
             ).copy()
 
+            # ------------------------------------------------
+            # Effective sliding friction coefficient.
+            #
+            # MuJoCo stores contact friction coefficients in:
+            #
+            #     contact.friction
+            #
+            # For condim >= 3, the first two entries correspond
+            # to the two tangential directions. The current model
+            # uses isotropic sliding friction, but taking the smaller
+            # of the two values also gives a conservative isotropic
+            # cone if they ever differ.
+            # ------------------------------------------------
+
+            contact_friction = np.asarray(
+                contact.friction,
+                dtype=float,
+            ).reshape(
+                -1
+            )
+
+            if contact_friction.size < 2:
+
+                raise RuntimeError(
+                    "MuJoCo contact does not provide two "
+                    "tangential friction coefficients."
+                )
+
+            friction_coefficient = float(
+                min(
+                    contact_friction[0],
+                    contact_friction[1],
+                )
+            )
+
+            if (
+                not np.isfinite(
+                    friction_coefficient
+                )
+                or
+                friction_coefficient
+                <
+                0.0
+            ):
+
+                raise RuntimeError(
+                    "Invalid MuJoCo contact friction coefficient: "
+                    f"{friction_coefficient}"
+                )
+
             contacts.append(
                 (
                     foot_side,
                     contact_position,
                     foot_body_id,
+                    friction_coefficient,
                 )
             )
 
@@ -703,6 +837,7 @@ class ContactForceReconstructor:
             _,
             position_world,
             foot_body_id,
+            _,
         ) in enumerate(
             contacts
         ):
@@ -1163,6 +1298,760 @@ class ContactForceReconstructor:
 
 
     # ========================================================
+    # FRICTION RATIO
+    # ========================================================
+
+    @staticmethod
+    def _friction_ratios(
+        *,
+        contact_force_vector,
+        friction_coefficients,
+    ) -> np.ndarray:
+        """
+        Compute one Coulomb friction ratio for each point contact:
+
+            rho_i =
+                sqrt(Fx_i^2 + Fy_i^2)
+                ---------------------
+                    mu_i * Fz_i
+
+        Interpretation:
+
+            rho_i < 1  -> inside the cone
+            rho_i = 1  -> on the cone boundary
+            rho_i > 1  -> outside the cone
+
+        If both tangential force and mu*Fz are effectively zero,
+        rho is defined as zero.
+
+        If mu*Fz is zero but tangential force is nonzero, rho is +inf.
+        """
+
+        force = np.asarray(
+            contact_force_vector,
+            dtype=float,
+        ).reshape(
+            -1
+        )
+
+        mu = np.asarray(
+            friction_coefficients,
+            dtype=float,
+        ).reshape(
+            -1
+        )
+
+        number_contacts = (
+            mu.size
+        )
+
+        if force.size != 3 * number_contacts:
+
+            raise ValueError(
+                "Unexpected force-vector size in friction-ratio "
+                "calculation."
+            )
+
+        ratios = np.zeros(
+            number_contacts,
+            dtype=float,
+        )
+
+        for contact_index in range(
+            number_contacts
+        ):
+
+            column = (
+                3
+                *
+                contact_index
+            )
+
+            fx = float(
+                force[
+                    column
+                ]
+            )
+
+            fy = float(
+                force[
+                    column + 1
+                ]
+            )
+
+            fz = float(
+                force[
+                    column + 2
+                ]
+            )
+
+            tangential = float(
+                np.hypot(
+                    fx,
+                    fy,
+                )
+            )
+
+            capacity = float(
+                mu[
+                    contact_index
+                ]
+                *
+                max(
+                    0.0,
+                    fz,
+                )
+            )
+
+            if (
+                capacity
+                <=
+                FRICTION_TANGENTIAL_EPS
+            ):
+
+                if (
+                    tangential
+                    <=
+                    FRICTION_TANGENTIAL_EPS
+                ):
+
+                    ratios[
+                        contact_index
+                    ] = 0.0
+
+                else:
+
+                    ratios[
+                        contact_index
+                    ] = float(
+                        "inf"
+                    )
+
+            else:
+
+                ratios[
+                    contact_index
+                ] = (
+                    tangential
+                    /
+                    capacity
+                )
+
+        return ratios
+
+
+    # ========================================================
+    # FRICTION-CONE MINIMUM-NORM FORCE SOLVER
+    # ========================================================
+
+    @staticmethod
+    def _solve_friction_cone_minimum_norm(
+        *,
+        A,
+        b,
+        number_contacts,
+        friction_coefficients,
+        initial_force,
+    ):
+        """
+        Solve:
+
+            min  1/2 ||f||^2
+
+            s.t. A f = b
+                 Fz_i >= 0
+                 sqrt(Fx_i^2 + Fy_i^2) <= mu_i Fz_i
+
+        for every active point contact.
+
+        The problem is a convex second-order-cone force-distribution
+        problem. Here it is solved numerically with SciPy SLSQP to
+        avoid introducing an additional dedicated SOCP package.
+
+        The already computed unilateral minimum-norm force is used as
+        the initial guess. If that force already satisfies the cone,
+        it is returned directly and SLSQP is skipped.
+
+        Returns
+        -------
+        contact_force_vector : np.ndarray | None
+
+        residual_inf : float
+
+        residual_l2 : float
+        """
+
+        try:
+
+            from scipy.optimize import (
+                minimize,
+            )
+
+        except ImportError as error:
+
+            raise RuntimeError(
+                "ENABLE_FRICTION_CONE=True requires SciPy. "
+                "Install it with: pip install scipy"
+            ) from error
+
+        A = np.asarray(
+            A,
+            dtype=float,
+        )
+
+        b = np.asarray(
+            b,
+            dtype=float,
+        ).reshape(
+            A.shape[0]
+        )
+
+        number_contacts = int(
+            number_contacts
+        )
+
+        mu = np.asarray(
+            friction_coefficients,
+            dtype=float,
+        ).reshape(
+            number_contacts
+        )
+
+        number_force_variables = (
+            3
+            *
+            number_contacts
+        )
+
+        if A.shape[1] != number_force_variables:
+
+            raise ValueError(
+                "A has an unexpected number of force columns."
+            )
+
+        if (
+            np.any(
+                ~np.isfinite(
+                    mu
+                )
+            )
+            or
+            np.any(
+                mu
+                <
+                0.0
+            )
+        ):
+
+            raise ValueError(
+                "Friction coefficients must be finite and nonnegative."
+            )
+
+        initial_force = np.asarray(
+            initial_force,
+            dtype=float,
+        ).reshape(
+            number_force_variables
+        )
+
+        normal_indices = np.arange(
+            2,
+            number_force_variables,
+            3,
+            dtype=int,
+        )
+
+        equality_tolerance = (
+            DYNAMICS_EQUALITY_TOLERANCE
+            *
+            max(
+                1.0,
+                float(
+                    np.linalg.norm(
+                        b,
+                        ord=np.inf,
+                    )
+                ),
+            )
+        )
+
+        # ----------------------------------------------------
+        # Helper: equality residual.
+        # ----------------------------------------------------
+
+        def equality_function(
+            force,
+        ):
+
+            return (
+                A
+                @
+                force
+                -
+                b
+            )
+
+
+        def equality_jacobian(
+            force,
+        ):
+
+            _ = force
+
+            return A
+
+
+        # ----------------------------------------------------
+        # Helper: exact circular Coulomb friction cone.
+        #
+        # For each contact:
+        #
+        #     g_i(f) =
+        #         mu_i Fz_i
+        #         -
+        #         sqrt(Fx_i^2 + Fy_i^2)
+        #
+        # Feasible:
+        #
+        #     g_i(f) >= 0
+        # ----------------------------------------------------
+
+        def friction_function(
+            force,
+        ):
+
+            values = np.zeros(
+                number_contacts,
+                dtype=float,
+            )
+
+            for contact_index in range(
+                number_contacts
+            ):
+
+                column = (
+                    3
+                    *
+                    contact_index
+                )
+
+                fx = float(
+                    force[
+                        column
+                    ]
+                )
+
+                fy = float(
+                    force[
+                        column + 1
+                    ]
+                )
+
+                fz = float(
+                    force[
+                        column + 2
+                    ]
+                )
+
+                values[
+                    contact_index
+                ] = (
+                    mu[
+                        contact_index
+                    ]
+                    *
+                    fz
+                    -
+                    np.hypot(
+                        fx,
+                        fy,
+                    )
+                )
+
+            return values
+
+
+        def friction_jacobian(
+            force,
+        ):
+
+            jacobian = np.zeros(
+                (
+                    number_contacts,
+                    number_force_variables,
+                ),
+                dtype=float,
+            )
+
+            for contact_index in range(
+                number_contacts
+            ):
+
+                column = (
+                    3
+                    *
+                    contact_index
+                )
+
+                fx = float(
+                    force[
+                        column
+                    ]
+                )
+
+                fy = float(
+                    force[
+                        column + 1
+                    ]
+                )
+
+                tangential = float(
+                    np.hypot(
+                        fx,
+                        fy,
+                    )
+                )
+
+                if (
+                    tangential
+                    >
+                    FRICTION_TANGENTIAL_EPS
+                ):
+
+                    jacobian[
+                        contact_index,
+                        column,
+                    ] = (
+                        -fx
+                        /
+                        tangential
+                    )
+
+                    jacobian[
+                        contact_index,
+                        column + 1,
+                    ] = (
+                        -fy
+                        /
+                        tangential
+                    )
+
+                else:
+
+                    # At zero tangential force the norm gradient is
+                    # not unique. Zero is a valid subgradient and is
+                    # sufficient for this numerical solve.
+                    jacobian[
+                        contact_index,
+                        column,
+                    ] = 0.0
+
+                    jacobian[
+                        contact_index,
+                        column + 1,
+                    ] = 0.0
+
+                jacobian[
+                    contact_index,
+                    column + 2,
+                ] = (
+                    mu[
+                        contact_index
+                    ]
+                )
+
+            return jacobian
+
+
+        # ----------------------------------------------------
+        # First test the unilateral minimum-norm force.
+        # ----------------------------------------------------
+
+        initial_residual = (
+            equality_function(
+                initial_force
+            )
+        )
+
+        initial_residual_inf = float(
+            np.linalg.norm(
+                initial_residual,
+                ord=np.inf,
+            )
+        )
+
+        initial_friction_margin = (
+            friction_function(
+                initial_force
+            )
+        )
+
+        if (
+            initial_residual_inf
+            <=
+            equality_tolerance
+            and
+            np.all(
+                initial_force[
+                    normal_indices
+                ]
+                >=
+                -UNILATERAL_FORCE_TOLERANCE
+            )
+            and
+            np.all(
+                initial_friction_margin
+                >=
+                -FRICTION_CONE_TOLERANCE
+            )
+        ):
+
+            return (
+                initial_force.copy(),
+                initial_residual_inf,
+                float(
+                    np.linalg.norm(
+                        initial_residual
+                    )
+                ),
+            )
+
+        # ----------------------------------------------------
+        # Objective and gradient.
+        # ----------------------------------------------------
+
+        def objective(
+            force,
+        ):
+
+            return float(
+                0.5
+                *
+                force
+                @
+                force
+            )
+
+
+        def objective_jacobian(
+            force,
+        ):
+
+            return np.asarray(
+                force,
+                dtype=float,
+            )
+
+
+        # ----------------------------------------------------
+        # Bounds:
+        #
+        #     Fx, Fy -> unbounded
+        #     Fz     -> [0, +inf)
+        # ----------------------------------------------------
+
+        bounds = []
+
+        for variable_index in range(
+            number_force_variables
+        ):
+
+            if (
+                variable_index
+                %
+                3
+                ==
+                2
+            ):
+
+                bounds.append(
+                    (
+                        0.0,
+                        None,
+                    )
+                )
+
+            else:
+
+                bounds.append(
+                    (
+                        None,
+                        None,
+                    )
+                )
+
+        constraints = [
+            {
+                "type":
+                    "eq",
+
+                "fun":
+                    equality_function,
+
+                "jac":
+                    equality_jacobian,
+            },
+            {
+                "type":
+                    "ineq",
+
+                "fun":
+                    friction_function,
+
+                "jac":
+                    friction_jacobian,
+            },
+        ]
+
+        optimization_result = minimize(
+            fun=(
+                objective
+            ),
+            x0=(
+                initial_force
+            ),
+            jac=(
+                objective_jacobian
+            ),
+            bounds=(
+                bounds
+            ),
+            constraints=(
+                constraints
+            ),
+            method=(
+                "SLSQP"
+            ),
+            options={
+                "maxiter":
+                    int(
+                        FRICTION_SOLVER_MAX_ITERATIONS
+                    ),
+
+                "ftol":
+                    float(
+                        FRICTION_SOLVER_FTOL
+                    ),
+
+                "disp":
+                    False,
+            },
+        )
+
+        candidate_force = np.asarray(
+            optimization_result.x,
+            dtype=float,
+        ).reshape(
+            number_force_variables
+        )
+
+        if not np.all(
+            np.isfinite(
+                candidate_force
+            )
+        ):
+
+            return (
+                None,
+                float(
+                    "nan"
+                ),
+                float(
+                    "nan"
+                ),
+            )
+
+        # ----------------------------------------------------
+        # Post-validation.
+        #
+        # Do not accept the solver's success flag blindly.
+        # Explicitly re-check:
+        #
+        #   A f = b
+        #   Fz >= 0
+        #   ||Ft|| <= mu Fz
+        # ----------------------------------------------------
+
+        candidate_residual = (
+            A
+            @
+            candidate_force
+            -
+            b
+        )
+
+        candidate_residual_inf = float(
+            np.linalg.norm(
+                candidate_residual,
+                ord=np.inf,
+            )
+        )
+
+        candidate_friction_margin = (
+            friction_function(
+                candidate_force
+            )
+        )
+
+        normal_force = (
+            candidate_force[
+                normal_indices
+            ]
+        )
+
+        equality_ok = (
+            candidate_residual_inf
+            <=
+            equality_tolerance
+        )
+
+        unilateral_ok = bool(
+            np.all(
+                normal_force
+                >=
+                -UNILATERAL_FORCE_TOLERANCE
+            )
+        )
+
+        friction_ok = bool(
+            np.all(
+                candidate_friction_margin
+                >=
+                -FRICTION_CONE_TOLERANCE
+            )
+        )
+
+        if not (
+            equality_ok
+            and
+            unilateral_ok
+            and
+            friction_ok
+        ):
+
+            return (
+                None,
+                float(
+                    "nan"
+                ),
+                float(
+                    "nan"
+                ),
+            )
+
+        return (
+            candidate_force,
+            candidate_residual_inf,
+            float(
+                np.linalg.norm(
+                    candidate_residual
+                )
+            ),
+        )
+
+
+
+    # ========================================================
     # SOLVE ONE SAMPLE
     # ========================================================
 
@@ -1269,6 +2158,17 @@ class ContactForceReconstructor:
             contacts
         )
 
+        friction_coefficients = np.asarray(
+            [
+                contact[
+                    3
+                ]
+                for contact
+                in contacts
+            ],
+            dtype=float,
+        )
+
         zero = np.zeros(
             3,
             dtype=float,
@@ -1300,6 +2200,19 @@ class ContactForceReconstructor:
                     "nan"
                 ),
                 unilateral_feasible=False,
+                friction_cone_enabled=(
+                    ENABLE_FRICTION_CONE
+                ),
+                friction_cone_feasible=(
+                    False
+                    if
+                    ENABLE_FRICTION_CONE
+                    else
+                    None
+                ),
+                max_friction_ratio=float(
+                    "nan"
+                ),
                 point_contact_forces=tuple(),
                 left_resultant_force_world=(
                     zero.copy()
@@ -1374,20 +2287,19 @@ class ContactForceReconstructor:
         )
 
         # ----------------------------------------------------
-        # Minimum-norm force solution with unilateral contact:
+        # Stage 1:
+        # unilateral minimum-norm force solution
         #
         #     min  1/2 ||f_c||^2
         #
         #     s.t. A_base f_c = base_required
         #          Fz_i >= 0
-        #
-        # No friction-cone constraint is imposed.
         # ----------------------------------------------------
 
         (
-            contact_force_vector,
-            residual_inf,
-            residual_l2,
+            unilateral_force_vector,
+            unilateral_residual_inf,
+            unilateral_residual_l2,
         ) = (
             self._solve_unilateral_minimum_norm(
                 A=(
@@ -1403,7 +2315,7 @@ class ContactForceReconstructor:
         )
 
         unilateral_feasible = (
-            contact_force_vector
+            unilateral_force_vector
             is not None
         )
 
@@ -1448,6 +2360,19 @@ class ContactForceReconstructor:
                     "nan"
                 ),
                 unilateral_feasible=False,
+                friction_cone_enabled=(
+                    ENABLE_FRICTION_CONE
+                ),
+                friction_cone_feasible=(
+                    False
+                    if
+                    ENABLE_FRICTION_CONE
+                    else
+                    None
+                ),
+                max_friction_ratio=float(
+                    "nan"
+                ),
                 point_contact_forces=tuple(),
                 left_resultant_force_world=(
                     nan3.copy()
@@ -1462,6 +2387,150 @@ class ContactForceReconstructor:
                     nan3.copy()
                 ),
             )
+
+        # ----------------------------------------------------
+        # Stage 2:
+        # optional Coulomb friction cone.
+        #
+        # When disabled, preserve the original unilateral solution.
+        #
+        # When enabled, solve:
+        #
+        #     min  1/2 ||f_c||^2
+        #
+        #     s.t. A_base f_c = base_required
+        #          Fz_i >= 0
+        #          sqrt(Fx_i^2 + Fy_i^2) <= mu_i Fz_i
+        # ----------------------------------------------------
+
+        if ENABLE_FRICTION_CONE:
+
+            (
+                contact_force_vector,
+                residual_inf,
+                residual_l2,
+            ) = (
+                self._solve_friction_cone_minimum_norm(
+                    A=(
+                        A_base
+                    ),
+                    b=(
+                        base_required
+                    ),
+                    number_contacts=(
+                        number_contacts
+                    ),
+                    friction_coefficients=(
+                        friction_coefficients
+                    ),
+                    initial_force=(
+                        unilateral_force_vector
+                    ),
+                )
+            )
+
+            friction_cone_feasible = (
+                contact_force_vector
+                is not None
+            )
+
+            if not friction_cone_feasible:
+
+                nan3 = np.full(
+                    3,
+                    np.nan,
+                    dtype=float,
+                )
+
+                return ContactForceResult(
+                    time=float(
+                        sample.time
+                    ),
+                    number_contacts=int(
+                        number_contacts
+                    ),
+                    dynamics_rank=int(
+                        dynamics_rank
+                    ),
+                    dynamics_condition_number=float(
+                        condition_number
+                    ),
+                    qacc=qacc.copy(),
+                    base_required_generalized_force=(
+                        base_required.copy()
+                    ),
+                    dynamics_residual_inf=float(
+                        "nan"
+                    ),
+                    dynamics_residual_l2=float(
+                        "nan"
+                    ),
+                    unilateral_feasible=True,
+                    friction_cone_enabled=True,
+                    friction_cone_feasible=False,
+                    max_friction_ratio=float(
+                        "nan"
+                    ),
+                    point_contact_forces=tuple(),
+                    left_resultant_force_world=(
+                        nan3.copy()
+                    ),
+                    left_resultant_moment_world=(
+                        nan3.copy()
+                    ),
+                    right_resultant_force_world=(
+                        nan3.copy()
+                    ),
+                    right_resultant_moment_world=(
+                        nan3.copy()
+                    ),
+                )
+
+        else:
+
+            contact_force_vector = (
+                unilateral_force_vector
+            )
+
+            residual_inf = (
+                unilateral_residual_inf
+            )
+
+            residual_l2 = (
+                unilateral_residual_l2
+            )
+
+            friction_cone_feasible = None
+
+        # ----------------------------------------------------
+        # Friction-ratio diagnostic.
+        # ----------------------------------------------------
+
+        friction_ratios = (
+            self._friction_ratios(
+                contact_force_vector=(
+                    contact_force_vector
+                ),
+                friction_coefficients=(
+                    friction_coefficients
+                ),
+            )
+        )
+
+        if friction_ratios.size > 0:
+
+            max_friction_ratio = float(
+                np.max(
+                    friction_ratios
+                )
+            )
+
+        else:
+
+            max_friction_ratio = float(
+                "nan"
+            )
+
 
         # ----------------------------------------------------
         # Resultant force / moment for each foot.
@@ -1509,6 +2578,7 @@ class ContactForceReconstructor:
             foot_side,
             position_world,
             _,
+            friction_coefficient,
         ) in enumerate(
             contacts
         ):
@@ -1536,6 +2606,14 @@ class ContactForceReconstructor:
                     ),
                     force_world=(
                         force_world.copy()
+                    ),
+                    friction_coefficient=float(
+                        friction_coefficient
+                    ),
+                    friction_ratio=float(
+                        friction_ratios[
+                            contact_index
+                        ]
                     ),
                 )
             )
@@ -1594,6 +2672,15 @@ class ContactForceReconstructor:
                 residual_l2
             ),
             unilateral_feasible=True,
+            friction_cone_enabled=(
+                ENABLE_FRICTION_CONE
+            ),
+            friction_cone_feasible=(
+                friction_cone_feasible
+            ),
+            max_friction_ratio=float(
+                max_friction_ratio
+            ),
             point_contact_forces=tuple(
                 point_forces
             ),
@@ -1847,16 +2934,51 @@ class ContactForceReconstructor:
             if not result.unilateral_feasible
         ]
 
+        friction_cone_enabled = any(
+            result.friction_cone_enabled
+            for result
+            in results
+        )
+
+        if friction_cone_enabled:
+
+            friction_feasible = [
+                result
+                for result
+                in unilateral_feasible
+                if result.friction_cone_feasible
+            ]
+
+            friction_infeasible = [
+                result
+                for result
+                in unilateral_feasible
+                if not result.friction_cone_feasible
+            ]
+
+            valid_force_results = (
+                friction_feasible
+            )
+
+        else:
+
+            friction_feasible = []
+            friction_infeasible = []
+
+            valid_force_results = (
+                unilateral_feasible
+            )
+
         residual_inf = [
             result.dynamics_residual_inf
             for result
-            in unilateral_feasible
+            in valid_force_results
         ]
 
         condition_number = [
             result.dynamics_condition_number
             for result
-            in unilateral_feasible
+            in valid_force_results
         ]
 
         left_force_norm = [
@@ -1864,7 +2986,7 @@ class ContactForceReconstructor:
                 result.left_resultant_force_world
             )
             for result
-            in unilateral_feasible
+            in valid_force_results
         ]
 
         right_force_norm = [
@@ -1872,7 +2994,13 @@ class ContactForceReconstructor:
                 result.right_resultant_force_world
             )
             for result
-            in unilateral_feasible
+            in valid_force_results
+        ]
+
+        friction_ratio_values = [
+            result.max_friction_ratio
+            for result
+            in valid_force_results
         ]
 
         (
@@ -1923,6 +3051,18 @@ class ContactForceReconstructor:
             )
         )
 
+        (
+            friction_ratio_p50,
+            friction_ratio_p95,
+            friction_ratio_p99,
+            friction_ratio_max,
+        ) = (
+            ContactForceReconstructor
+            ._percentiles(
+                friction_ratio_values
+            )
+        )
+
         print()
         print(
             "================================================"
@@ -1953,6 +3093,26 @@ class ContactForceReconstructor:
         print(
             f"Unilateral infeasible  : {len(unilateral_infeasible)}"
         )
+
+        if friction_cone_enabled:
+
+            print(
+                "Friction cone          : ENABLED"
+            )
+
+            print(
+                f"Friction feasible      : {len(friction_feasible)}"
+            )
+
+            print(
+                f"Friction infeasible    : {len(friction_infeasible)}"
+            )
+
+        else:
+
+            print(
+                "Friction cone          : DISABLED"
+            )
 
         print()
 
@@ -2090,6 +3250,41 @@ class ContactForceReconstructor:
             f"  max : {right_f_max:.6f}"
         )
 
+        print()
+
+        if friction_cone_enabled:
+
+            print(
+                "MAX POINT-CONTACT FRICTION RATIO"
+            )
+
+        else:
+
+            print(
+                "MAX POINT-CONTACT FRICTION RATIO "
+                "(DIAGNOSTIC ONLY)"
+            )
+
+        print(
+            "------------------------------------------------"
+        )
+
+        print(
+            f"  p50 : {friction_ratio_p50:.6f}"
+        )
+
+        print(
+            f"  p95 : {friction_ratio_p95:.6f}"
+        )
+
+        print(
+            f"  p99 : {friction_ratio_p99:.6f}"
+        )
+
+        print(
+            f"  max : {friction_ratio_max:.6f}"
+        )
+
         print(
             "================================================"
         )
@@ -2120,9 +3315,14 @@ def plot_contact_force_results(
     No total force of the two feet is calculated or plotted here.
     Mx/My/Mz are also intentionally not plotted at this stage.
 
-    Samples where the six floating-base equations cannot be satisfied
-    together with Fz_i >= 0 are stored as NaN and therefore appear as
-    gaps in the force plots.
+    Samples where the active force constraints cannot be satisfied
+    are stored as NaN and therefore appear as gaps in the force plots.
+
+    If ENABLE_FRICTION_CONE is False:
+        active constraints are dynamics equality + Fz_i >= 0.
+
+    If ENABLE_FRICTION_CONE is True:
+        the Coulomb friction cone is also enforced.
     """
 
     import matplotlib.pyplot as plt
@@ -2166,6 +3366,31 @@ def plot_contact_force_results(
             "unilateral-infeasible and will appear as gaps."
         )
 
+    friction_infeasible_count = sum(
+        1
+        for result
+        in results
+        if (
+            result.number_contacts
+            >
+            0
+            and
+            result.unilateral_feasible
+            and
+            result.friction_cone_enabled
+            and
+            not result.friction_cone_feasible
+        )
+    )
+
+    if friction_infeasible_count > 0:
+
+        print(
+            f"Contact-force plot: "
+            f"{friction_infeasible_count} samples are "
+            "friction-cone-infeasible and will appear as gaps."
+        )
+
     # ========================================================
     # DATA
     # ========================================================
@@ -2203,6 +3428,15 @@ def plot_contact_force_results(
     right_force_norm = np.linalg.norm(
         right_force,
         axis=1,
+    )
+
+    max_friction_ratio = np.asarray(
+        [
+            result.max_friction_ratio
+            for result
+            in results
+        ],
+        dtype=float,
     )
 
     # ========================================================
@@ -2347,6 +3581,54 @@ def plot_contact_force_results(
     figure.tight_layout()
 
     # ========================================================
+    # FRICTION RATIO FIGURE
+    # ========================================================
+
+    figure, axis = plt.subplots(
+        figsize=(
+            11,
+            5,
+        )
+    )
+
+    axis.plot(
+        time,
+        max_friction_ratio,
+        linewidth=1.3,
+        label="max contact friction ratio",
+    )
+
+    axis.axhline(
+        1.0,
+        linewidth=1.0,
+        linestyle="--",
+        label="friction-cone boundary",
+    )
+
+    axis.set_title(
+        "Maximum Point-Contact Friction Ratio"
+    )
+
+    axis.set_xlabel(
+        "Time (s)"
+    )
+
+    axis.set_ylabel(
+        "rho = ||Ft|| / (mu Fz)"
+    )
+
+    axis.grid(
+        True,
+        alpha=0.3,
+    )
+
+    axis.legend(
+        loc="best"
+    )
+
+    figure.tight_layout()
+
+    # ========================================================
     # PRINT FORCE COMPONENT STATISTICS
     # ========================================================
 
@@ -2403,7 +3685,7 @@ def plot_contact_force_results(
 
                 print(
                     f"{component_name:>2s}"
-                    " | no unilateral-feasible samples"
+                    " | no force-feasible samples"
                 )
 
                 continue
