@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import mujoco
 import numpy as np
+from scipy.optimize import minimize
 
 
 # ============================================================
@@ -32,6 +33,34 @@ CONTACT_DISTANCE_TOLERANCE = 1.0e-10
 # No friction-cone constraint is imposed yet.
 UNILATERAL_FORCE_TOLERANCE = 1.0e-10
 DYNAMICS_EQUALITY_TOLERANCE = 1.0e-9
+
+# Soft circular Coulomb friction cone:
+#
+#     sqrt(Fx_i^2 + Fy_i^2)
+#         <= mu_i * Fz_i + s_i
+#
+#     s_i >= 0
+#
+# The dynamics equality and Fz_i >= 0 remain HARD constraints.
+# Only the friction cone is softened by the nonnegative slack s_i.
+#
+# The cost is:
+#
+#     1/2 ||f_c||^2
+#       + 1/2 * rho_s * ||s||^2
+#
+# A large rho_s strongly discourages friction-cone violation while
+# still allowing a solution when the trajectory is not strictly
+# friction feasible.
+SOFT_FRICTION_SLACK_WEIGHT = 1.0e4
+
+FRICTION_CONE_TOLERANCE = 1.0e-8
+FRICTION_SLACK_TOLERANCE = 1.0e-8
+FRICTION_ISOTROPY_TOLERANCE = 1.0e-10
+
+# Keep the iteration limit unchanged for the first diagnostic run.
+SOCP_MAX_ITERATIONS = 300
+SOCP_FTOL = 1.0e-10
 
 FLOOR_GEOM_NAME = "floor"
 
@@ -113,6 +142,31 @@ class ContactForceResult:
     # for every active point contact.
     unilateral_feasible: bool
 
+    # Raw optimizer diagnostics for the soft-friction solve.
+    optimizer_success: bool
+    optimizer_status: int
+    optimizer_iterations: int
+    used_optimizer_fallback: bool
+
+    # Slack variable of the soft friction cone, one value per
+    # point contact:
+    #
+    #     sqrt(Fx_i^2 + Fy_i^2)
+    #         <= mu_i Fz_i + s_i
+    #
+    #     s_i >= 0
+    friction_slack: np.ndarray
+
+    max_friction_slack: float
+    mean_friction_slack: float
+
+    # Physical friction-feasibility of the returned force itself,
+    # without using slack:
+    #
+    #     sqrt(Fx_i^2 + Fy_i^2) <= mu_i Fz_i
+    #
+    friction_feasible_without_slack: bool
+
     point_contact_forces: tuple[PointContactForce, ...]
 
     left_resultant_force_world: np.ndarray
@@ -159,23 +213,25 @@ class ContactForceReconstructor:
     IMPORTANT
     ------------------------------------------------------------
 
-    This module imposes the unilateral normal-force constraint:
+    The floating-base dynamics and unilateral contact are HARD:
+
+        J_c,b^T f_c
+            = M_b qdd + h_b
 
         Fz_i >= 0
 
-    for every active foot-ground point contact. Because the current
-    ground is horizontal in the MuJoCo world frame, world +z is the
-    contact-normal direction.
+    The circular Coulomb friction cone is SOFTENED with one
+    nonnegative slack variable per contact point:
 
-    This module still DOES NOT impose:
+        sqrt(Fx_i^2 + Fy_i^2)
+            <= mu_i Fz_i + s_i
 
-        - friction cone / friction pyramid
-        - CoP constraints
-        - torque limits
+        s_i >= 0
 
-    The reconstructed force distribution is obtained from:
+    The optimization is:
 
         min  1/2 ||f_c||_2^2
+             + 1/2 rho_s ||s||_2^2
 
         subject to:
 
@@ -184,18 +240,40 @@ class ContactForceReconstructor:
 
             Fz_i >= 0
 
-    When the unconstrained minimum-norm solution already satisfies
-    Fz_i >= 0, it is kept directly.
+            s_i >= 0
 
-    Otherwise, the code solves the same convex problem with an exact
-    active-set enumeration over the normal-force bounds Fz_i = 0.
-    With the current MuJoCo contact set (typically only a few point
-    contacts), this avoids adding an external QP-solver dependency.
+            sqrt(Fx_i^2 + Fy_i^2)
+                <= mu_i Fz_i + s_i
 
-    If no force distribution can satisfy both the floating-base
-    dynamics and Fz_i >= 0 at one sample, that sample is explicitly
-    marked unilateral-infeasible rather than clipping a negative
-    normal force after the solve.
+    where rho_s = SOFT_FRICTION_SLACK_WEIGHT.
+
+    Therefore:
+
+        s_i = 0
+            -> the returned force lies inside the physical
+               friction cone at contact i.
+
+        s_i > 0
+            -> the trajectory requires a tangential force that
+               exceeds the available Coulomb friction by an
+               amount represented by the slack.
+
+    The sliding-friction coefficient mu_i is read from each MuJoCo
+    contact. For the current flat terrain, mu = 0.6.
+
+    SLSQP is used as the numerical optimizer and is currently limited
+    to SOCP_MAX_ITERATIONS = 300 iterations per sample.
+
+    If SLSQP fails numerically, the code falls back to the already
+    computed unilateral-feasible minimum-norm force and evaluates the
+    exact slack required by that force. This preserves a diagnostic
+    result instead of dropping the entire sample.
+
+    This module still does not impose:
+
+        - CoP constraints
+        - actuator torque limits
+
     """
 
     def __init__(
@@ -469,7 +547,8 @@ class ContactForceReconstructor:
         For each contact we store:
             foot_side,
             contact position in world,
-            body id of the foot body.
+            body id of the foot body,
+            isotropic sliding-friction coefficient mu.
 
         The floor is static, so the point Jacobian needed for a force
         acting on the robot is simply the Jacobian of the point
@@ -582,11 +661,90 @@ class ContactForceReconstructor:
                 3
             ).copy()
 
+            # MuJoCo stores the resolved contact friction parameters
+            # in contact.friction. For condim=3 the first two entries
+            # are the two sliding-friction coefficients in the contact
+            # tangent plane.
+            contact_friction = np.asarray(
+                contact.friction,
+                dtype=float,
+            ).reshape(
+                -1
+            )
+
+            if contact_friction.size < 2:
+
+                raise RuntimeError(
+                    "MuJoCo contact does not provide two "
+                    "sliding-friction coefficients."
+                )
+
+            mu_x = float(
+                contact_friction[
+                    0
+                ]
+            )
+
+            mu_y = float(
+                contact_friction[
+                    1
+                ]
+            )
+
+            if (
+                not np.isfinite(
+                    mu_x
+                )
+                or
+                not np.isfinite(
+                    mu_y
+                )
+                or
+                mu_x < 0.0
+                or
+                mu_y < 0.0
+            ):
+
+                raise RuntimeError(
+                    "Invalid MuJoCo sliding-friction coefficient."
+                )
+
+            # The current implementation uses the circular cone:
+            #
+            #     sqrt(Fx^2 + Fy^2) <= mu Fz
+            #
+            # so the two tangential coefficients must be isotropic.
+            if not np.isclose(
+                mu_x,
+                mu_y,
+                rtol=0.0,
+                atol=(
+                    FRICTION_ISOTROPY_TOLERANCE
+                ),
+            ):
+
+                raise RuntimeError(
+                    "The current friction-cone reconstruction assumes "
+                    "isotropic sliding friction, but MuJoCo returned "
+                    f"mu_x={mu_x:.6g}, mu_y={mu_y:.6g}."
+                )
+
+            friction_coefficient = (
+                0.5
+                *
+                (
+                    mu_x
+                    +
+                    mu_y
+                )
+            )
+
             contacts.append(
                 (
                     foot_side,
                     contact_position,
                     foot_body_id,
+                    friction_coefficient,
                 )
             )
 
@@ -703,6 +861,7 @@ class ContactForceReconstructor:
             _,
             position_world,
             foot_body_id,
+            _,
         ) in enumerate(
             contacts
         ):
@@ -1163,6 +1322,932 @@ class ContactForceReconstructor:
 
 
     # ========================================================
+    # SOFT FRICTION-CONE FORCE SOLVER
+    # ========================================================
+
+    @staticmethod
+    def _required_friction_slack(
+        *,
+        force,
+        friction_coefficients,
+    ) -> np.ndarray:
+        """
+        Return the minimum nonnegative slack required by a given
+        force vector:
+
+            s_i =
+                max(
+                    0,
+                    sqrt(Fx_i^2 + Fy_i^2)
+                    - mu_i Fz_i
+                )
+        """
+
+        force = np.asarray(
+            force,
+            dtype=float,
+        ).reshape(
+            -1
+        )
+
+        mu = np.asarray(
+            friction_coefficients,
+            dtype=float,
+        ).reshape(
+            -1
+        )
+
+        number_contacts = int(
+            mu.size
+        )
+
+        if force.size != (
+            3
+            *
+            number_contacts
+        ):
+
+            raise ValueError(
+                "Unexpected force-vector size while computing "
+                "friction slack."
+            )
+
+        slack = np.zeros(
+            number_contacts,
+            dtype=float,
+        )
+
+        for contact_index in range(
+            number_contacts
+        ):
+
+            base = (
+                3
+                *
+                contact_index
+            )
+
+            fx = float(
+                force[
+                    base
+                ]
+            )
+
+            fy = float(
+                force[
+                    base
+                    +
+                    1
+                ]
+            )
+
+            fz = float(
+                force[
+                    base
+                    +
+                    2
+                ]
+            )
+
+            tangential_norm = float(
+                np.hypot(
+                    fx,
+                    fy,
+                )
+            )
+
+            friction_limit = (
+                float(
+                    mu[
+                        contact_index
+                    ]
+                )
+                *
+                fz
+            )
+
+            slack[
+                contact_index
+            ] = max(
+                0.0,
+                tangential_norm
+                -
+                friction_limit,
+            )
+
+        return slack
+
+
+    @staticmethod
+    def _solve_soft_friction_cone_minimum_norm(
+        *,
+        A,
+        b,
+        friction_coefficients,
+        initial_force,
+    ):
+        """
+        Solve the soft-friction optimization:
+
+            min  1/2 ||f||^2
+                 + 1/2 rho_s ||s||^2
+
+            s.t. A f = b
+
+                 Fz_i >= 0
+
+                 s_i >= 0
+
+                 sqrt(Fx_i^2 + Fy_i^2)
+                     <= mu_i Fz_i + s_i
+
+        for every point contact i.
+
+        The dynamics equality and Fz_i >= 0 remain hard constraints.
+        Only the friction cone can be violated through s_i.
+
+        Returns
+        -------
+        force : np.ndarray
+            Reconstructed point-contact force vector.
+
+        slack : np.ndarray
+            Optimized nonnegative friction slack, one value per
+            contact point.
+
+        residual_inf : float
+            ||A f - b||_inf.
+
+        residual_l2 : float
+            ||A f - b||_2.
+
+        optimizer_success : bool
+            Raw scipy/SLSQP success flag.
+
+        optimizer_status : int
+            Raw scipy/SLSQP status code.
+
+        optimizer_iterations : int
+            Number of SLSQP iterations.
+
+        used_fallback : bool
+            True when the SLSQP result was rejected and the unilateral
+            minimum-norm force plus its exact required slack was used.
+        """
+
+        A = np.asarray(
+            A,
+            dtype=float,
+        )
+
+        b = np.asarray(
+            b,
+            dtype=float,
+        ).reshape(
+            A.shape[
+                0
+            ]
+        )
+
+        mu = np.asarray(
+            friction_coefficients,
+            dtype=float,
+        ).reshape(
+            -1
+        )
+
+        number_contacts = int(
+            mu.size
+        )
+
+        number_force_variables = (
+            3
+            *
+            number_contacts
+        )
+
+        number_slack_variables = (
+            number_contacts
+        )
+
+        number_variables = (
+            number_force_variables
+            +
+            number_slack_variables
+        )
+
+        if A.shape != (
+            BASE_DOF,
+            number_force_variables,
+        ):
+
+            raise ValueError(
+                "A has an unexpected shape for the "
+                "soft friction-cone solve."
+            )
+
+        if (
+            np.any(
+                ~np.isfinite(
+                    mu
+                )
+            )
+            or
+            np.any(
+                mu
+                <
+                0.0
+            )
+        ):
+
+            raise ValueError(
+                "friction_coefficients must be finite "
+                "and nonnegative."
+            )
+
+        initial_force = np.asarray(
+            initial_force,
+            dtype=float,
+        ).reshape(
+            number_force_variables
+        )
+
+        if not np.all(
+            np.isfinite(
+                initial_force
+            )
+        ):
+
+            raise ValueError(
+                "initial_force contains NaN/Inf."
+            )
+
+        # ----------------------------------------------------
+        # Construct a feasible initial slack for the already
+        # unilateral-feasible initial force.
+        # ----------------------------------------------------
+
+        initial_slack = (
+            ContactForceReconstructor
+            ._required_friction_slack(
+                force=(
+                    initial_force
+                ),
+                friction_coefficients=(
+                    mu
+                ),
+            )
+        )
+
+        x0 = np.concatenate(
+            (
+                initial_force,
+                initial_slack,
+            )
+        )
+
+        equality_tolerance = (
+            DYNAMICS_EQUALITY_TOLERANCE
+            *
+            max(
+                1.0,
+                float(
+                    np.linalg.norm(
+                        b,
+                        ord=np.inf,
+                    )
+                ),
+            )
+        )
+
+        # ----------------------------------------------------
+        # Variable slicing helpers.
+        # ----------------------------------------------------
+
+        force_slice = slice(
+            0,
+            number_force_variables,
+        )
+
+        slack_slice = slice(
+            number_force_variables,
+            number_variables,
+        )
+
+        # ----------------------------------------------------
+        # Objective:
+        #
+        #     1/2 f^T f
+        #       + 1/2 rho_s s^T s
+        #
+        # ----------------------------------------------------
+
+        def objective(
+            decision,
+        ):
+
+            force = (
+                decision[
+                    force_slice
+                ]
+            )
+
+            slack = (
+                decision[
+                    slack_slice
+                ]
+            )
+
+            return float(
+                0.5
+                *
+                (
+                    force
+                    @
+                    force
+                )
+                +
+                0.5
+                *
+                SOFT_FRICTION_SLACK_WEIGHT
+                *
+                (
+                    slack
+                    @
+                    slack
+                )
+            )
+
+
+        def objective_jacobian(
+            decision,
+        ):
+
+            gradient = np.zeros(
+                number_variables,
+                dtype=float,
+            )
+
+            gradient[
+                force_slice
+            ] = (
+                decision[
+                    force_slice
+                ]
+            )
+
+            gradient[
+                slack_slice
+            ] = (
+                SOFT_FRICTION_SLACK_WEIGHT
+                *
+                decision[
+                    slack_slice
+                ]
+            )
+
+            return gradient
+
+
+        # ----------------------------------------------------
+        # HARD dynamic equality:
+        #
+        #     A f - b = 0
+        #
+        # ----------------------------------------------------
+
+        def equality_constraint(
+            decision,
+        ):
+
+            force = (
+                decision[
+                    force_slice
+                ]
+            )
+
+            return (
+                A
+                @
+                force
+                -
+                b
+            )
+
+
+        def equality_jacobian(
+            decision,
+        ):
+
+            _ = decision
+
+            jacobian = np.zeros(
+                (
+                    BASE_DOF,
+                    number_variables,
+                ),
+                dtype=float,
+            )
+
+            jacobian[
+                :,
+                force_slice,
+            ] = A
+
+            return jacobian
+
+
+        # ----------------------------------------------------
+        # HARD/SOFT inequalities in SLSQP convention:
+        #
+        #     g(x) >= 0
+        #
+        # For each contact i:
+        #
+        #     1) Fz_i >= 0
+        #
+        #     2) s_i >= 0
+        #
+        #     3) mu_i Fz_i + s_i
+        #          - sqrt(Fx_i^2 + Fy_i^2)
+        #        >= 0
+        #
+        # ----------------------------------------------------
+
+        def contact_inequality(
+            decision,
+        ):
+
+            force = (
+                decision[
+                    force_slice
+                ]
+            )
+
+            slack = (
+                decision[
+                    slack_slice
+                ]
+            )
+
+            constraints = np.zeros(
+                3
+                *
+                number_contacts,
+                dtype=float,
+            )
+
+            for contact_index in range(
+                number_contacts
+            ):
+
+                base = (
+                    3
+                    *
+                    contact_index
+                )
+
+                fx = float(
+                    force[
+                        base
+                    ]
+                )
+
+                fy = float(
+                    force[
+                        base
+                        +
+                        1
+                    ]
+                )
+
+                fz = float(
+                    force[
+                        base
+                        +
+                        2
+                    ]
+                )
+
+                slack_i = float(
+                    slack[
+                        contact_index
+                    ]
+                )
+
+                mu_i = float(
+                    mu[
+                        contact_index
+                    ]
+                )
+
+                tangential_norm = float(
+                    np.hypot(
+                        fx,
+                        fy,
+                    )
+                )
+
+                row = (
+                    3
+                    *
+                    contact_index
+                )
+
+                constraints[
+                    row
+                ] = fz
+
+                constraints[
+                    row
+                    +
+                    1
+                ] = slack_i
+
+                constraints[
+                    row
+                    +
+                    2
+                ] = (
+                    mu_i
+                    *
+                    fz
+                    +
+                    slack_i
+                    -
+                    tangential_norm
+                )
+
+            return constraints
+
+
+        def contact_inequality_jacobian(
+            decision,
+        ):
+
+            force = (
+                decision[
+                    force_slice
+                ]
+            )
+
+            jacobian = np.zeros(
+                (
+                    3
+                    *
+                    number_contacts,
+                    number_variables,
+                ),
+                dtype=float,
+            )
+
+            for contact_index in range(
+                number_contacts
+            ):
+
+                base = (
+                    3
+                    *
+                    contact_index
+                )
+
+                fx = float(
+                    force[
+                        base
+                    ]
+                )
+
+                fy = float(
+                    force[
+                        base
+                        +
+                        1
+                    ]
+                )
+
+                tangential_norm = float(
+                    np.hypot(
+                        fx,
+                        fy,
+                    )
+                )
+
+                mu_i = float(
+                    mu[
+                        contact_index
+                    ]
+                )
+
+                slack_column = (
+                    number_force_variables
+                    +
+                    contact_index
+                )
+
+                row = (
+                    3
+                    *
+                    contact_index
+                )
+
+                # Fz_i >= 0
+                jacobian[
+                    row,
+                    base
+                    +
+                    2,
+                ] = 1.0
+
+                # s_i >= 0
+                jacobian[
+                    row
+                    +
+                    1,
+                    slack_column,
+                ] = 1.0
+
+                # mu_i Fz_i + s_i - ||Ft_i|| >= 0
+                if (
+                    tangential_norm
+                    >
+                    1.0e-12
+                ):
+
+                    jacobian[
+                        row
+                        +
+                        2,
+                        base,
+                    ] = (
+                        -fx
+                        /
+                        tangential_norm
+                    )
+
+                    jacobian[
+                        row
+                        +
+                        2,
+                        base
+                        +
+                        1,
+                    ] = (
+                        -fy
+                        /
+                        tangential_norm
+                    )
+
+                jacobian[
+                    row
+                    +
+                    2,
+                    base
+                    +
+                    2,
+                ] = mu_i
+
+                jacobian[
+                    row
+                    +
+                    2,
+                    slack_column,
+                ] = 1.0
+
+            return jacobian
+
+
+        optimization_result = minimize(
+            objective,
+            x0,
+            method="SLSQP",
+            jac=(
+                objective_jacobian
+            ),
+            constraints=(
+                {
+                    "type": "eq",
+                    "fun": (
+                        equality_constraint
+                    ),
+                    "jac": (
+                        equality_jacobian
+                    ),
+                },
+                {
+                    "type": "ineq",
+                    "fun": (
+                        contact_inequality
+                    ),
+                    "jac": (
+                        contact_inequality_jacobian
+                    ),
+                },
+            ),
+            options={
+                "maxiter": (
+                    SOCP_MAX_ITERATIONS
+                ),
+                "ftol": (
+                    SOCP_FTOL
+                ),
+                "disp": False,
+            },
+        )
+
+        optimizer_success = bool(
+            optimization_result.success
+        )
+
+        optimizer_status = int(
+            optimization_result.status
+        )
+
+        optimizer_iterations = int(
+            getattr(
+                optimization_result,
+                "nit",
+                0,
+            )
+        )
+
+        candidate_decision = np.asarray(
+            optimization_result.x,
+            dtype=float,
+        ).reshape(
+            number_variables
+        )
+
+        candidate_is_finite = np.all(
+            np.isfinite(
+                candidate_decision
+            )
+        )
+
+        accepted = False
+
+        if candidate_is_finite:
+
+            candidate_force = (
+                candidate_decision[
+                    force_slice
+                ].copy()
+            )
+
+            candidate_slack = (
+                candidate_decision[
+                    slack_slice
+                ].copy()
+            )
+
+            dynamic_residual = (
+                A
+                @
+                candidate_force
+                -
+                b
+            )
+
+            residual_inf = float(
+                np.linalg.norm(
+                    dynamic_residual,
+                    ord=np.inf,
+                )
+            )
+
+            residual_l2 = float(
+                np.linalg.norm(
+                    dynamic_residual
+                )
+            )
+
+            minimum_normal_force = float(
+                np.min(
+                    candidate_force[
+                        2:
+                        number_force_variables:
+                        3
+                    ]
+                )
+            )
+
+            minimum_slack = float(
+                np.min(
+                    candidate_slack
+                )
+            )
+
+            cone_margin = (
+                contact_inequality(
+                    candidate_decision
+                )[
+                    2:
+                    3
+                    *
+                    number_contacts:
+                    3
+                ]
+            )
+
+            minimum_cone_margin = float(
+                np.min(
+                    cone_margin
+                )
+            )
+
+            accepted = (
+                residual_inf
+                <=
+                equality_tolerance
+                and
+                minimum_normal_force
+                >=
+                -UNILATERAL_FORCE_TOLERANCE
+                and
+                minimum_slack
+                >=
+                -FRICTION_SLACK_TOLERANCE
+                and
+                minimum_cone_margin
+                >=
+                -FRICTION_CONE_TOLERANCE
+            )
+
+        if accepted:
+
+            # Numerical noise can make optimized slack infinitesimally
+            # negative. Slack is not part of the dynamics equality, so
+            # clipping only this tiny numerical error is safe.
+            candidate_slack = np.maximum(
+                candidate_slack,
+                0.0,
+            )
+
+            return (
+                candidate_force,
+                candidate_slack,
+                residual_inf,
+                residual_l2,
+                optimizer_success,
+                optimizer_status,
+                optimizer_iterations,
+                False,
+            )
+
+        # ----------------------------------------------------
+        # Numerical fallback.
+        #
+        # initial_force already satisfies:
+        #
+        #     A f = b
+        #     Fz >= 0
+        #
+        # Its exact required friction slack therefore always gives a
+        # valid SOFT friction-cone diagnostic whenever the unilateral
+        # problem itself is feasible.
+        # ----------------------------------------------------
+
+        fallback_force = (
+            initial_force.copy()
+        )
+
+        fallback_slack = (
+            initial_slack.copy()
+        )
+
+        fallback_residual = (
+            A
+            @
+            fallback_force
+            -
+            b
+        )
+
+        fallback_residual_inf = float(
+            np.linalg.norm(
+                fallback_residual,
+                ord=np.inf,
+            )
+        )
+
+        fallback_residual_l2 = float(
+            np.linalg.norm(
+                fallback_residual
+            )
+        )
+
+        return (
+            fallback_force,
+            fallback_slack,
+            fallback_residual_inf,
+            fallback_residual_l2,
+            optimizer_success,
+            optimizer_status,
+            optimizer_iterations,
+            True,
+        )
+
+
+    # ========================================================
     # SOLVE ONE SAMPLE
     # ========================================================
 
@@ -1300,6 +2385,21 @@ class ContactForceReconstructor:
                     "nan"
                 ),
                 unilateral_feasible=False,
+                optimizer_success=False,
+                optimizer_status=-1,
+                optimizer_iterations=0,
+                used_optimizer_fallback=False,
+                friction_slack=np.zeros(
+                    0,
+                    dtype=float,
+                ),
+                max_friction_slack=float(
+                    "nan"
+                ),
+                mean_friction_slack=float(
+                    "nan"
+                ),
+                friction_feasible_without_slack=False,
                 point_contact_forces=tuple(),
                 left_resultant_force_world=(
                     zero.copy()
@@ -1374,20 +2474,21 @@ class ContactForceReconstructor:
         )
 
         # ----------------------------------------------------
-        # Minimum-norm force solution with unilateral contact:
+        # STEP 1: unilateral minimum-norm pre-solve
         #
-        #     min  1/2 ||f_c||^2
+        # HARD constraints:
         #
-        #     s.t. A_base f_c = base_required
-        #          Fz_i >= 0
+        #     A_base f_c = base_required
+        #     Fz_i >= 0
         #
-        # No friction-cone constraint is imposed yet.
+        # This gives a robust feasibility check and a feasible initial
+        # force for the soft-friction optimization.
         # ----------------------------------------------------
 
         (
-            contact_force_vector,
-            residual_inf,
-            residual_l2,
+            unilateral_force_vector,
+            unilateral_residual_inf,
+            unilateral_residual_l2,
         ) = (
             self._solve_unilateral_minimum_norm(
                 A=(
@@ -1403,18 +2504,9 @@ class ContactForceReconstructor:
         )
 
         unilateral_feasible = (
-            contact_force_vector
+            unilateral_force_vector
             is not None
         )
-
-        # ----------------------------------------------------
-        # If no unilateral-feasible force distribution exists,
-        # do not clip a negative Fz after the solve. That would
-        # destroy the dynamic equality A f = b.
-        #
-        # Instead mark this sample as infeasible. NaN resultants
-        # make the invalid interval appear as a gap in the plots.
-        # ----------------------------------------------------
 
         if not unilateral_feasible:
 
@@ -1448,6 +2540,22 @@ class ContactForceReconstructor:
                     "nan"
                 ),
                 unilateral_feasible=False,
+                optimizer_success=False,
+                optimizer_status=-1,
+                optimizer_iterations=0,
+                used_optimizer_fallback=False,
+                friction_slack=np.full(
+                    number_contacts,
+                    np.nan,
+                    dtype=float,
+                ),
+                max_friction_slack=float(
+                    "nan"
+                ),
+                mean_friction_slack=float(
+                    "nan"
+                ),
+                friction_feasible_without_slack=False,
                 point_contact_forces=tuple(),
                 left_resultant_force_world=(
                     nan3.copy()
@@ -1462,6 +2570,101 @@ class ContactForceReconstructor:
                     nan3.copy()
                 ),
             )
+
+        # ----------------------------------------------------
+        # STEP 2: soft circular friction cone
+        #
+        # Decision variables:
+        #
+        #     z = [f_c, s]
+        #
+        # Cost:
+        #
+        #     1/2 ||f_c||^2
+        #       + 1/2 rho_s ||s||^2
+        #
+        # HARD:
+        #
+        #     A_base f_c = base_required
+        #     Fz_i >= 0
+        #
+        # SOFT friction:
+        #
+        #     sqrt(Fx_i^2 + Fy_i^2)
+        #         <= mu_i Fz_i + s_i
+        #
+        #     s_i >= 0
+        # ----------------------------------------------------
+
+        friction_coefficients = np.asarray(
+            [
+                contact[
+                    3
+                ]
+                for contact
+                in contacts
+            ],
+            dtype=float,
+        )
+
+        (
+            contact_force_vector,
+            friction_slack,
+            residual_inf,
+            residual_l2,
+            optimizer_success,
+            optimizer_status,
+            optimizer_iterations,
+            used_optimizer_fallback,
+        ) = (
+            self._solve_soft_friction_cone_minimum_norm(
+                A=(
+                    A_base
+                ),
+                b=(
+                    base_required
+                ),
+                friction_coefficients=(
+                    friction_coefficients
+                ),
+                initial_force=(
+                    unilateral_force_vector
+                ),
+            )
+        )
+
+        max_friction_slack = float(
+            np.max(
+                friction_slack
+            )
+        )
+
+        mean_friction_slack = float(
+            np.mean(
+                friction_slack
+            )
+        )
+
+        # Check physical cone feasibility of the returned force
+        # WITHOUT using the slack.
+        required_slack_for_returned_force = (
+            self._required_friction_slack(
+                force=(
+                    contact_force_vector
+                ),
+                friction_coefficients=(
+                    friction_coefficients
+                ),
+            )
+        )
+
+        friction_feasible_without_slack = bool(
+            np.all(
+                required_slack_for_returned_force
+                <=
+                FRICTION_CONE_TOLERANCE
+            )
+        )
 
         # ----------------------------------------------------
         # Resultant force / moment for each foot.
@@ -1508,6 +2711,7 @@ class ContactForceReconstructor:
         for contact_index, (
             foot_side,
             position_world,
+            _,
             _,
         ) in enumerate(
             contacts
@@ -1594,6 +2798,30 @@ class ContactForceReconstructor:
                 residual_l2
             ),
             unilateral_feasible=True,
+            optimizer_success=bool(
+                optimizer_success
+            ),
+            optimizer_status=int(
+                optimizer_status
+            ),
+            optimizer_iterations=int(
+                optimizer_iterations
+            ),
+            used_optimizer_fallback=bool(
+                used_optimizer_fallback
+            ),
+            friction_slack=(
+                friction_slack.copy()
+            ),
+            max_friction_slack=float(
+                max_friction_slack
+            ),
+            mean_friction_slack=float(
+                mean_friction_slack
+            ),
+            friction_feasible_without_slack=bool(
+                friction_feasible_without_slack
+            ),
             point_contact_forces=tuple(
                 point_forces
             ),
@@ -1847,6 +3075,49 @@ class ContactForceReconstructor:
             if not result.unilateral_feasible
         ]
 
+        optimizer_success = [
+            result
+            for result
+            in unilateral_feasible
+            if result.optimizer_success
+        ]
+
+        optimizer_reported_failure = [
+            result
+            for result
+            in unilateral_feasible
+            if not result.optimizer_success
+        ]
+
+        fallback_used = [
+            result
+            for result
+            in unilateral_feasible
+            if result.used_optimizer_fallback
+        ]
+
+        friction_feasible_without_slack = [
+            result
+            for result
+            in unilateral_feasible
+            if result.friction_feasible_without_slack
+        ]
+
+        samples_using_slack = [
+            result
+            for result
+            in unilateral_feasible
+            if (
+                np.isfinite(
+                    result.max_friction_slack
+                )
+                and
+                result.max_friction_slack
+                >
+                FRICTION_SLACK_TOLERANCE
+            )
+        ]
+
         residual_inf = [
             result.dynamics_residual_inf
             for result
@@ -1871,6 +3142,24 @@ class ContactForceReconstructor:
             np.linalg.norm(
                 result.right_resultant_force_world
             )
+            for result
+            in unilateral_feasible
+        ]
+
+        optimizer_iterations = [
+            result.optimizer_iterations
+            for result
+            in unilateral_feasible
+        ]
+
+        max_slack_per_sample = [
+            result.max_friction_slack
+            for result
+            in unilateral_feasible
+        ]
+
+        mean_slack_per_sample = [
+            result.mean_friction_slack
             for result
             in unilateral_feasible
         ]
@@ -1923,6 +3212,42 @@ class ContactForceReconstructor:
             )
         )
 
+        (
+            iter_p50,
+            iter_p95,
+            iter_p99,
+            iter_max,
+        ) = (
+            ContactForceReconstructor
+            ._percentiles(
+                optimizer_iterations
+            )
+        )
+
+        (
+            slack_max_p50,
+            slack_max_p95,
+            slack_max_p99,
+            slack_max_max,
+        ) = (
+            ContactForceReconstructor
+            ._percentiles(
+                max_slack_per_sample
+            )
+        )
+
+        (
+            slack_mean_p50,
+            slack_mean_p95,
+            slack_mean_p99,
+            slack_mean_max,
+        ) = (
+            ContactForceReconstructor
+            ._percentiles(
+                mean_slack_per_sample
+            )
+        )
+
         print()
         print(
             "================================================"
@@ -1952,6 +3277,27 @@ class ContactForceReconstructor:
 
         print(
             f"Unilateral infeasible  : {len(unilateral_infeasible)}"
+        )
+
+        print(
+            f"SLSQP success          : {len(optimizer_success)}"
+        )
+
+        print(
+            f"SLSQP reported failure : {len(optimizer_reported_failure)}"
+        )
+
+        print(
+            f"Fallback used          : {len(fallback_used)}"
+        )
+
+        print(
+            f"Friction feasible s=0  : "
+            f"{len(friction_feasible_without_slack)}"
+        )
+
+        print(
+            f"Samples using slack    : {len(samples_using_slack)}"
         )
 
         print()
@@ -2013,6 +3359,81 @@ class ContactForceReconstructor:
 
         print(
             f"  max : {residual_max:.6e}"
+        )
+
+        print()
+
+        print(
+            "SLSQP ITERATIONS"
+        )
+        print(
+            "------------------------------------------------"
+        )
+
+        print(
+            f"  p50 : {iter_p50:.1f}"
+        )
+
+        print(
+            f"  p95 : {iter_p95:.1f}"
+        )
+
+        print(
+            f"  p99 : {iter_p99:.1f}"
+        )
+
+        print(
+            f"  max : {iter_max:.1f}"
+        )
+
+        print()
+
+        print(
+            "MAX FRICTION SLACK PER SAMPLE [N]"
+        )
+        print(
+            "------------------------------------------------"
+        )
+
+        print(
+            f"  p50 : {slack_max_p50:.6f}"
+        )
+
+        print(
+            f"  p95 : {slack_max_p95:.6f}"
+        )
+
+        print(
+            f"  p99 : {slack_max_p99:.6f}"
+        )
+
+        print(
+            f"  max : {slack_max_max:.6f}"
+        )
+
+        print()
+
+        print(
+            "MEAN FRICTION SLACK PER SAMPLE [N]"
+        )
+        print(
+            "------------------------------------------------"
+        )
+
+        print(
+            f"  p50 : {slack_mean_p50:.6f}"
+        )
+
+        print(
+            f"  p95 : {slack_mean_p95:.6f}"
+        )
+
+        print(
+            f"  p99 : {slack_mean_p99:.6f}"
+        )
+
+        print(
+            f"  max : {slack_mean_max:.6f}"
         )
 
         print()
@@ -2116,13 +3537,14 @@ def plot_contact_force_results(
         2) Fy: left foot, right foot
         3) Fz: left foot, right foot
         4) Resultant force norm: left foot, right foot
+        5) Maximum soft friction-cone slack per sample
 
     No total force of the two feet is calculated or plotted here.
     Mx/My/Mz are also intentionally not plotted at this stage.
 
-    Samples where the six floating-base equations cannot be satisfied
-    together with Fz_i >= 0 are stored as NaN and therefore appear as
-    gaps in the force plots.
+    Samples that are unilateral-infeasible are stored as NaN and
+    therefore appear as gaps in the force plots. Friction-cone
+    violation does NOT remove a sample; it is represented by slack.
     """
 
     import matplotlib.pyplot as plt
@@ -2158,12 +3580,34 @@ def plot_contact_force_results(
         )
     )
 
+    fallback_count = sum(
+        1
+        for result
+        in results
+        if (
+            result.number_contacts
+            >
+            0
+            and
+            result.unilateral_feasible
+            and
+            result.used_optimizer_fallback
+        )
+    )
+
     if unilateral_infeasible_count > 0:
 
         print(
             f"Contact-force plot: "
             f"{unilateral_infeasible_count} samples are "
-            "unilateral-infeasible and will appear as gaps."
+            "unilateral-infeasible and appear as gaps."
+        )
+
+    if fallback_count > 0:
+
+        print(
+            f"Soft-friction optimizer fallback used in "
+            f"{fallback_count} samples."
         )
 
     # ========================================================
@@ -2203,6 +3647,15 @@ def plot_contact_force_results(
     right_force_norm = np.linalg.norm(
         right_force,
         axis=1,
+    )
+
+    max_friction_slack = np.asarray(
+        [
+            result.max_friction_slack
+            for result
+            in results
+        ],
+        dtype=float,
     )
 
     # ========================================================
@@ -2347,6 +3800,53 @@ def plot_contact_force_results(
     figure.tight_layout()
 
     # ========================================================
+    # SOFT FRICTION-CONE SLACK FIGURE
+    # ========================================================
+
+    figure, axis = plt.subplots(
+        figsize=(
+            11,
+            5,
+        )
+    )
+
+    axis.plot(
+        time,
+        max_friction_slack,
+        linewidth=1.3,
+        label="max slack",
+    )
+
+    axis.axhline(
+        0.0,
+        linewidth=1.0,
+        linestyle="--",
+    )
+
+    axis.set_title(
+        "Soft Friction-Cone Slack"
+    )
+
+    axis.set_xlabel(
+        "Time (s)"
+    )
+
+    axis.set_ylabel(
+        "Maximum slack per sample (N)"
+    )
+
+    axis.grid(
+        True,
+        alpha=0.3,
+    )
+
+    axis.legend(
+        loc="best"
+    )
+
+    figure.tight_layout()
+
+    # ========================================================
     # PRINT FORCE COMPONENT STATISTICS
     # ========================================================
 
@@ -2403,7 +3903,7 @@ def plot_contact_force_results(
 
                 print(
                     f"{component_name:>2s}"
-                    " | no unilateral-feasible samples"
+                    " | no valid force samples"
                 )
 
                 continue
