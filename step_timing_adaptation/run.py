@@ -11,10 +11,10 @@
 # Contact processing:
 #   - old contact_stability.py is no longer used
 #   - no friction cone / unilateral-force / torque-limit check
-#   - q is generated kinematically by differential IK integration
-#   - qdot is taken directly from the differential-IK solution
-#     and converted from Pinocchio to MuJoCo velocity convention
-#   - qdd is reconstructed offline from this direct qdot history
+#   - differential IK computes qdot(t_k) at q(t_k)
+#   - q(t_k), qdot(t_k) are recorded BEFORE integration
+#   - qdot is converted from Pinocchio to MuJoCo convention
+#   - qdd(t_k) is reconstructed offline from the qdot history
 #   - MuJoCo provides M(q), qfrc_bias, qfrc_passive,
 #     contact points, and contact Jacobians
 #   - only the first six floating-base equations are used:
@@ -160,8 +160,8 @@ TIME_TOLERANCE = 1.0e-10
 # ============================================================
 #
 # True:
-#   - record qpos and direct differential-IK qvel at every sample
-#   - reconstruct qdd offline from the direct qvel history
+#   - record same-time qpos/qvel = q(t_k), qdot(t_k)
+#   - reconstruct qdd(t_k) offline from the qdot history
 #   - reconstruct point-contact forces from the first six
 #     floating-base dynamic equations
 #
@@ -868,28 +868,23 @@ def update_mujoco_from_pinocchio(
     *,
     robot,
     q_pin,
-    q_pin_velocity_reference,
     qvel_pin,
     mj_model,
     mj_data,
 ):
     """
-    Set the kinematically generated Pinocchio state in MuJoCo.
+    Set one time-consistent kinematic state in MuJoCo.
 
-    Unlike the previous implementation, qvel is NOT reconstructed
-    from two consecutive MuJoCo qpos samples.
+    q_pin and qvel_pin MUST represent the same instant:
 
-    Instead:
+        q(t_k), qdot(t_k)
 
-        differential IK
-            -> qdot_full (Pinocchio generalized velocity)
-            -> frame-convention conversion
-            -> mj_data.qvel
+    qvel is taken directly from the differential-IK solution and
+    converted from Pinocchio to MuJoCo velocity convention.
 
-    q_pin_velocity_reference is the Pinocchio configuration at which
-    qdot_full was computed. It is used only for converting the
-    free-base linear velocity from body coordinates to world
-    coordinates.
+    This function intentionally does not integrate q_pin.
+    Integration to q(t_{k+1}) is performed only after the current
+    sample has been recorded and logged.
     """
 
     q_mj = (
@@ -904,7 +899,7 @@ def update_mujoco_from_pinocchio(
                 robot
             ),
             q_pin=(
-                q_pin_velocity_reference
+                q_pin
             ),
             v_pin=(
                 qvel_pin
@@ -2401,38 +2396,17 @@ def run_walk(
             )
 
         # ====================================================
-        # PINOCCHIO INTEGRATION
+        # MUJOCO SET CURRENT STATE: q(t_k), qdot(t_k)
         # ====================================================
         #
-        # qdot_full was computed at the CURRENT q_pin.
-        # Keep that configuration for the Pinocchio -> MuJoCo
-        # free-base velocity-frame conversion.
-        # ====================================================
-
-        q_pin_velocity_reference = (
-            q_pin.copy()
-        )
-
-        q_pin = (
-            robot.integrate(
-                q_pin=(
-                    q_pin
-                ),
-                v_pin=(
-                    qdot_full
-                ),
-                dt=(
-                    DT
-                ),
-            )
-        )
-
-        robot.update(
-            q_pin
-        )
-
-        # ====================================================
-        # MUJOCO SET STATE
+        # Differential IK has just computed qdot_full at the
+        # CURRENT configuration q_pin = q(t_k).
+        #
+        # Therefore record the pair:
+        #
+        #     q(t_k), qdot(t_k)
+        #
+        # BEFORE integrating to q(t_{k+1}).
         # ====================================================
 
         (
@@ -2445,9 +2419,6 @@ def run_walk(
                 ),
                 q_pin=(
                     q_pin
-                ),
-                q_pin_velocity_reference=(
-                    q_pin_velocity_reference
                 ),
                 qvel_pin=(
                     qdot_full
@@ -2462,15 +2433,16 @@ def run_walk(
         )
 
         # Keep the returned variables available for debugging.
-        # Contact-force reconstruction records mj_data.qpos/qvel
-        # immediately below.
+        # Contact-force reconstruction records this same-time
+        # qpos/qvel pair immediately below.
         _ = (
             current_qpos_mj,
             current_qvel_mj,
         )
 
         # ====================================================
-        # RECORD q, qdot FOR FLOATING-BASE INVERSE DYNAMICS
+        # RECORD q(t_k), qdot(t_k) FOR FLOATING-BASE
+        # INVERSE DYNAMICS
         # ====================================================
 
         if ENABLE_CONTACT_FORCE_RECONSTRUCTION:
@@ -2668,6 +2640,37 @@ def run_walk(
             next_viewer_sync_time += (
                 VIEWER_SYNC_PERIOD
             )
+
+        # ====================================================
+        # PINOCCHIO INTEGRATION: q(t_k) -> q(t_{k+1})
+        # ====================================================
+        #
+        # All quantities associated with time t_k have now been
+        # recorded/logged using the consistent state:
+        #
+        #     q(t_k), qdot(t_k)
+        #
+        # Only now advance the full-body configuration to the
+        # next sample.
+        # ====================================================
+
+        q_pin = (
+            robot.integrate(
+                q_pin=(
+                    q_pin
+                ),
+                v_pin=(
+                    qdot_full
+                ),
+                dt=(
+                    DT
+                ),
+            )
+        )
+
+        robot.update(
+            q_pin
+        )
 
         # ====================================================
         # EXACT LIPM PROPAGATION
