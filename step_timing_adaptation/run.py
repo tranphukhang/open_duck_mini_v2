@@ -188,7 +188,7 @@ def automatic_velocity_profile(
 
     return (
         0.035,
-        -0.020,
+        0.00,
     )
 
 
