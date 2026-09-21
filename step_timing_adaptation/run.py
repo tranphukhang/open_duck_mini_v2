@@ -1,9 +1,11 @@
 # step_timing_adaptation/run.py
 #
 # Current experiment:
-#   - 9 s automatic walking
-#   - vx = +0.035 m/s
-#   - vy = -0.020 m/s
+#   - initial gait preparation at vx = vy = 0
+#   - one transition step at desired walking velocity
+#   - then record 9 s of experiment data
+#   - recorded vx = +0.035 m/s
+#   - recorded vy = +0.000 m/s
 #   - COM_HEIGHT = 0.215 m
 #   - SWING_HEIGHT = 0.020 m
 #   - external push disabled
@@ -142,7 +144,34 @@ np.set_printoptions(
 # ============================================================
 
 DT = 0.0005
+
+# Recorded experiment duration.
+# Preparation time is NOT included in this value.
 SIMULATION_DURATION = 9.0
+
+# ============================================================
+# INITIAL GAIT PREPARATION
+# ============================================================
+#
+# Phase 1 - alignment:
+#   vx = vy = 0. The robot walks in place until the measured
+#   left-right foot spacing is close to DEFAULT_STEP_WIDTH.
+#
+# Phase 2 - transition:
+#   enable the desired walking velocity, but do not record data
+#   for one complete step. This prevents the command transition
+#   from contaminating qdd/contact-force reconstruction.
+#
+# Phase 3 - recording:
+#   reset data time to zero and record SIMULATION_DURATION
+#   seconds of experiment data.
+# ============================================================
+
+INITIAL_SPACING_TOLERANCE = 0.005
+MAX_PREPARATION_TIME = 5.0
+
+DESIRED_VELOCITY_X = 0.035
+DESIRED_VELOCITY_Y = 0.0
 
 FIRST_STANCE_SIDE = "left"
 
@@ -187,8 +216,8 @@ def automatic_velocity_profile(
     )
 
     return (
-        0.035,
-        0.00,
+        DESIRED_VELOCITY_X,
+        DESIRED_VELOCITY_Y,
     )
 
 
@@ -1624,24 +1653,20 @@ def run_walk(
     # ========================================================
     # INITIAL COMMAND
     # ========================================================
-
-    (
-        command_x,
-        command_y,
-    ) = (
-        automatic_velocity_profile(
-            0.0
-        )
-    )
+    #
+    # Start with zero desired walking velocity.
+    #
+    # During this preparation phase, the robot walks in place
+    # so the lateral foot spacing can converge from the settled
+    # keyframe spacing toward DEFAULT_STEP_WIDTH.
+    #
+    # No experiment data are recorded yet.
+    # ========================================================
 
     command = (
         VelocityCommandSnapshot(
-            x=(
-                command_x
-            ),
-            y=(
-                command_y
-            ),
+            x=0.0,
+            y=0.0,
         )
     )
 
@@ -1815,7 +1840,19 @@ def run_walk(
     phase_time = 0.0
     kinematic_time = 0.0
 
+    # Time associated only with the recorded experiment.
+    # It remains at zero throughout alignment and transition.
+    data_time = 0.0
+
     step_index = 1
+
+    # Preparation state machine:
+    #
+    #   alignment  -> walk in place at vx = vy = 0
+    #   transition -> desired velocity active, no recording
+    #   recording  -> data_time starts from zero
+    experiment_phase = "alignment"
+    data_collection_started = False
 
     planner_frozen = False
 
@@ -1896,12 +1933,21 @@ def run_walk(
     )
 
     print(
-        "Velocity command:"
+        "Initial preparation command:"
     )
 
     print(
         f"  vx={command.x:+.3f} m/s, "
         f"vy={command.y:+.3f} m/s"
+    )
+
+    print(
+        "Recorded experiment command:"
+    )
+
+    print(
+        f"  vx={DESIRED_VELOCITY_X:+.3f} m/s, "
+        f"vy={DESIRED_VELOCITY_Y:+.3f} m/s"
     )
 
     print(
@@ -1955,8 +2001,14 @@ def run_walk(
 
             break
 
+        # ====================================================
+        # EXPERIMENT END / PREPARATION SAFETY
+        # ====================================================
+
         if (
-            kinematic_time
+            data_collection_started
+            and
+            data_time
             >=
             SIMULATION_DURATION
             -
@@ -1965,74 +2017,19 @@ def run_walk(
 
             break
 
-        # ====================================================
-        # AUTOMATIC VELOCITY PROFILE
-        # ====================================================
+        if (
+            not data_collection_started
+            and
+            kinematic_time
+            >=
+            MAX_PREPARATION_TIME
+            -
+            TIME_TOLERANCE
+        ):
 
-        (
-            new_command_x,
-            new_command_y,
-        ) = (
-            automatic_velocity_profile(
-                kinematic_time
-            )
-        )
-
-        command_changed = (
-            not np.isclose(
-                command.x,
-                new_command_x,
-            )
-            or
-            not np.isclose(
-                command.y,
-                new_command_y,
-            )
-        )
-
-        if command_changed:
-
-            command = (
-                VelocityCommandSnapshot(
-                    x=(
-                        new_command_x
-                    ),
-                    y=(
-                        new_command_y
-                    ),
-                )
-            )
-
-            (
-                nominal_left_step,
-                nominal_right_step,
-            ) = (
-                compute_nominal_steps(
-                    planner=(
-                        planner
-                    ),
-                    velocity_command=(
-                        command
-                    ),
-                )
-            )
-
-            if stance_side == "left":
-
-                current_nominal_step = (
-                    nominal_left_step
-                )
-
-            else:
-
-                current_nominal_step = (
-                    nominal_right_step
-                )
-
-            print(
-                f"[COMMAND] t={kinematic_time:.3f} s"
-                f" -> vx={command.x:+.3f} m/s"
-                f", vy={command.y:+.3f} m/s"
+            raise RuntimeError(
+                "Initial gait preparation did not finish "
+                f"within {MAX_PREPARATION_TIME:.2f} s."
             )
 
         # ====================================================
@@ -2040,11 +2037,13 @@ def run_walk(
         # ====================================================
 
         if (
+            data_collection_started
+            and
             ENABLE_AUTOMATIC_PUSH
             and
             not automatic_push_applied
             and
-            kinematic_time
+            data_time
             >=
             PUSH_TIME
             -
@@ -2058,7 +2057,7 @@ def run_walk(
             automatic_push_applied = True
 
             print(
-                f"[PUSH] t={kinematic_time:.3f} s"
+                f"[PUSH] data_t={data_time:.3f} s"
                 f" -> F=({PUSH_FORCE_X:+.2f},"
                 f" {PUSH_FORCE_Y:+.2f}) N"
                 f" for {PUSH_DURATION:.3f} s"
@@ -2115,6 +2114,155 @@ def run_walk(
             step_index += 1
             phase_time = 0.0
             planner_frozen = False
+
+            # =================================================
+            # INITIAL PREPARATION STATE MACHINE
+            # =================================================
+            #
+            # Check the actual foot spacing only at touchdown.
+            # This avoids switching the velocity command in the
+            # middle of a step.
+            # =================================================
+
+            robot.update(
+                q_pin
+            )
+
+            (
+                left_foot_actual,
+                _,
+            ) = (
+                robot.get_left_foot_pose()
+            )
+
+            (
+                right_foot_actual,
+                _,
+            ) = (
+                robot.get_right_foot_pose()
+            )
+
+            actual_foot_spacing = float(
+                abs(
+                    left_foot_actual[
+                        1
+                    ]
+                    -
+                    right_foot_actual[
+                        1
+                    ]
+                )
+            )
+
+            # -------------------------------------------------
+            # PHASE 1: ALIGNMENT
+            # -------------------------------------------------
+
+            if experiment_phase == "alignment":
+
+                spacing_error = float(
+                    abs(
+                        actual_foot_spacing
+                        -
+                        DEFAULT_STEP_WIDTH
+                    )
+                )
+
+                print(
+                    f"[ALIGNMENT]"
+                    f" t={kinematic_time:.3f} s"
+                    f" | spacing={actual_foot_spacing:.6f} m"
+                    f" | error={spacing_error:.6f} m"
+                )
+
+                if (
+                    spacing_error
+                    <=
+                    INITIAL_SPACING_TOLERANCE
+                ):
+
+                    (
+                        desired_vx,
+                        desired_vy,
+                    ) = (
+                        automatic_velocity_profile(
+                            0.0
+                        )
+                    )
+
+                    command = (
+                        VelocityCommandSnapshot(
+                            x=(
+                                desired_vx
+                            ),
+                            y=(
+                                desired_vy
+                            ),
+                        )
+                    )
+
+                    (
+                        nominal_left_step,
+                        nominal_right_step,
+                    ) = (
+                        compute_nominal_steps(
+                            planner=(
+                                planner
+                            ),
+                            velocity_command=(
+                                command
+                            ),
+                        )
+                    )
+
+                    experiment_phase = (
+                        "transition"
+                    )
+
+                    print(
+                        f"[ALIGNMENT COMPLETE]"
+                        f" t={kinematic_time:.3f} s"
+                        f" | spacing={actual_foot_spacing:.6f} m"
+                    )
+
+                    print(
+                        f"[VELOCITY ON]"
+                        f" vx={command.x:+.3f} m/s"
+                        f" | vy={command.y:+.3f} m/s"
+                    )
+
+            # -------------------------------------------------
+            # PHASE 2 -> PHASE 3
+            # -------------------------------------------------
+            #
+            # Reaching the next touchdown while already in the
+            # transition phase means one complete step has been
+            # executed with the desired velocity.
+            #
+            # Start recording from this touchdown onward.
+            # -------------------------------------------------
+
+            elif experiment_phase == "transition":
+
+                experiment_phase = (
+                    "recording"
+                )
+
+                data_collection_started = True
+                data_time = 0.0
+
+                previous_com_actual = (
+                    robot.get_com().copy()
+                )
+
+                print(
+                    f"[DATA START]"
+                    f" sim_t={kinematic_time:.3f} s"
+                    f" | data_t=0.000 s"
+                    f" | spacing={actual_foot_spacing:.6f} m"
+                    f" | vx={command.x:+.3f} m/s"
+                    f" | vy={command.y:+.3f} m/s"
+                )
 
             (
                 swing_side,
@@ -2452,11 +2600,15 @@ def run_walk(
         # INVERSE DYNAMICS
         # ====================================================
 
-        if ENABLE_CONTACT_FORCE_RECONSTRUCTION:
+        if (
+            ENABLE_CONTACT_FORCE_RECONSTRUCTION
+            and
+            data_collection_started
+        ):
 
             contact_force_reconstructor.record_sample(
                 time=(
-                    kinematic_time
+                    data_time
                 ),
                 mj_data=(
                     mj_data
@@ -2478,14 +2630,16 @@ def run_walk(
             )
         )
 
-        joint_data_logger.append(
-            time=(
-                kinematic_time
-            ),
-            joint_angles=(
-                leg_joint_angles
-            ),
-        )
+        if data_collection_started:
+
+            joint_data_logger.append(
+                time=(
+                    data_time
+                ),
+                joint_angles=(
+                    leg_joint_angles
+                ),
+            )
 
         # ====================================================
         # WHOLE-BODY CENTROIDAL QUANTITIES
@@ -2550,50 +2704,52 @@ def run_walk(
             robot.get_right_foot_pose()
         )
 
-        simulation_log.append(
-            time=(
-                kinematic_time
-            ),
-            command_vx=(
-                command.x
-            ),
-            command_vy=(
-                command.y
-            ),
-            left_foot_position=(
-                left_foot_position_log
-            ),
-            right_foot_position=(
-                right_foot_position_log
-            ),
-            com_position=(
-                lipm_sample.position
-            ),
-            dcm=(
-                lipm_sample.dcm
-            ),
-            landing_position=(
-                landing_position
-            ),
-            step_time=(
-                current_step_time
-            ),
-            push_active=(
-                push_active
-            ),
-            whole_body_com_position=(
-                whole_body_com_position
-            ),
-            whole_body_com_velocity=(
-                whole_body_com_velocity
-            ),
-            angular_momentum=(
-                whole_body_angular_momentum
-            ),
-            leg_joint_angles=(
-                leg_joint_angles
-            ),
-        )
+        if data_collection_started:
+
+            simulation_log.append(
+                time=(
+                    data_time
+                ),
+                command_vx=(
+                    command.x
+                ),
+                command_vy=(
+                    command.y
+                ),
+                left_foot_position=(
+                    left_foot_position_log
+                ),
+                right_foot_position=(
+                    right_foot_position_log
+                ),
+                com_position=(
+                    lipm_sample.position
+                ),
+                dcm=(
+                    lipm_sample.dcm
+                ),
+                landing_position=(
+                    landing_position
+                ),
+                step_time=(
+                    current_step_time
+                ),
+                push_active=(
+                    push_active
+                ),
+                whole_body_com_position=(
+                    whole_body_com_position
+                ),
+                whole_body_com_velocity=(
+                    whole_body_com_velocity
+                ),
+                angular_momentum=(
+                    whole_body_angular_momentum
+                ),
+                leg_joint_angles=(
+                    leg_joint_angles
+                ),
+            )
 
         # ====================================================
         # TERMINAL STATUS
@@ -2712,6 +2868,12 @@ def run_walk(
             DT
         )
 
+        if data_collection_started:
+
+            data_time += (
+                DT
+            )
+
         mj_data.time = (
             kinematic_time
         )
@@ -2744,7 +2906,8 @@ def run_walk(
 
     print(
         f"Walking stopped"
-        f" | t={kinematic_time:.3f} s"
+        f" | sim_t={kinematic_time:.3f} s"
+        f" | data_t={data_time:.3f} s"
         f" | steps={step_index}"
         f" | auto_push_applied="
         f"{automatic_push_applied}"
