@@ -229,6 +229,13 @@ STEP_TIME_MAX = 0.35
 
 
 # ============================================================
+# DEFAULT FOOT SPACING
+# ============================================================
+
+DEFAULT_STEP_WIDTH = 0.06
+
+
+# ============================================================
 # STEP QP
 # ============================================================
 
@@ -2948,7 +2955,7 @@ def main():
                     COM_HEIGHT
                 ),
                 default_step_width=(
-                    measured_step_width
+                    DEFAULT_STEP_WIDTH
                 ),
                 step_length_min=(
                     STEP_LENGTH_MIN
