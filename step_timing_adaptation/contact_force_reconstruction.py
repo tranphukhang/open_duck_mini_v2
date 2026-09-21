@@ -67,7 +67,7 @@ DYNAMICS_EQUALITY_TOLERANCE = 1.0e-9
 #   diagnostic purposes, but the friction cone is NOT enforced.
 # ============================================================
 
-ENABLE_FRICTION_CONE = True
+ENABLE_FRICTION_CONE = False
 
 FRICTION_CONE_TOLERANCE = 1.0e-8
 FRICTION_TANGENTIAL_EPS = 1.0e-12
