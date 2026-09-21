@@ -4,15 +4,20 @@
 #   - initial gait preparation at vx = vy = 0
 #   - one transition step at desired walking velocity
 #   - then record 9 s of experiment data
-#   - recorded vx = +0.035 m/s
-#   - recorded vy = +0.000 m/s
+#   - recorded vx = +0.000 m/s
+#   - recorded vy = -0.030 m/s
 #   - COM_HEIGHT = 0.215 m
 #   - SWING_HEIGHT = 0.020 m
 #   - external push disabled
+#   - MuJoCo physics timestep = 0.0005 s (2000 Hz)
+#   - algorithm/control/data timestep = 0.001 s (1000 Hz)
 #
 # Contact processing:
 #   - old contact_stability.py is no longer used
-#   - no friction cone / unilateral-force / torque-limit check
+#   - unilateral contact-force handling is implemented in
+#     contact_force_reconstruction.py
+#   - friction cone can be enabled/disabled there
+#   - no torque-limit check
 #   - differential IK computes qdot(t_k) at q(t_k)
 #   - q(t_k), qdot(t_k) are recorded BEFORE integration
 #   - qdot is converted from Pinocchio to MuJoCo convention
@@ -143,7 +148,26 @@ np.set_printoptions(
 # EXECUTOR / EXPERIMENT
 # ============================================================
 
-DT = 0.0005
+# MuJoCo physics timestep.
+#
+# This remains at 0.5 ms = 2000 Hz.
+PHYSICS_DT = 0.0005
+
+# Algorithm / control / reference / data timestep.
+#
+# These blocks now run at 1 kHz:
+#   - Step-Timing QP
+#   - LIPM propagation
+#   - online swing trajectory
+#   - differential IK
+#   - Pinocchio integration
+#   - qpos/qvel recording for force reconstruction
+#   - joint-angle logging
+#   - simulation logging
+#
+# 1.0 ms = 1000 Hz.
+CONTROL_DT = 0.001
+CONTROL_FREQUENCY = 1.0 / CONTROL_DT
 
 # Recorded experiment duration.
 # Preparation time is NOT included in this value.
@@ -170,8 +194,8 @@ SIMULATION_DURATION = 9.0
 INITIAL_SPACING_TOLERANCE = 0.005
 MAX_PREPARATION_TIME = 5.0
 
-DESIRED_VELOCITY_X = 0.0
-DESIRED_VELOCITY_Y = -0.03
+DESIRED_VELOCITY_X = 0.01
+DESIRED_VELOCITY_Y = 0.0
 
 FIRST_STANCE_SIDE = "left"
 
@@ -1492,15 +1516,49 @@ def run_walk(
 
     if not np.isclose(
         physics_dt,
-        DT,
+        PHYSICS_DT,
         rtol=0.0,
         atol=1.0e-12,
     ):
 
         raise RuntimeError(
-            "MuJoCo physics timestep does not match DT: "
+            "MuJoCo physics timestep does not match PHYSICS_DT: "
             f"model={physics_dt:.12f} s, "
-            f"DT={DT:.12f} s"
+            f"PHYSICS_DT={PHYSICS_DT:.12f} s"
+        )
+
+    physics_steps_per_control = (
+        CONTROL_DT
+        /
+        physics_dt
+    )
+
+    rounded_physics_steps = int(
+        round(
+            physics_steps_per_control
+        )
+    )
+
+    if (
+        rounded_physics_steps
+        <
+        1
+        or
+        not np.isclose(
+            physics_steps_per_control,
+            float(
+                rounded_physics_steps
+            ),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+    ):
+
+        raise RuntimeError(
+            "CONTROL_DT must be an integer multiple of the "
+            "MuJoCo physics timestep: "
+            f"CONTROL_DT={CONTROL_DT:.12f} s, "
+            f"physics_dt={physics_dt:.12f} s"
         )
 
     robot_root_body_id = int(
@@ -1928,8 +1986,17 @@ def run_walk(
     )
 
     print(
-        f"Physics/data sampling: dt={physics_dt:.7f} s"
+        f"MuJoCo physics timestep: "
+        f"dt={physics_dt:.7f} s"
         f" | fs={1.0 / physics_dt:.1f} Hz"
+    )
+
+    print(
+        f"Algorithm/control/data rate: "
+        f"dt={CONTROL_DT:.7f} s"
+        f" | fs={CONTROL_FREQUENCY:.1f} Hz"
+        f" | physics steps per control="
+        f"{rounded_physics_steps}"
     )
 
     print(
@@ -2672,7 +2739,7 @@ def run_walk(
             p_com_actual
             -
             previous_com_actual
-        ) / DT
+        ) / CONTROL_DT
 
         previous_com_actual = (
             p_com_actual.copy()
@@ -2687,7 +2754,7 @@ def run_walk(
         )
 
         # ====================================================
-        # DATA LOG -- EVERY PHYSICS STEP
+        # DATA LOG -- EVERY CONTROL STEP
         # ====================================================
 
         (
@@ -2826,7 +2893,7 @@ def run_walk(
                     qdot_full
                 ),
                 dt=(
-                    DT
+                    CONTROL_DT
                 ),
             )
         )
@@ -2845,7 +2912,7 @@ def run_walk(
                     lipm
                 ),
                 dt=(
-                    DT
+                    CONTROL_DT
                 ),
                 robot_mass=(
                     robot_mass
@@ -2861,17 +2928,17 @@ def run_walk(
         # ====================================================
 
         phase_time += (
-            DT
+            CONTROL_DT
         )
 
         kinematic_time += (
-            DT
+            CONTROL_DT
         )
 
         if data_collection_started:
 
             data_time += (
-                DT
+                CONTROL_DT
             )
 
         mj_data.time = (
