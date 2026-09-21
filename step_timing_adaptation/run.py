@@ -11,8 +11,10 @@
 # Contact processing:
 #   - old contact_stability.py is no longer used
 #   - no friction cone / unilateral-force / torque-limit check
-#   - q, qdot are recorded during the kinematic walking trajectory
-#   - qdd is reconstructed offline from qdot
+#   - q is generated kinematically by differential IK integration
+#   - qdot is taken directly from the differential-IK solution
+#     and converted from Pinocchio to MuJoCo velocity convention
+#   - qdd is reconstructed offline from this direct qdot history
 #   - MuJoCo provides M(q), qfrc_bias, qfrc_passive,
 #     contact points, and contact Jacobians
 #   - only the first six floating-base equations are used:
@@ -158,8 +160,8 @@ TIME_TOLERANCE = 1.0e-10
 # ============================================================
 #
 # True:
-#   - record qpos/qvel at every generated trajectory sample
-#   - reconstruct qdd offline
+#   - record qpos and direct differential-IK qvel at every sample
+#   - reconstruct qdd offline from the direct qvel history
 #   - reconstruct point-contact forces from the first six
 #     floating-base dynamic equations
 #
@@ -455,6 +457,410 @@ def get_leg_joint_angles(
 
 
 # ============================================================
+# PINOCCHIO VELOCITY -> MUJOCO QVEL
+# ============================================================
+
+def pin_velocity_to_mujoco(
+    *,
+    robot,
+    q_pin,
+    v_pin,
+    mj_model,
+):
+    """
+    Convert Pinocchio generalized velocity into MuJoCo qvel.
+
+    Mapping is performed by joint name.
+
+    Free-flyer convention:
+
+    Pinocchio:
+        v[0:3] -> linear velocity expressed in the child/body frame
+        v[3:6] -> angular velocity expressed in the child/body frame
+
+    MuJoCo free joint:
+        qvel[0:3] -> translational velocity in the world frame
+        qvel[3:6] -> angular velocity in the child/body frame
+
+    Therefore only the free-base linear velocity must be rotated:
+
+        v_world = R_world_body @ v_body
+
+    Scalar hinge/slide joint velocities are copied directly by
+    matching joint names.
+    """
+
+    q_pin = np.asarray(
+        q_pin,
+        dtype=float,
+    )
+
+    v_pin = np.asarray(
+        v_pin,
+        dtype=float,
+    )
+
+    if q_pin.shape != (
+        robot.model.nq,
+    ):
+
+        raise ValueError(
+            "q_pin has wrong shape."
+        )
+
+    if v_pin.shape != (
+        robot.model.nv,
+    ):
+
+        raise ValueError(
+            "v_pin has wrong shape."
+        )
+
+    if (
+        not np.all(
+            np.isfinite(
+                q_pin
+            )
+        )
+        or
+        not np.all(
+            np.isfinite(
+                v_pin
+            )
+        )
+    ):
+
+        raise ValueError(
+            "q_pin/v_pin contains NaN or Inf."
+        )
+
+    q_mj_reference = (
+        robot.pin_to_mujoco(
+            q_pin
+        )
+    )
+
+    v_mj = np.zeros(
+        mj_model.nv,
+        dtype=float,
+    )
+
+    for mj_joint_id in range(
+        mj_model.njnt
+    ):
+
+        joint_name = mujoco.mj_id2name(
+            mj_model,
+            mujoco.mjtObj.mjOBJ_JOINT,
+            mj_joint_id,
+        )
+
+        if joint_name is None:
+
+            continue
+
+        pin_joint_id = int(
+            robot.model.getJointId(
+                joint_name
+            )
+        )
+
+        if (
+            pin_joint_id
+            <=
+            0
+            or
+            pin_joint_id
+            >=
+            robot.model.njoints
+            or
+            robot.model.names[
+                pin_joint_id
+            ]
+            !=
+            joint_name
+        ):
+
+            raise RuntimeError(
+                f"Pinocchio joint '{joint_name}' "
+                "was not found."
+            )
+
+        mj_vadr = int(
+            mj_model.jnt_dofadr[
+                mj_joint_id
+            ]
+        )
+
+        mj_qadr = int(
+            mj_model.jnt_qposadr[
+                mj_joint_id
+            ]
+        )
+
+        pin_vadr = int(
+            robot.model.idx_vs[
+                pin_joint_id
+            ]
+        )
+
+        pin_nv = int(
+            robot.model.nvs[
+                pin_joint_id
+            ]
+        )
+
+        mj_joint_type = int(
+            mj_model.jnt_type[
+                mj_joint_id
+            ]
+        )
+
+        # ====================================================
+        # FREE JOINT
+        # ====================================================
+
+        if (
+            mj_joint_type
+            ==
+            int(
+                mujoco.mjtJoint.mjJNT_FREE
+            )
+        ):
+
+            if pin_nv != 6:
+
+                raise RuntimeError(
+                    f"Free joint '{joint_name}' "
+                    "does not have nv=6 in Pinocchio."
+                )
+
+            v_linear_body = (
+                v_pin[
+                    pin_vadr:
+                    pin_vadr + 3
+                ]
+            )
+
+            omega_body = (
+                v_pin[
+                    pin_vadr + 3:
+                    pin_vadr + 6
+                ]
+            )
+
+            # MuJoCo free-joint quaternion:
+            #
+            #     [qw, qx, qy, qz]
+            #
+            qw = float(
+                q_mj_reference[
+                    mj_qadr + 3
+                ]
+            )
+
+            qx = float(
+                q_mj_reference[
+                    mj_qadr + 4
+                ]
+            )
+
+            qy = float(
+                q_mj_reference[
+                    mj_qadr + 5
+                ]
+            )
+
+            qz = float(
+                q_mj_reference[
+                    mj_qadr + 6
+                ]
+            )
+
+            quaternion_norm = float(
+                np.sqrt(
+                    qw * qw
+                    +
+                    qx * qx
+                    +
+                    qy * qy
+                    +
+                    qz * qz
+                )
+            )
+
+            if (
+                not np.isfinite(
+                    quaternion_norm
+                )
+                or
+                quaternion_norm
+                <=
+                1.0e-12
+            ):
+
+                raise RuntimeError(
+                    "Invalid free-base quaternion."
+                )
+
+            qw /= quaternion_norm
+            qx /= quaternion_norm
+            qy /= quaternion_norm
+            qz /= quaternion_norm
+
+            # Rotation from child/body frame to world frame.
+            R_world_body = np.array(
+                [
+                    [
+                        1.0
+                        -
+                        2.0
+                        *
+                        (
+                            qy * qy
+                            +
+                            qz * qz
+                        ),
+                        2.0
+                        *
+                        (
+                            qx * qy
+                            -
+                            qw * qz
+                        ),
+                        2.0
+                        *
+                        (
+                            qx * qz
+                            +
+                            qw * qy
+                        ),
+                    ],
+                    [
+                        2.0
+                        *
+                        (
+                            qx * qy
+                            +
+                            qw * qz
+                        ),
+                        1.0
+                        -
+                        2.0
+                        *
+                        (
+                            qx * qx
+                            +
+                            qz * qz
+                        ),
+                        2.0
+                        *
+                        (
+                            qy * qz
+                            -
+                            qw * qx
+                        ),
+                    ],
+                    [
+                        2.0
+                        *
+                        (
+                            qx * qz
+                            -
+                            qw * qy
+                        ),
+                        2.0
+                        *
+                        (
+                            qy * qz
+                            +
+                            qw * qx
+                        ),
+                        1.0
+                        -
+                        2.0
+                        *
+                        (
+                            qx * qx
+                            +
+                            qy * qy
+                        ),
+                    ],
+                ],
+                dtype=float,
+            )
+
+            v_mj[
+                mj_vadr:
+                mj_vadr + 3
+            ] = (
+                R_world_body
+                @
+                v_linear_body
+            )
+
+            # Both Pinocchio and MuJoCo use child/body-frame
+            # angular velocity for the rotational part of a
+            # free joint.
+            v_mj[
+                mj_vadr + 3:
+                mj_vadr + 6
+            ] = (
+                omega_body
+            )
+
+        # ====================================================
+        # HINGE / SLIDE JOINT
+        # ====================================================
+
+        elif (
+            mj_joint_type
+            in (
+                int(
+                    mujoco.mjtJoint.mjJNT_HINGE
+                ),
+                int(
+                    mujoco.mjtJoint.mjJNT_SLIDE
+                ),
+            )
+        ):
+
+            if pin_nv != 1:
+
+                raise RuntimeError(
+                    f"Joint '{joint_name}' "
+                    "does not have nv=1 in Pinocchio."
+                )
+
+            v_mj[
+                mj_vadr
+            ] = (
+                v_pin[
+                    pin_vadr
+                ]
+            )
+
+        else:
+
+            raise NotImplementedError(
+                f"Unsupported MuJoCo joint type "
+                f"for '{joint_name}'."
+            )
+
+    if not np.all(
+        np.isfinite(
+            v_mj
+        )
+    ):
+
+        raise RuntimeError(
+            "Converted MuJoCo qvel contains NaN or Inf."
+        )
+
+    return v_mj
+
+
+# ============================================================
 # MUJOCO STATE UPDATE
 # ============================================================
 
@@ -462,11 +868,29 @@ def update_mujoco_from_pinocchio(
     *,
     robot,
     q_pin,
+    q_pin_velocity_reference,
+    qvel_pin,
     mj_model,
     mj_data,
-    previous_qpos_mj,
-    dt,
 ):
+    """
+    Set the kinematically generated Pinocchio state in MuJoCo.
+
+    Unlike the previous implementation, qvel is NOT reconstructed
+    from two consecutive MuJoCo qpos samples.
+
+    Instead:
+
+        differential IK
+            -> qdot_full (Pinocchio generalized velocity)
+            -> frame-convention conversion
+            -> mj_data.qvel
+
+    q_pin_velocity_reference is the Pinocchio configuration at which
+    qdot_full was computed. It is used only for converting the
+    free-base linear velocity from body coordinates to world
+    coordinates.
+    """
 
     q_mj = (
         robot.pin_to_mujoco(
@@ -474,46 +898,21 @@ def update_mujoco_from_pinocchio(
         )
     )
 
-    previous_qpos_mj = np.asarray(
-        previous_qpos_mj,
-        dtype=float,
-    )
-
-    if previous_qpos_mj.shape != (
-        mj_model.nq,
-    ):
-
-        raise ValueError(
-            "previous_qpos_mj has wrong shape."
+    qvel_mj = (
+        pin_velocity_to_mujoco(
+            robot=(
+                robot
+            ),
+            q_pin=(
+                q_pin_velocity_reference
+            ),
+            v_pin=(
+                qvel_pin
+            ),
+            mj_model=(
+                mj_model
+            ),
         )
-
-    dt = float(
-        dt
-    )
-
-    if (
-        not np.isfinite(
-            dt
-        )
-        or
-        dt <= 0.0
-    ):
-
-        raise ValueError(
-            "dt must be positive and finite."
-        )
-
-    qvel_mj = np.zeros(
-        mj_model.nv,
-        dtype=float,
-    )
-
-    mujoco.mj_differentiatePos(
-        mj_model,
-        qvel_mj,
-        dt,
-        previous_qpos_mj,
-        q_mj,
     )
 
     mj_data.qpos[:] = q_mj
@@ -1472,10 +1871,6 @@ def run_walk(
         )
     )
 
-    previous_qpos_mj = (
-        mj_data.qpos.copy()
-    )
-
     next_print_time = 0.0
     next_viewer_sync_time = 0.0
 
@@ -2008,6 +2403,15 @@ def run_walk(
         # ====================================================
         # PINOCCHIO INTEGRATION
         # ====================================================
+        #
+        # qdot_full was computed at the CURRENT q_pin.
+        # Keep that configuration for the Pinocchio -> MuJoCo
+        # free-base velocity-frame conversion.
+        # ====================================================
+
+        q_pin_velocity_reference = (
+            q_pin.copy()
+        )
 
         q_pin = (
             robot.integrate(
@@ -2033,7 +2437,7 @@ def run_walk(
 
         (
             current_qpos_mj,
-            _,
+            current_qvel_mj,
         ) = (
             update_mujoco_from_pinocchio(
                 robot=(
@@ -2042,23 +2446,27 @@ def run_walk(
                 q_pin=(
                     q_pin
                 ),
+                q_pin_velocity_reference=(
+                    q_pin_velocity_reference
+                ),
+                qvel_pin=(
+                    qdot_full
+                ),
                 mj_model=(
                     mj_model
                 ),
                 mj_data=(
                     mj_data
                 ),
-                previous_qpos_mj=(
-                    previous_qpos_mj
-                ),
-                dt=(
-                    physics_dt
-                ),
             )
         )
 
-        previous_qpos_mj = (
-            current_qpos_mj.copy()
+        # Keep the returned variables available for debugging.
+        # Contact-force reconstruction records mj_data.qpos/qvel
+        # immediately below.
+        _ = (
+            current_qpos_mj,
+            current_qvel_mj,
         )
 
         # ====================================================
