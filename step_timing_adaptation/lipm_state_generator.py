@@ -9,17 +9,43 @@ import numpy as np
 
 
 # ============================================================
-# OUTPUT
+# LIPM SAMPLE
 # ============================================================
 
 @dataclass(frozen=True)
 class LIPMSample:
+    """
+    State of the point-foot LIPM at one instant.
+
+    Conventions:
+        x : forward
+        y : left
+        z : upward
+
+    The horizontal LIPM dynamics are
+
+        x_ddot = omega^2 (x - u)
+
+    with
+
+        omega = sqrt(g / z0)
+
+    where u is the current stance/contact point.
+
+    The DCM is
+
+        xi = x + x_dot / omega
+    """
 
     position: np.ndarray
     velocity: np.ndarray
     acceleration: np.ndarray
+
     dcm: np.ndarray
     support_position: np.ndarray
+
+    omega: float
+    com_height: float
 
 
 # ============================================================
@@ -28,38 +54,37 @@ class LIPMSample:
 
 class PointFootLIPM:
     """
-    Exact horizontal point-foot LIPM state generator.
+    Point-foot Linear Inverted Pendulum Model.
 
-    Nominal model:
+    This class reproduces the CoM evolution used in the LIPM
+    simulation of Khadiv et al., "Walking Control Based on
+    Step Timing Adaptation":
 
-        c_ddot = omega^2 (c - u0)
+        1) During one stance phase, the support point u0 is
+           fixed.
 
-    where:
+        2) The horizontal CoM state is propagated forward
+           from
 
-        c  : horizontal CoM position
-        u0 : stance-foot CoP / ZMP
+               x_ddot = omega^2 (x - u0)
 
-    With an external horizontal force applied at the CoM:
+        3) At touchdown, the support point is reset
 
-        c_ddot
-            =
-            omega^2 (c - u0)
-            +
-            F_ext / m
+               u0 <- uT
 
-    The external force is handled directly in the reduced-order
-    LIPM dynamics.
+           while CoM position and velocity remain continuous.
 
-    During one support phase:
+    No CoM MPC is solved here.
 
-        u0 = constant
+    The integration below uses the exact closed-form solution
+    over each dt. This is mathematically equivalent to
+    integrating the LIPM ODE forward, but avoids numerical
+    drift associated with explicit Euler integration.
 
-    At touchdown:
+    An optional constant horizontal external force can be
+    applied during one integration interval. It enters as
 
-        u0(new) = uT
-
-    Horizontal propagation is analytical.
-    Vertical CoM height is constant.
+        x_ddot = omega^2 (x - u0) + F_ext / m
     """
 
     def __init__(
@@ -72,24 +97,25 @@ class PointFootLIPM:
         support_position,
     ) -> None:
 
-        self.gravity = float(
-            gravity
-        )
+        self.gravity = float(gravity)
+        self.com_height = float(com_height)
 
-        self.com_height = float(
-            com_height
-        )
-
-        if self.gravity <= 0.0:
-
+        if (
+            not math.isfinite(self.gravity)
+            or
+            self.gravity <= 0.0
+        ):
             raise ValueError(
-                "gravity must be positive."
+                "gravity must be finite and positive."
             )
 
-        if self.com_height <= 0.0:
-
+        if (
+            not math.isfinite(self.com_height)
+            or
+            self.com_height <= 0.0
+        ):
             raise ValueError(
-                "com_height must be positive."
+                "com_height must be finite and positive."
             )
 
         self.omega = math.sqrt(
@@ -98,40 +124,109 @@ class PointFootLIPM:
             self.com_height
         )
 
-        position = self._vector3(
+        self._position = self._as_vector3(
             initial_position,
-            "initial_position",
+            name="initial_position",
         )
 
-        velocity = self._vector3(
+        self._velocity = self._as_vector3(
             initial_velocity,
-            "initial_velocity",
+            name="initial_velocity",
         )
 
-        support = self._vector3(
+        self._support_position = self._as_vector3(
             support_position,
-            "support_position",
+            name="support_position",
         )
 
-        self._position_xy = (
-            position[0:2].copy()
+        # LIPM assumes constant CoM height relative to the
+        # support plane.
+        self._position[2] = (
+            self._support_position[2]
+            +
+            self.com_height
         )
 
-        self._velocity_xy = (
-            velocity[0:2].copy()
-        )
+        self._velocity[2] = 0.0
 
-        self._com_z = float(
-            position[2]
-        )
-
-        self._support_position = (
-            support.copy()
+        self._last_external_acceleration_xy = np.zeros(
+            2,
+            dtype=float,
         )
 
 
     # ========================================================
-    # SUPPORT SWITCH
+    # VALIDATION
+    # ========================================================
+
+    @staticmethod
+    def _as_vector3(
+        value,
+        *,
+        name: str,
+    ) -> np.ndarray:
+
+        vector = np.asarray(
+            value,
+            dtype=float,
+        ).reshape(-1)
+
+        if vector.size < 3:
+
+            raise ValueError(
+                f"{name} must contain at least 3 values."
+            )
+
+        vector = vector[:3].copy()
+
+        if not np.all(
+            np.isfinite(
+                vector
+            )
+        ):
+
+            raise ValueError(
+                f"{name} contains NaN/Inf."
+            )
+
+        return vector
+
+
+    @staticmethod
+    def _as_vector2(
+        value,
+        *,
+        name: str,
+    ) -> np.ndarray:
+
+        vector = np.asarray(
+            value,
+            dtype=float,
+        ).reshape(-1)
+
+        if vector.size < 2:
+
+            raise ValueError(
+                f"{name} must contain at least 2 values."
+            )
+
+        vector = vector[:2].copy()
+
+        if not np.all(
+            np.isfinite(
+                vector
+            )
+        ):
+
+            raise ValueError(
+                f"{name} contains NaN/Inf."
+            )
+
+        return vector
+
+
+    # ========================================================
+    # SUPPORT POINT
     # ========================================================
 
     def set_support_position(
@@ -139,109 +234,90 @@ class PointFootLIPM:
         support_position,
     ) -> None:
         """
-        Switch point-foot support without changing CoM
-        position or velocity.
+        Reset the LIPM support/contact point at touchdown.
 
-        At touchdown:
+        This implements the paper's operation
 
             u0 <- uT
+
+        at the optimized landing time T.
+
+        Horizontal CoM position and velocity are NOT reset.
+        Therefore the LIPM state remains continuous across
+        the support switch.
+
+        For flat terrain this only changes u_x and u_y.
+        z is kept consistent with the fixed CoM-height
+        assumption.
         """
 
-        support = self._vector3(
+        new_support = self._as_vector3(
             support_position,
-            "support_position",
+            name="support_position",
         )
 
-        self._support_position = (
-            support.copy()
+        self._support_position[:] = (
+            new_support
         )
+
+        self._position[2] = (
+            self._support_position[2]
+            +
+            self.com_height
+        )
+
+        self._velocity[2] = 0.0
 
 
     # ========================================================
-    # CURRENT SAMPLE
+    # CURRENT STATE
     # ========================================================
 
     def sample(
         self,
     ) -> LIPMSample:
+        """
+        Return the current LIPM state without propagating it.
+        """
 
-        support_xy = (
-            self._support_position[
-                0:2
-            ]
+        acceleration = np.zeros(
+            3,
+            dtype=float,
         )
 
-        acceleration_xy = (
+        acceleration[0:2] = (
             self.omega**2
             *
             (
-                self._position_xy
+                self._position[0:2]
                 -
-                support_xy
+                self._support_position[0:2]
             )
+            +
+            self._last_external_acceleration_xy
         )
 
         dcm = (
-            self._position_xy
+            self._position[0:2]
             +
-            self._velocity_xy
+            self._velocity[0:2]
             /
             self.omega
         )
 
-        position = np.array(
-            [
-                self._position_xy[0],
-                self._position_xy[1],
-                self._com_z,
-            ],
-            dtype=float,
-        )
-
-        velocity = np.array(
-            [
-                self._velocity_xy[0],
-                self._velocity_xy[1],
-                0.0,
-            ],
-            dtype=float,
-        )
-
-        acceleration = np.array(
-            [
-                acceleration_xy[0],
-                acceleration_xy[1],
-                0.0,
-            ],
-            dtype=float,
-        )
-
         return LIPMSample(
-
-            position=(
-                position
-            ),
-
-            velocity=(
-                velocity
-            ),
-
-            acceleration=(
-                acceleration
-            ),
-
-            dcm=(
-                dcm.copy()
-            ),
-
-            support_position=(
-                self._support_position.copy()
-            ),
+            position=self._position.copy(),
+            velocity=self._velocity.copy(),
+            acceleration=acceleration,
+            dcm=dcm.copy(),
+            support_position=self._support_position.copy(),
+            omega=float(self.omega),
+            com_height=float(self.com_height),
         )
 
 
     # ========================================================
-    # EXACT PROPAGATION
+    # FORWARD PROPAGATION
     # ========================================================
 
     def advance(
@@ -249,72 +325,63 @@ class PointFootLIPM:
         dt: float,
         *,
         external_force_xy=None,
-        mass=None,
+        mass: float | None = None,
     ) -> LIPMSample:
         """
-        Exact propagation over dt.
+        Propagate the LIPM forward by dt.
 
-        Without external force:
+        Nominal dynamics:
 
-            c_ddot
-                =
-                omega^2 (c - u0)
+            x_ddot = omega^2 (x - u0)
 
-        With a constant external force during this interval:
+        With an optional constant horizontal external force
+        over this interval:
 
-            c_ddot
-                =
-                omega^2 (c - u0)
-                +
-                F / m
+            x_ddot
+                = omega^2 (x - u0)
+                + F_ext / m
 
-        Define:
+        The exact solution is used over the interval dt.
 
-            a_ext = F / m
+        Parameters
+        ----------
+        dt
+            Integration interval [s].
 
-        then:
+        external_force_xy
+            Optional [Fx, Fy] force [N]. The force is assumed
+            constant during this call.
 
-            u_eff
-                =
-                u0
-                -
-                a_ext / omega^2
+        mass
+            Robot mass [kg], required when external_force_xy
+            is supplied.
 
-        and the system becomes:
-
-            c_ddot
-                =
-                omega^2 (c - u_eff)
-
-        Therefore the same analytical LIPM solution can be
-        used exactly over the interval.
+        Returns
+        -------
+        LIPMSample
+            State after propagation.
         """
 
-        dt = float(
-            dt
-        )
+        dt = float(dt)
 
         if (
-            not math.isfinite(
-                dt
-            )
+            not math.isfinite(dt)
             or
-            dt <= 0.0
+            dt < 0.0
         ):
-
             raise ValueError(
-                "dt must be positive and finite."
+                "dt must be finite and non-negative."
             )
 
-        support_xy = (
-            self._support_position[
-                0:2
-            ]
-        )
+        if dt == 0.0:
 
-        # ====================================================
-        # EXTERNAL HORIZONTAL FORCE
-        # ====================================================
+            self._last_external_acceleration_xy[:] = 0.0
+
+            return self.sample()
+
+        # ----------------------------------------------------
+        # External acceleration
+        # ----------------------------------------------------
 
         external_acceleration_xy = np.zeros(
             2,
@@ -323,11 +390,9 @@ class PointFootLIPM:
 
         if external_force_xy is not None:
 
-            force_xy = (
-                self._vector2(
-                    external_force_xy,
-                    "external_force_xy",
-                )
+            force_xy = self._as_vector2(
+                external_force_xy,
+                name="external_force_xy",
             )
 
             if mass is None:
@@ -337,20 +402,15 @@ class PointFootLIPM:
                     "external_force_xy is supplied."
                 )
 
-            mass = float(
-                mass
-            )
+            mass = float(mass)
 
             if (
-                not math.isfinite(
-                    mass
-                )
+                not math.isfinite(mass)
                 or
                 mass <= 0.0
             ):
-
                 raise ValueError(
-                    "mass must be positive and finite."
+                    "mass must be finite and positive."
                 )
 
             external_acceleration_xy = (
@@ -359,146 +419,150 @@ class PointFootLIPM:
                 mass
             )
 
-        # ====================================================
-        # EFFECTIVE SUPPORT POINT
+        self._last_external_acceleration_xy[:] = (
+            external_acceleration_xy
+        )
+
+        # ----------------------------------------------------
+        # Exact LIPM integration
+        # ----------------------------------------------------
         #
-        # c_ddot
-        #   = omega^2(c-u0) + a_ext
+        # x_ddot = omega^2 (x - u) + a_ext
         #
-        #   = omega^2(c-u_eff)
+        # Rewrite as
         #
-        # u_eff
-        #   = u0 - a_ext/omega^2
-        # ====================================================
+        # x_ddot = omega^2 (x - u_eff)
+        #
+        # with
+        #
+        # u_eff = u - a_ext / omega^2
+        #
+        # Then use the exact homogeneous LIPM solution.
+        # ----------------------------------------------------
+
+        omega = self.omega
+
+        support_xy = (
+            self._support_position[0:2]
+        )
 
         effective_support_xy = (
             support_xy
             -
             external_acceleration_xy
             /
-            self.omega**2
+            (
+                omega**2
+            )
+        )
+
+        position_xy = (
+            self._position[0:2]
+        )
+
+        velocity_xy = (
+            self._velocity[0:2]
         )
 
         relative_position = (
-            self._position_xy
+            position_xy
             -
             effective_support_xy
         )
 
         omega_dt = (
-            self.omega
+            omega
             *
             dt
         )
 
-        ch = math.cosh(
+        cosh_term = math.cosh(
             omega_dt
         )
 
-        sh = math.sinh(
+        sinh_term = math.sinh(
             omega_dt
         )
 
-        new_position = (
+        new_position_xy = (
             effective_support_xy
             +
             relative_position
             *
-            ch
+            cosh_term
             +
-            self._velocity_xy
+            velocity_xy
             /
-            self.omega
+            omega
             *
-            sh
+            sinh_term
         )
 
-        new_velocity = (
-            self.omega
+        new_velocity_xy = (
+            omega
             *
             relative_position
             *
-            sh
+            sinh_term
             +
-            self._velocity_xy
+            velocity_xy
             *
-            ch
+            cosh_term
         )
 
-        self._position_xy = (
-            new_position
+        self._position[0:2] = (
+            new_position_xy
         )
 
-        self._velocity_xy = (
-            new_velocity
+        self._velocity[0:2] = (
+            new_velocity_xy
         )
+
+        # Fixed CoM height.
+        self._position[2] = (
+            self._support_position[2]
+            +
+            self.com_height
+        )
+
+        self._velocity[2] = 0.0
 
         return self.sample()
 
 
     # ========================================================
-    # VALIDATION
+    # OPTIONAL DIRECT STATE RESET
     # ========================================================
 
-    @staticmethod
-    def _vector2(
-        value,
-        name: str,
-    ) -> np.ndarray:
+    def set_horizontal_state(
+        self,
+        *,
+        position_xy,
+        velocity_xy,
+    ) -> None:
+        """
+        Explicitly overwrite the horizontal LIPM state.
 
-        value = np.asarray(
-            value,
-            dtype=float,
+        This is not needed in the paper-style nominal loop,
+        but is useful for initialization or controlled tests.
+        """
+
+        position_xy = self._as_vector2(
+            position_xy,
+            name="position_xy",
         )
 
-        if value.shape != (
-            2,
-        ):
-
-            raise ValueError(
-                f"{name} must have shape (2,)."
-            )
-
-        if not np.all(
-            np.isfinite(
-                value
-            )
-        ):
-
-            raise ValueError(
-                f"{name} must contain finite values."
-            )
-
-        return value
-
-
-    @staticmethod
-    def _vector3(
-        value,
-        name: str,
-    ) -> np.ndarray:
-
-        value = np.asarray(
-            value,
-            dtype=float,
+        velocity_xy = self._as_vector2(
+            velocity_xy,
+            name="velocity_xy",
         )
 
-        if value.shape != (
-            3,
-        ):
+        self._position[0:2] = (
+            position_xy
+        )
 
-            raise ValueError(
-                f"{name} must have shape (3,)."
-            )
+        self._velocity[0:2] = (
+            velocity_xy
+        )
 
-        if not np.all(
-            np.isfinite(
-                value
-            )
-        ):
-
-            raise ValueError(
-                f"{name} must contain finite values."
-            )
-
-        return value
+        self._last_external_acceleration_xy[:] = 0.0
