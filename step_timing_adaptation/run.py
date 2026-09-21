@@ -78,6 +78,10 @@ if __package__:
         plot_contact_force_results,
     )
 
+    from .data_logger import (
+        JointAngleDataLogger,
+    )
+
 else:
 
     from adaptive_step_planner import (
@@ -102,6 +106,10 @@ else:
     from contact_force_reconstruction import (
         ContactForceReconstructor,
         plot_contact_force_results,
+    )
+
+    from data_logger import (
+        JointAngleDataLogger,
     )
 
 
@@ -1445,6 +1453,25 @@ def run_walk(
         )
     )
 
+    # ========================================================
+    # JOINT ANGLE DATA LOGGER
+    # ========================================================
+
+    joint_data_logger = (
+        JointAngleDataLogger(
+            joint_names=(
+                LEG_JOINT_NAMES
+            ),
+            output_file=(
+                CURRENT_DIR
+                /
+                "data"
+                /
+                "joint_angles.csv"
+            ),
+        )
+    )
+
     previous_qpos_mj = (
         mj_data.qpos.copy()
     )
@@ -2064,6 +2091,15 @@ def run_walk(
             )
         )
 
+        joint_data_logger.append(
+            time=(
+                kinematic_time
+            ),
+            joint_angles=(
+                leg_joint_angles
+            ),
+        )
+
         # ====================================================
         # WHOLE-BODY CENTROIDAL QUANTITIES
         # ====================================================
@@ -2295,6 +2331,26 @@ def run_walk(
         f" | auto_push_applied="
         f"{automatic_push_applied}"
     )
+
+    # ========================================================
+    # SAVE JOINT ANGLE DATA
+    # ========================================================
+
+    joint_angle_file = (
+        joint_data_logger.save_csv()
+    )
+
+    print(
+        f"Joint-angle data saved to: "
+        f"{joint_angle_file}"
+    )
+
+    print(
+        f"Joint-angle samples     : "
+        f"{joint_data_logger.number_samples()}"
+    )
+
+    print()
 
     # ========================================================
     # OFFLINE FLOATING-BASE CONTACT FORCE RECONSTRUCTION
