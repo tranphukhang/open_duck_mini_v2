@@ -22,6 +22,27 @@ FLOATING_BASE_JOINT_NAME = "floating_base"
 
 BASE_DOF = 6
 
+# ============================================================
+# LEG JOINTS
+# ============================================================
+#
+# Only these 10 joints are reconstructed and plotted.
+# The 4 neck/head joints are intentionally excluded.
+# ============================================================
+
+LEG_JOINT_NAMES = (
+    "left_hip_yaw",
+    "left_hip_roll",
+    "left_hip_pitch",
+    "left_knee",
+    "left_ankle",
+    "right_hip_yaw",
+    "right_hip_roll",
+    "right_hip_pitch",
+    "right_knee",
+    "right_ankle",
+)
+
 
 # ============================================================
 # RESULT
@@ -41,7 +62,7 @@ class JointTorqueTrajectory:
         produced a valid point-contact force distribution.
 
     joint_names:
-        Actuated single-DoF joints, kept in actuator order.
+        The 10 actuated leg joints, kept in actuator order.
 
     joint_torques:
         Dictionary:
@@ -105,8 +126,8 @@ class JointTorqueReconstructor:
     the floating base is unactuated. Those six entries are retained
     only as a consistency residual.
 
-    The remaining single-DoF actuated joint entries are reported as
-    reconstructed joint torques.
+    Only the 10 leg-joint entries are reported as reconstructed
+    joint torques. The four neck/head joints are intentionally ignored.
 
     IMPORTANT
     ---------
@@ -291,6 +312,10 @@ class JointTorqueReconstructor:
 
                 continue
 
+            if joint_name not in LEG_JOINT_NAMES:
+
+                continue
+
             if joint_name not in actuator_ids_by_joint:
 
                 joint_order.append(
@@ -307,13 +332,29 @@ class JointTorqueReconstructor:
                 actuator_id
             )
 
+        missing_leg_joints = [
+            joint_name
+            for joint_name
+            in LEG_JOINT_NAMES
+            if joint_name not in actuator_ids_by_joint
+        ]
+
         if len(
-            joint_order
-        ) == 0:
+            missing_leg_joints
+        ) > 0:
 
             raise RuntimeError(
-                "No actuated single-DoF joints were found."
+                "The following leg joints do not have actuators: "
+                + ", ".join(
+                    missing_leg_joints
+                )
             )
+
+        joint_order = [
+            joint_name
+            for joint_name
+            in LEG_JOINT_NAMES
+        ]
 
         joint_dof_addresses = {}
         torque_limits = {}

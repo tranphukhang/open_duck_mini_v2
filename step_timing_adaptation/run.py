@@ -19,7 +19,8 @@
 #   - friction cone can be enabled/disabled there
 #   - joint torques are reconstructed from the remaining
 #     rigid-body equations after contact-force reconstruction
-#   - reconstructed torques are compared with actuator torque limits
+#   - only the 10 leg-joint torques are reconstructed
+#   - reconstructed leg torques are compared with actuator torque limits
 #   - differential IK computes qdot(t_k) at q(t_k)
 #   - q(t_k), qdot(t_k) are recorded BEFORE integration
 #   - qdot is converted from Pinocchio to MuJoCo convention
