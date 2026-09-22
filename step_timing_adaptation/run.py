@@ -206,7 +206,7 @@ INITIAL_SPACING_TOLERANCE = 0.005
 MAX_PREPARATION_TIME = 5.0
 
 DESIRED_VELOCITY_X = 0.03
-DESIRED_VELOCITY_Y = 0.03
+DESIRED_VELOCITY_Y = 0.0
 
 FIRST_STANCE_SIDE = "left"
 
@@ -292,14 +292,14 @@ COM_HEIGHT = 0.215
 # EXTERNAL PUSH
 # ============================================================
 
-ENABLE_AUTOMATIC_PUSH = False
+ENABLE_AUTOMATIC_PUSH = True
 
 PUSH_TIME = 5.0
 
 PUSH_FORCE_X = 0.0
-PUSH_FORCE_Y = 0.0
+PUSH_FORCE_Y = 5.0
 
-PUSH_DURATION = 0.05
+PUSH_DURATION = 0.01
 
 
 # ============================================================
