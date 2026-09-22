@@ -725,6 +725,202 @@ def plot_motion_results(
 
 
 # ============================================================
+# DESIRED / ACTUAL ROBOT VELOCITY
+# ============================================================
+
+def plot_velocity_tracking(
+    data,
+):
+    """
+    Compare the commanded horizontal walking velocity against the
+    actual whole-body CoM velocity computed from MuJoCo.
+
+    Desired:
+        command_vx, command_vy
+
+    Actual:
+        whole_body_com_vx, whole_body_com_vy
+    """
+
+    time = np.asarray(
+        data[
+            "time"
+        ],
+        dtype=float,
+    )
+
+    desired_vx = np.asarray(
+        data[
+            "command_vx"
+        ],
+        dtype=float,
+    )
+
+    desired_vy = np.asarray(
+        data[
+            "command_vy"
+        ],
+        dtype=float,
+    )
+
+    actual_vx = np.asarray(
+        data[
+            "whole_body_com_vx"
+        ],
+        dtype=float,
+    )
+
+    actual_vy = np.asarray(
+        data[
+            "whole_body_com_vy"
+        ],
+        dtype=float,
+    )
+
+    if not (
+        time.size
+        ==
+        desired_vx.size
+        ==
+        desired_vy.size
+        ==
+        actual_vx.size
+        ==
+        actual_vy.size
+    ):
+
+        raise RuntimeError(
+            "Velocity plot data have inconsistent lengths."
+        )
+
+    figure, axes = plt.subplots(
+        2,
+        1,
+        figsize=(
+            11,
+            7,
+        ),
+        sharex=True,
+    )
+
+    # ========================================================
+    # X VELOCITY
+    # ========================================================
+
+    axes[
+        0
+    ].plot(
+        time,
+        desired_vx,
+        linestyle="--",
+        linewidth=1.8,
+        label="Desired Vx",
+    )
+
+    axes[
+        0
+    ].plot(
+        time,
+        actual_vx,
+        linewidth=1.4,
+        label="Actual Vx",
+    )
+
+    axes[
+        0
+    ].set_ylabel(
+        "Velocity (m/s)"
+    )
+
+    axes[
+        0
+    ].set_title(
+        "Sagittal Velocity Tracking"
+    )
+
+    axes[
+        0
+    ].grid(
+        True,
+        alpha=0.3,
+    )
+
+    axes[
+        0
+    ].legend(
+        loc="best"
+    )
+
+    # ========================================================
+    # Y VELOCITY
+    # ========================================================
+
+    axes[
+        1
+    ].plot(
+        time,
+        desired_vy,
+        linestyle="--",
+        linewidth=1.8,
+        label="Desired Vy",
+    )
+
+    axes[
+        1
+    ].plot(
+        time,
+        actual_vy,
+        linewidth=1.4,
+        label="Actual Vy",
+    )
+
+    axes[
+        1
+    ].set_xlabel(
+        "Time (s)"
+    )
+
+    axes[
+        1
+    ].set_ylabel(
+        "Velocity (m/s)"
+    )
+
+    axes[
+        1
+    ].set_title(
+        "Lateral Velocity Tracking"
+    )
+
+    axes[
+        1
+    ].grid(
+        True,
+        alpha=0.3,
+    )
+
+    axes[
+        1
+    ].legend(
+        loc="best"
+    )
+
+    figure.suptitle(
+        "Desired and Actual Robot Velocity",
+        fontsize=14,
+    )
+
+    figure.tight_layout(
+        rect=(
+            0.0,
+            0.0,
+            1.0,
+            0.96,
+        )
+    )
+
+
+# ============================================================
 # LEG JOINT ANGLE PLOT
 # ============================================================
 
@@ -1255,6 +1451,14 @@ def plot_simulation_results(
     # ========================================================
 
     plot_motion_results(
+        data
+    )
+
+    # ========================================================
+    # DESIRED / ACTUAL HORIZONTAL VELOCITY
+    # ========================================================
+
+    plot_velocity_tracking(
         data
     )
 
