@@ -169,15 +169,6 @@ class SimulationLog:
 
     # --------------------------------------------------------
     # LEG JOINT ANGLES
-    #
-    # Structure:
-    #
-    # {
-    #     "left_hip_yaw":   [...],
-    #     ...
-    # }
-    #
-    # Values are stored in radians.
     # --------------------------------------------------------
 
     leg_joint_angles: dict = field(
@@ -186,15 +177,6 @@ class SimulationLog:
 
     # --------------------------------------------------------
     # LEG JOINT LIMITS
-    #
-    # Structure:
-    #
-    # {
-    #     "left_hip_yaw": (lower, upper),
-    #     ...
-    # }
-    #
-    # Values are in radians.
     # --------------------------------------------------------
 
     leg_joint_limits: dict = field(
@@ -225,19 +207,11 @@ class SimulationLog:
         leg_joint_angles,
     ):
 
-        # ----------------------------------------------------
-        # TIME
-        # ----------------------------------------------------
-
         self.time.append(
             float(
                 time
             )
         )
-
-        # ----------------------------------------------------
-        # COMMAND
-        # ----------------------------------------------------
 
         self.command_vx.append(
             float(
@@ -251,107 +225,109 @@ class SimulationLog:
             )
         )
 
-        # ----------------------------------------------------
-        # LEFT FOOT
-        # ----------------------------------------------------
-
         self.left_foot_x.append(
             float(
-                left_foot_position[0]
+                left_foot_position[
+                    0
+                ]
             )
         )
 
         self.left_foot_y.append(
             float(
-                left_foot_position[1]
+                left_foot_position[
+                    1
+                ]
             )
         )
 
         self.left_foot_z.append(
             float(
-                left_foot_position[2]
+                left_foot_position[
+                    2
+                ]
             )
         )
 
-        # ----------------------------------------------------
-        # RIGHT FOOT
-        # ----------------------------------------------------
-
         self.right_foot_x.append(
             float(
-                right_foot_position[0]
+                right_foot_position[
+                    0
+                ]
             )
         )
 
         self.right_foot_y.append(
             float(
-                right_foot_position[1]
+                right_foot_position[
+                    1
+                ]
             )
         )
 
         self.right_foot_z.append(
             float(
-                right_foot_position[2]
+                right_foot_position[
+                    2
+                ]
             )
         )
 
-        # ----------------------------------------------------
-        # LIPM COM
-        # ----------------------------------------------------
-
         self.com_x.append(
             float(
-                com_position[0]
+                com_position[
+                    0
+                ]
             )
         )
 
         self.com_y.append(
             float(
-                com_position[1]
+                com_position[
+                    1
+                ]
             )
         )
 
-        # ----------------------------------------------------
-        # DCM
-        # ----------------------------------------------------
-
         self.dcm_x.append(
             float(
-                dcm[0]
+                dcm[
+                    0
+                ]
             )
         )
 
         self.dcm_y.append(
             float(
-                dcm[1]
+                dcm[
+                    1
+                ]
             )
         )
 
-        # ----------------------------------------------------
-        # LANDING POSITION
-        # ----------------------------------------------------
-
         self.landing_x.append(
             float(
-                landing_position[0]
+                landing_position[
+                    0
+                ]
             )
         )
 
         self.landing_y.append(
             float(
-                landing_position[1]
+                landing_position[
+                    1
+                ]
             )
         )
 
         self.landing_z.append(
             float(
-                landing_position[2]
+                landing_position[
+                    2
+                ]
             )
         )
-
-        # ----------------------------------------------------
-        # STEP TIME
-        # ----------------------------------------------------
 
         self.step_time.append(
             float(
@@ -359,89 +335,91 @@ class SimulationLog:
             )
         )
 
-        # ----------------------------------------------------
-        # PUSH
-        # ----------------------------------------------------
-
         self.push_active.append(
             bool(
                 push_active
             )
         )
 
-        # ----------------------------------------------------
-        # WHOLE-BODY COM POSITION
-        # ----------------------------------------------------
-
         self.whole_body_com_x.append(
             float(
-                whole_body_com_position[0]
+                whole_body_com_position[
+                    0
+                ]
             )
         )
 
         self.whole_body_com_y.append(
             float(
-                whole_body_com_position[1]
+                whole_body_com_position[
+                    1
+                ]
             )
         )
 
         self.whole_body_com_z.append(
             float(
-                whole_body_com_position[2]
+                whole_body_com_position[
+                    2
+                ]
             )
         )
 
-        # ----------------------------------------------------
-        # WHOLE-BODY COM VELOCITY
-        # ----------------------------------------------------
-
         self.whole_body_com_vx.append(
             float(
-                whole_body_com_velocity[0]
+                whole_body_com_velocity[
+                    0
+                ]
             )
         )
 
         self.whole_body_com_vy.append(
             float(
-                whole_body_com_velocity[1]
+                whole_body_com_velocity[
+                    1
+                ]
             )
         )
 
         self.whole_body_com_vz.append(
             float(
-                whole_body_com_velocity[2]
+                whole_body_com_velocity[
+                    2
+                ]
             )
         )
 
-        # ----------------------------------------------------
-        # ANGULAR MOMENTUM
-        # ----------------------------------------------------
-
         self.angular_momentum_x.append(
             float(
-                angular_momentum[0]
+                angular_momentum[
+                    0
+                ]
             )
         )
 
         self.angular_momentum_y.append(
             float(
-                angular_momentum[1]
+                angular_momentum[
+                    1
+                ]
             )
         )
 
         self.angular_momentum_z.append(
             float(
-                angular_momentum[2]
+                angular_momentum[
+                    2
+                ]
             )
         )
 
-        # ----------------------------------------------------
-        # LEG JOINT ANGLES
-        # ----------------------------------------------------
+        for joint_name in (
+            self.leg_joint_angles
+        ):
 
-        for joint_name in self.leg_joint_angles:
-
-            if joint_name not in leg_joint_angles:
+            if joint_name not in (
+                leg_joint_angles
+            ):
 
                 raise KeyError(
                     f"Missing logged joint angle: "
@@ -473,10 +451,6 @@ class SimulationLog:
             self
         ).items():
 
-            # ------------------------------------------------
-            # JOINT ANGLES
-            # ------------------------------------------------
-
             if name == "leg_joint_angles":
 
                 data[
@@ -495,10 +469,6 @@ class SimulationLog:
                     in values.items()
                 }
 
-            # ------------------------------------------------
-            # JOINT LIMITS
-            # ------------------------------------------------
-
             elif name == "leg_joint_limits":
 
                 data[
@@ -506,10 +476,6 @@ class SimulationLog:
                 ] = dict(
                     values
                 )
-
-            # ------------------------------------------------
-            # NORMAL DATA
-            # ------------------------------------------------
 
             else:
 
@@ -536,14 +502,6 @@ def plot_motion_results(
         ]
     )
 
-    # ========================================================
-    # THREE SUBPLOTS
-    #
-    # 1. Sagittal motion
-    # 2. Lateral motion
-    # 3. Swing-foot height
-    # ========================================================
-
     figure, axes = plt.subplots(
         3,
         1,
@@ -555,7 +513,7 @@ def plot_motion_results(
     )
 
     # ========================================================
-    # 1. X DIRECTION
+    # SAGITTAL
     # ========================================================
 
     axes[
@@ -631,7 +589,7 @@ def plot_motion_results(
     )
 
     # ========================================================
-    # 2. Y DIRECTION
+    # LATERAL
     # ========================================================
 
     axes[
@@ -707,7 +665,7 @@ def plot_motion_results(
     )
 
     # ========================================================
-    # 3. SWING FOOT HEIGHT
+    # FOOT HEIGHT
     # ========================================================
 
     axes[
@@ -792,49 +750,33 @@ def plot_leg_joint_angles(
         ]
     )
 
-    # ========================================================
-    # JOINT PAIRS
-    #
-    # Left leg in column 0
-    # Right leg in column 1
-    # ========================================================
-
     joint_pairs = (
-
         (
             "left_hip_yaw",
             "right_hip_yaw",
             "Hip Yaw",
         ),
-
         (
             "left_hip_roll",
             "right_hip_roll",
             "Hip Roll",
         ),
-
         (
             "left_hip_pitch",
             "right_hip_pitch",
             "Hip Pitch",
         ),
-
         (
             "left_knee",
             "right_knee",
             "Knee",
         ),
-
         (
             "left_ankle",
             "right_ankle",
             "Ankle",
         ),
     )
-
-    # ========================================================
-    # FIGURE
-    # ========================================================
 
     figure, axes = plt.subplots(
         5,
@@ -846,10 +788,6 @@ def plot_leg_joint_angles(
         sharex=True,
     )
 
-    # ========================================================
-    # LOOP THROUGH ALL LEG JOINTS
-    # ========================================================
-
     for row, (
         left_joint,
         right_joint,
@@ -858,22 +796,20 @@ def plot_leg_joint_angles(
         joint_pairs
     ):
 
-        joints = (
-            (
-                left_joint,
-                "Left",
-            ),
-            (
-                right_joint,
-                "Right",
-            ),
-        )
-
         for column, (
             joint_name,
             side_name,
         ) in enumerate(
-            joints
+            (
+                (
+                    left_joint,
+                    "Left",
+                ),
+                (
+                    right_joint,
+                    "Right",
+                ),
+            )
         ):
 
             axis = (
@@ -883,29 +819,19 @@ def plot_leg_joint_angles(
                 ]
             )
 
-            # ================================================
-            # CHECK DATA
-            # ================================================
-
             if joint_name not in joint_angles:
 
                 raise KeyError(
                     f"Joint angle data for "
-                    f"'{joint_name}' "
-                    f"were not found."
+                    f"'{joint_name}' were not found."
                 )
 
             if joint_name not in joint_limits:
 
                 raise KeyError(
                     f"Joint limits for "
-                    f"'{joint_name}' "
-                    f"were not found."
+                    f"'{joint_name}' were not found."
                 )
-
-            # ================================================
-            # RAD -> DEG
-            # ================================================
 
             angle_deg = np.rad2deg(
                 joint_angles[
@@ -913,20 +839,12 @@ def plot_leg_joint_angles(
                 ]
             )
 
-            # ================================================
-            # JOINT TRAJECTORY
-            # ================================================
-
             axis.plot(
                 time,
                 angle_deg,
                 linewidth=1.5,
                 label="Joint angle",
             )
-
-            # ================================================
-            # JOINT LIMITS
-            # ================================================
 
             (
                 lower_limit_rad,
@@ -937,51 +855,31 @@ def plot_leg_joint_angles(
                 ]
             )
 
-            # ------------------------------------------------
-            # LOWER LIMIT
-            # ------------------------------------------------
-
             if np.isfinite(
                 lower_limit_rad
             ):
 
-                lower_limit_deg = (
-                    np.rad2deg(
-                        lower_limit_rad
-                    )
-                )
-
                 axis.axhline(
-                    y=lower_limit_deg,
+                    y=np.rad2deg(
+                        lower_limit_rad
+                    ),
                     linestyle="--",
                     linewidth=1.2,
                     label="Lower limit",
                 )
 
-            # ------------------------------------------------
-            # UPPER LIMIT
-            # ------------------------------------------------
-
             if np.isfinite(
                 upper_limit_rad
             ):
 
-                upper_limit_deg = (
-                    np.rad2deg(
-                        upper_limit_rad
-                    )
-                )
-
                 axis.axhline(
-                    y=upper_limit_deg,
+                    y=np.rad2deg(
+                        upper_limit_rad
+                    ),
                     linestyle="--",
                     linewidth=1.2,
                     label="Upper limit",
                 )
-
-            # ================================================
-            # TITLE / LABELS
-            # ================================================
 
             axis.set_title(
                 f"{side_name} {joint_label}"
@@ -1001,10 +899,6 @@ def plot_leg_joint_angles(
                 fontsize=8,
             )
 
-    # ========================================================
-    # X LABEL
-    # ========================================================
-
     axes[
         -1,
         0,
@@ -1018,10 +912,6 @@ def plot_leg_joint_angles(
     ].set_xlabel(
         "Time (s)"
     )
-
-    # ========================================================
-    # FIGURE TITLE
-    # ========================================================
 
     figure.suptitle(
         "Leg Joint Angles and Joint Limits",
@@ -1039,20 +929,453 @@ def plot_leg_joint_angles(
 
 
 # ============================================================
+# JOINT TORQUE PLOT HELPERS
+# ============================================================
+
+def _plot_one_joint_torque(
+    *,
+    axis,
+    time,
+    torque,
+    torque_limit,
+    title,
+):
+
+    torque = np.asarray(
+        torque,
+        dtype=float,
+    )
+
+    axis.plot(
+        time,
+        torque,
+        linewidth=1.3,
+        label="Reconstructed torque",
+    )
+
+    (
+        lower_limit,
+        upper_limit,
+    ) = (
+        torque_limit
+    )
+
+    if np.isfinite(
+        lower_limit
+    ):
+
+        axis.axhline(
+            y=lower_limit,
+            linestyle="--",
+            linewidth=1.2,
+            label="Lower torque limit",
+        )
+
+    if np.isfinite(
+        upper_limit
+    ):
+
+        axis.axhline(
+            y=upper_limit,
+            linestyle="--",
+            linewidth=1.2,
+            label="Upper torque limit",
+        )
+
+    axis.axhline(
+        y=0.0,
+        linewidth=0.8,
+        alpha=0.5,
+    )
+
+    axis.set_title(
+        title
+    )
+
+    axis.set_ylabel(
+        "Torque (N m)"
+    )
+
+    axis.grid(
+        True,
+        alpha=0.3,
+    )
+
+    axis.legend(
+        loc="best",
+        fontsize=8,
+    )
+
+
+# ============================================================
+# LEG JOINT TORQUES
+# ============================================================
+
+def plot_leg_joint_torques(
+    joint_torque_results,
+):
+
+    time = np.asarray(
+        joint_torque_results.time,
+        dtype=float,
+    )
+
+    torque = (
+        joint_torque_results
+        .joint_torques
+    )
+
+    torque_limits = (
+        joint_torque_results
+        .joint_torque_limits
+    )
+
+    joint_pairs = (
+        (
+            "left_hip_yaw",
+            "right_hip_yaw",
+            "Hip Yaw",
+        ),
+        (
+            "left_hip_roll",
+            "right_hip_roll",
+            "Hip Roll",
+        ),
+        (
+            "left_hip_pitch",
+            "right_hip_pitch",
+            "Hip Pitch",
+        ),
+        (
+            "left_knee",
+            "right_knee",
+            "Knee",
+        ),
+        (
+            "left_ankle",
+            "right_ankle",
+            "Ankle",
+        ),
+    )
+
+    available_pairs = [
+        pair
+        for pair
+        in joint_pairs
+        if (
+            pair[
+                0
+            ]
+            in torque
+            and
+            pair[
+                1
+            ]
+            in torque
+        )
+    ]
+
+    if len(
+        available_pairs
+    ) == 0:
+
+        print(
+            "No leg joint torque data available "
+            "for plotting."
+        )
+
+        return
+
+    figure, axes = plt.subplots(
+        len(
+            available_pairs
+        ),
+        2,
+        figsize=(
+            14,
+            15,
+        ),
+        sharex=True,
+        squeeze=False,
+    )
+
+    for row, (
+        left_joint,
+        right_joint,
+        label,
+    ) in enumerate(
+        available_pairs
+    ):
+
+        for column, (
+            joint_name,
+            side_name,
+        ) in enumerate(
+            (
+                (
+                    left_joint,
+                    "Left",
+                ),
+                (
+                    right_joint,
+                    "Right",
+                ),
+            )
+        ):
+
+            _plot_one_joint_torque(
+                axis=(
+                    axes[
+                        row,
+                        column,
+                    ]
+                ),
+                time=(
+                    time
+                ),
+                torque=(
+                    torque[
+                        joint_name
+                    ]
+                ),
+                torque_limit=(
+                    torque_limits[
+                        joint_name
+                    ]
+                ),
+                title=(
+                    f"{side_name} {label}"
+                ),
+            )
+
+    axes[
+        -1,
+        0,
+    ].set_xlabel(
+        "Time (s)"
+    )
+
+    axes[
+        -1,
+        1,
+    ].set_xlabel(
+        "Time (s)"
+    )
+
+    valid_count = int(
+        np.count_nonzero(
+            joint_torque_results.valid
+        )
+    )
+
+    figure.suptitle(
+        "Reconstructed Leg Joint Torques and Torque Limits"
+        f" | valid samples: "
+        f"{valid_count}/{time.size}",
+        fontsize=14,
+    )
+
+    figure.tight_layout(
+        rect=(
+            0.0,
+            0.0,
+            1.0,
+            0.97,
+        )
+    )
+
+
+# ============================================================
+# UPPER-BODY JOINT TORQUES
+# ============================================================
+
+def plot_upper_body_joint_torques(
+    joint_torque_results,
+):
+
+    preferred_joints = (
+        (
+            "neck_pitch",
+            "Neck Pitch",
+        ),
+        (
+            "head_pitch",
+            "Head Pitch",
+        ),
+        (
+            "head_yaw",
+            "Head Yaw",
+        ),
+        (
+            "head_roll",
+            "Head Roll",
+        ),
+    )
+
+    available = [
+        (
+            joint_name,
+            label,
+        )
+        for (
+            joint_name,
+            label,
+        )
+        in preferred_joints
+        if joint_name
+        in
+        joint_torque_results
+        .joint_torques
+    ]
+
+    if len(
+        available
+    ) == 0:
+
+        return
+
+    time = np.asarray(
+        joint_torque_results.time,
+        dtype=float,
+    )
+
+    figure, axes = plt.subplots(
+        2,
+        2,
+        figsize=(
+            12,
+            8,
+        ),
+        sharex=True,
+        squeeze=False,
+    )
+
+    flat_axes = (
+        axes.reshape(
+            -1
+        )
+    )
+
+    for index, (
+        joint_name,
+        label,
+    ) in enumerate(
+        available
+    ):
+
+        _plot_one_joint_torque(
+            axis=(
+                flat_axes[
+                    index
+                ]
+            ),
+            time=(
+                time
+            ),
+            torque=(
+                joint_torque_results
+                .joint_torques[
+                    joint_name
+                ]
+            ),
+            torque_limit=(
+                joint_torque_results
+                .joint_torque_limits[
+                    joint_name
+                ]
+            ),
+            title=(
+                label
+            ),
+        )
+
+        flat_axes[
+            index
+        ].set_xlabel(
+            "Time (s)"
+        )
+
+    for index in range(
+        len(
+            available
+        ),
+        flat_axes.size,
+    ):
+
+        flat_axes[
+            index
+        ].axis(
+            "off"
+        )
+
+    figure.suptitle(
+        "Reconstructed Upper-Body Joint Torques and Torque Limits",
+        fontsize=14,
+    )
+
+    figure.tight_layout(
+        rect=(
+            0.0,
+            0.0,
+            1.0,
+            0.96,
+        )
+    )
+
+
+# ============================================================
+# ALL JOINT TORQUES
+# ============================================================
+
+def plot_joint_torque_results(
+    joint_torque_results,
+):
+
+    if joint_torque_results is None:
+
+        print(
+            "No joint torque reconstruction results "
+            "available for plotting."
+        )
+
+        return
+
+    if (
+        np.asarray(
+            joint_torque_results.time
+        ).size
+        ==
+        0
+    ):
+
+        print(
+            "Joint torque reconstruction result is empty."
+        )
+
+        return
+
+    plot_leg_joint_torques(
+        joint_torque_results
+    )
+
+    plot_upper_body_joint_torques(
+        joint_torque_results
+    )
+
+
+# ============================================================
 # MAIN PLOT FUNCTION
 # ============================================================
 
 def plot_simulation_results(
     simulation_log: SimulationLog,
+    *,
+    joint_torque_results=None,
 ):
 
     data = (
         simulation_log.as_numpy()
     )
-
-    # ========================================================
-    # CHECK DATA
-    # ========================================================
 
     if (
         data[
@@ -1070,7 +1393,7 @@ def plot_simulation_results(
         return
 
     # ========================================================
-    # ORIGINAL MOTION RESULTS
+    # MOTION
     # ========================================================
 
     plot_motion_results(
@@ -1078,7 +1401,7 @@ def plot_simulation_results(
     )
 
     # ========================================================
-    # LEG JOINT ANGLES + LIMITS
+    # LEG JOINT ANGLES + POSITION LIMITS
     # ========================================================
 
     if (
@@ -1100,6 +1423,16 @@ def plot_simulation_results(
         print(
             "No leg joint angle data available "
             "for plotting."
+        )
+
+    # ========================================================
+    # RECONSTRUCTED JOINT TORQUES + TORQUE LIMITS
+    # ========================================================
+
+    if joint_torque_results is not None:
+
+        plot_joint_torque_results(
+            joint_torque_results
         )
 
     # ========================================================

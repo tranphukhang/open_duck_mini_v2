@@ -4,8 +4,8 @@
 #   - initial gait preparation at vx = vy = 0
 #   - one transition step at desired walking velocity
 #   - then record 9 s of experiment data
-#   - recorded vx = +0.000 m/s
-#   - recorded vy = -0.030 m/s
+#   - recorded vx = +0.030 m/s
+#   - recorded vy = +0.030 m/s
 #   - COM_HEIGHT = 0.215 m
 #   - SWING_HEIGHT = 0.020 m
 #   - external push disabled
@@ -17,7 +17,9 @@
 #   - unilateral contact-force handling is implemented in
 #     contact_force_reconstruction.py
 #   - friction cone can be enabled/disabled there
-#   - no torque-limit check
+#   - joint torques are reconstructed from the remaining
+#     rigid-body equations after contact-force reconstruction
+#   - reconstructed torques are compared with actuator torque limits
 #   - differential IK computes qdot(t_k) at q(t_k)
 #   - q(t_k), qdot(t_k) are recorded BEFORE integration
 #   - qdot is converted from Pinocchio to MuJoCo convention
@@ -91,6 +93,10 @@ if __package__:
         JointAngleDataLogger,
     )
 
+    from .joint_torque_reconstruction import (
+        JointTorqueReconstructor,
+    )
+
 else:
 
     from adaptive_step_planner import (
@@ -119,6 +125,10 @@ else:
 
     from data_logger import (
         JointAngleDataLogger,
+    )
+
+    from joint_torque_reconstruction import (
+        JointTorqueReconstructor,
     )
 
 
@@ -221,10 +231,34 @@ TIME_TOLERANCE = 1.0e-10
 # False:
 #   - skip this reconstruction completely
 #
-# No friction-cone or unilateral-force constraints are applied.
+# Unilateral and optional friction-cone constraints are handled
+# inside contact_force_reconstruction.py.
 # ============================================================
 
 ENABLE_CONTACT_FORCE_RECONSTRUCTION = True
+
+
+# ============================================================
+# JOINT TORQUE RECONSTRUCTION
+# ============================================================
+#
+# Joint torques are reconstructed offline only after a valid
+# contact-force distribution has been obtained.
+#
+# Remaining rigid-body equations:
+#
+#     tau =
+#         M(q) qdd
+#         + qfrc_bias
+#         - qfrc_passive
+#         - J_c(q)^T f_c
+#
+# The first six floating-base components are retained only as
+# a consistency residual. The actuated single-DoF components
+# are reported as reconstructed joint torques.
+# ============================================================
+
+ENABLE_JOINT_TORQUE_RECONSTRUCTION = True
 
 
 # ============================================================
@@ -1599,6 +1633,8 @@ def run_walk(
 
         contact_force_reconstructor = None
 
+    joint_torque_results = None
+
     # ========================================================
     # INITIAL SETTLED CONFIGURATION
     # ========================================================
@@ -2030,6 +2066,11 @@ def run_walk(
     print(
         "Floating-base contact-force reconstruction: "
         f"{'ENABLED' if ENABLE_CONTACT_FORCE_RECONSTRUCTION else 'DISABLED'}"
+    )
+
+    print(
+        "Joint-torque reconstruction: "
+        f"{'ENABLED' if ENABLE_JOINT_TORQUE_RECONSTRUCTION else 'DISABLED'}"
     )
 
     print()
@@ -3032,9 +3073,73 @@ def run_walk(
 
         contact_force_results = None
 
+    # ========================================================
+    # OFFLINE JOINT TORQUE RECONSTRUCTION
+    # ========================================================
+
+    if ENABLE_JOINT_TORQUE_RECONSTRUCTION:
+
+        if (
+            contact_force_results
+            is None
+            or
+            contact_force_reconstructor
+            is None
+        ):
+
+            print()
+            print(
+                "Joint-torque reconstruction skipped because "
+                "contact-force reconstruction is unavailable."
+            )
+
+            joint_torque_results = None
+
+        else:
+
+            print()
+            print(
+                "Reconstructing joint torques from the "
+                "remaining rigid-body dynamics..."
+            )
+
+            joint_torque_reconstructor = (
+                JointTorqueReconstructor(
+                    mj_model=(
+                        mj_model
+                    )
+                )
+            )
+
+            joint_torque_results = (
+                joint_torque_reconstructor.solve_all(
+                    trajectory_samples=(
+                        contact_force_reconstructor.samples
+                    ),
+                    contact_force_results=(
+                        contact_force_results
+                    ),
+                )
+            )
+
+            joint_torque_reconstructor.print_summary(
+                joint_torque_results
+            )
+
+    else:
+
+        print()
+        print(
+            "Joint-torque reconstruction skipped "
+            "(ENABLE_JOINT_TORQUE_RECONSTRUCTION=False)."
+        )
+
+        joint_torque_results = None
+
     return (
         simulation_log,
         contact_force_results,
+        joint_torque_results,
     )
 
 
@@ -3224,6 +3329,7 @@ def main():
             (
                 simulation_log,
                 contact_force_results,
+                joint_torque_results,
             ) = (
                 run_walk(
                     mj_model=(
@@ -3249,6 +3355,7 @@ def main():
         (
             simulation_log,
             contact_force_results,
+            joint_torque_results,
         ) = (
             run_walk(
                 mj_model=(
@@ -3295,7 +3402,10 @@ def main():
     # ========================================================
 
     plot_simulation_results(
-        simulation_log
+        simulation_log,
+        joint_torque_results=(
+            joint_torque_results
+        ),
     )
 
 
