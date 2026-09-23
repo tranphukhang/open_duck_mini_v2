@@ -295,7 +295,7 @@ COM_HEIGHT = 0.215
 # EXTERNAL PUSH
 # ============================================================
 
-ENABLE_AUTOMATIC_PUSH = True
+ENABLE_AUTOMATIC_PUSH = False
 
 PUSH_TIME = 5.0
 
