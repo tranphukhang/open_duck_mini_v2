@@ -1,4 +1,3 @@
 __pycache__/
 *.pyc
 /step_timing_adaptation/data/
-/step_timing_adaptation/matlab/data/
