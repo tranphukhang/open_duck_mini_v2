@@ -92,6 +92,7 @@ if __package__:
 
     from .data_logger import (
         JointAngleDataLogger,
+        ExperimentCSVDataLogger,
     )
 
     from .joint_torque_reconstruction import (
@@ -126,6 +127,7 @@ else:
 
     from data_logger import (
         JointAngleDataLogger,
+        ExperimentCSVDataLogger,
     )
 
     from joint_torque_reconstruction import (
@@ -175,6 +177,7 @@ PHYSICS_DT = 0.0005
 #   - qpos/qvel recording for force reconstruction
 #   - joint-angle logging
 #   - simulation logging
+#   - processed experiment data are exported to separate CSV files
 #
 # 1.0 ms = 1000 Hz.
 CONTROL_DT = 0.001
@@ -3136,6 +3139,52 @@ def run_walk(
         )
 
         joint_torque_results = None
+
+    # ========================================================
+    # SAVE PROCESSED EXPERIMENT CSV DATA
+    # ========================================================
+
+    experiment_csv_logger = (
+        ExperimentCSVDataLogger(
+            output_dir=(
+                CURRENT_DIR
+                /
+                "data"
+            )
+        )
+    )
+
+    saved_experiment_csv_files = (
+        experiment_csv_logger.save_all(
+            simulation_log=(
+                simulation_log
+            ),
+            contact_force_results=(
+                contact_force_results
+            ),
+            joint_torque_results=(
+                joint_torque_results
+            ),
+        )
+    )
+
+    print()
+    print(
+        "Processed experiment CSV files:"
+    )
+
+    for (
+        data_name,
+        csv_file,
+    ) in (
+        saved_experiment_csv_files.items()
+    ):
+
+        print(
+            f"  {data_name:>20s} : {csv_file}"
+        )
+
+    print()
 
     return (
         simulation_log,
