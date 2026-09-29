@@ -2033,16 +2033,6 @@ def run_walk(
         f"{'ENABLED' if ENABLE_AUTOMATIC_PUSH else 'DISABLED'}"
     )
 
-    print(
-        "Floating-base contact-force reconstruction: "
-        f"{'ENABLED' if ENABLE_CONTACT_FORCE_RECONSTRUCTION else 'DISABLED'}"
-    )
-
-    print(
-        "Joint-torque reconstruction: "
-        f"{'ENABLED' if ENABLE_JOINT_TORQUE_RECONSTRUCTION else 'DISABLED'}"
-    )
-
     print()
 
     print(

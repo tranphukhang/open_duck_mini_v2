@@ -651,9 +651,26 @@ class ExperimentCSVDataLogger:
         self,
         *,
         simulation_log,
+        wrench_distance_results=None,
     ) -> dict[str, Path]:
 
         saved_files = {}
+
+        # ----------------------------------------------------
+        # Contact-wrench distance
+        # ----------------------------------------------------
+
+        if wrench_distance_results is not None:
+
+            saved_files[
+                "wrench_distance"
+            ] = (
+                self._save_wrench_distance(
+                    wrench_distance_results=(
+                        wrench_distance_results
+                    )
+                )
+            )
 
         # ----------------------------------------------------
         # Desired / actual velocity
@@ -728,9 +745,7 @@ class ExperimentCSVDataLogger:
         )
 
         return saved_files
-
-
-        # ========================================================
+    
     # CONTACT WRENCH DISTANCE
     # ========================================================
 
