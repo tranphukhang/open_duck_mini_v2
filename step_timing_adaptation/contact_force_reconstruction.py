@@ -57,37 +57,32 @@ BASE_DOF = 6
 # so one or more points may naturally obtain zero normal force.
 # ============================================================
 
-FOOT_CONTACT_LENGTH_X = 0.030
-FOOT_CONTACT_WIDTH_Y = 0.015
+FOOT_CONTACT_X_MAX = 0.06286
+FOOT_CONTACT_X_MIN = -0.03810
 
-FOOT_CONTACT_HALF_LENGTH_X = (
-    0.5 * FOOT_CONTACT_LENGTH_X
-)
-
-FOOT_CONTACT_HALF_WIDTH_Y = (
-    0.5 * FOOT_CONTACT_WIDTH_Y
-)
+FOOT_CONTACT_Y_MAX = 0.01901
+FOOT_CONTACT_Y_MIN = -0.01822
 
 FOOT_CONTACT_POINTS_LOCAL = np.array(
     [
         [
-            +FOOT_CONTACT_HALF_LENGTH_X,
-            +FOOT_CONTACT_HALF_WIDTH_Y,
+            FOOT_CONTACT_X_MAX,
+            FOOT_CONTACT_Y_MAX,
             0.0,
         ],
         [
-            +FOOT_CONTACT_HALF_LENGTH_X,
-            -FOOT_CONTACT_HALF_WIDTH_Y,
+            FOOT_CONTACT_X_MAX,
+            FOOT_CONTACT_Y_MIN,
             0.0,
         ],
         [
-            -FOOT_CONTACT_HALF_LENGTH_X,
-            +FOOT_CONTACT_HALF_WIDTH_Y,
+            FOOT_CONTACT_X_MIN,
+            FOOT_CONTACT_Y_MAX,
             0.0,
         ],
         [
-            -FOOT_CONTACT_HALF_LENGTH_X,
-            -FOOT_CONTACT_HALF_WIDTH_Y,
+            FOOT_CONTACT_X_MIN,
+            FOOT_CONTACT_Y_MIN,
             0.0,
         ],
     ],
