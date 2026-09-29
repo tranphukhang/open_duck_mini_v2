@@ -1,3 +1,5 @@
+# step_timing_adaptation/contact_wrench_distance.py
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,12 +15,29 @@ import numpy as np
 
 BASE_DOF = 6
 
+# Numerical rank tolerance.
 MATRIX_RCOND = 1.0e-10
 
+# Zheng-Chew stopping condition:
+#
+#     h_W(r_k) <= epsilon
+#
 SUPPORT_TOLERANCE = 1.0e-8
+
+# Required wrench is considered numerically inside the cone if
+#
+#     ||r|| <= DISTANCE_TOLERANCE
+#
 DISTANCE_TOLERANCE = 1.0e-6
 
+# Coefficients of a conic combination must be nonnegative.
 COEFFICIENT_TOLERANCE = 1.0e-10
+
+# Used only to detect numerical duplicate generators.
+GENERATOR_TOLERANCE = 1.0e-10
+
+# Used to detect numerical stagnation.
+PROGRESS_TOLERANCE = 1.0e-12
 
 MAX_DISTANCE_ITERATIONS = 100
 
@@ -32,6 +51,7 @@ FOOT_CONTACT_X_MIN = -0.03810
 
 FOOT_CONTACT_Y_MAX = 0.01901
 FOOT_CONTACT_Y_MIN = -0.01822
+
 
 FOOT_CONTACT_POINTS_LOCAL = np.array(
     [
@@ -59,6 +79,7 @@ FOOT_CONTACT_POINTS_LOCAL = np.array(
     dtype=float,
 )
 
+
 NUMBER_CONTACT_POINTS_PER_FOOT = 4
 
 
@@ -83,6 +104,12 @@ FLOATING_BASE_JOINT_NAME = "floating_base"
 
 @dataclass(frozen=True)
 class TrajectorySample:
+    """
+    One recorded kinematic trajectory sample.
+
+    stance_side is supplied directly by the walking state
+    machine and is not inferred from MuJoCo collision.
+    """
 
     time: float
 
@@ -94,6 +121,9 @@ class TrajectorySample:
 
 @dataclass(frozen=True)
 class WrenchDistanceResult:
+    """
+    Distance result for one trajectory sample.
+    """
 
     time: float
 
@@ -108,16 +138,23 @@ class WrenchDistanceResult:
 
     qacc: np.ndarray
 
+    # b = required floating-base generalized wrench.
     required_wrench: np.ndarray
 
+    # v* = closest feasible wrench found by the algorithm.
     closest_wrench: np.ndarray
 
+    # r = b - v*
     residual_wrench: np.ndarray
 
+    # d = ||r||
     distance: float
 
+    # True only when d <= DISTANCE_TOLERANCE.
     feasible: bool
 
+    # True when the distance algorithm satisfied its
+    # convergence condition.
     converged: bool
 
     iterations: int
@@ -132,23 +169,22 @@ class WrenchDistanceResult:
 # ============================================================
 
 class ContactWrenchDistanceEvaluator:
-
     """
-    Evaluate the distance from the required floating-base wrench
-    to the feasible multicontact wrench cone.
+    Evaluate the distance between the required floating-base
+    wrench and the feasible contact-wrench cone.
 
-    Contact force at point i:
+    At contact point i:
 
         f_i = [Fx_i, Fy_i, Fz_i]^T
 
-    Friction constraint:
+    with the point-contact-with-friction constraint:
 
         Fz_i >= 0
 
         sqrt(Fx_i^2 + Fy_i^2)
             <= mu_i Fz_i
 
-    Primitive force set:
+    The primitive force set is
 
         U_i =
         {
@@ -157,23 +193,41 @@ class ContactWrenchDistanceEvaluator:
              1]^T
         }
 
-    Primitive wrench set:
+    and
 
-        W_i = G_i(U_i)
+        F_i = cone(U_i).
 
-    Total feasible wrench cone:
+    The contact mapping is
 
-        V = cone(W_1 union ... union W_m)
+        w_i = G_i f_i
 
-    The distance algorithm follows Zheng & Chew (2009).
+    therefore
 
-    In this first implementation, the closest point on the
-    current simplicial cone is obtained by checking all of its
-    faces directly.
+        W_i = G_i(U_i).
 
-    Because the wrench space dimension is only 6, this is small
-    and easy to verify before implementing the paper's recursive
-    acceleration formulas.
+    For all active contact points:
+
+        W = union_i W_i
+
+        V = cone(W)
+
+    is the feasible wrench cone.
+
+    The distance problem is
+
+        d(b, V) = min ||b - v||
+
+                       v in V
+
+    where b is the required floating-base wrench.
+
+    The outer loop follows the support-mapping distance
+    algorithm of Zheng and Chew.
+
+    For clarity and easy verification, the closest point on the
+    current simplicial cone is found by explicitly checking all
+    its faces. Since the wrench dimension is only six, the active
+    generator set remains small.
     """
 
     def __init__(
@@ -246,6 +300,10 @@ class ContactWrenchDistanceEvaluator:
             )
         )
 
+        # ====================================================
+        # FLOATING-BASE CHECK
+        # ====================================================
+
         if int(
             self.mj_model.jnt_type[
                 floating_base_joint_id
@@ -259,15 +317,23 @@ class ContactWrenchDistanceEvaluator:
                 "is not a free joint."
             )
 
-        if int(
+        floating_base_dof_address = int(
             self.mj_model.jnt_dofadr[
                 floating_base_joint_id
             ]
-        ) != 0:
+        )
+
+        if floating_base_dof_address != 0:
 
             raise RuntimeError(
-                "The first six qvel coordinates must "
-                "belong to the floating base."
+                "This implementation assumes that the "
+                "floating-base DoFs occupy qvel indices 0:6."
+            )
+
+        if self.mj_model.nv < BASE_DOF:
+
+            raise RuntimeError(
+                "MuJoCo model has fewer than six generalized DoFs."
             )
 
         # ====================================================
@@ -281,28 +347,29 @@ class ContactWrenchDistanceEvaluator:
             ]
         )
 
-        left_mu = float(
+        left_foot_mu = float(
             self.mj_model.geom_friction[
                 self.left_foot_geom_id,
                 0,
             ]
         )
 
-        right_mu = float(
+        right_foot_mu = float(
             self.mj_model.geom_friction[
                 self.right_foot_geom_id,
                 0,
             ]
         )
 
+        # Conservative pairwise sliding friction coefficient.
         self.left_mu = min(
             floor_mu,
-            left_mu,
+            left_foot_mu,
         )
 
         self.right_mu = min(
             floor_mu,
-            right_mu,
+            right_foot_mu,
         )
 
         print()
@@ -315,6 +382,7 @@ class ContactWrenchDistanceEvaluator:
         print(
             "================================================"
         )
+
         print(
             "Contact rectangle: "
             f"{(FOOT_CONTACT_X_MAX - FOOT_CONTACT_X_MIN) * 1000.0:.2f}"
@@ -322,24 +390,30 @@ class ContactWrenchDistanceEvaluator:
             f"{(FOOT_CONTACT_Y_MAX - FOOT_CONTACT_Y_MIN) * 1000.0:.2f}"
             " mm"
         )
+
         print(
             "Contact points / stance foot: "
             f"{NUMBER_CONTACT_POINTS_PER_FOOT}"
         )
+
         print(
             f"Left friction coefficient : "
             f"{self.left_mu:.4f}"
         )
+
         print(
             f"Right friction coefficient: "
             f"{self.right_mu:.4f}"
         )
+
         print(
             "Contact mode source: gait state machine"
         )
+
         print(
             "Collision detection: diagnostic only"
         )
+
         print(
             "================================================"
         )
@@ -366,8 +440,7 @@ class ContactWrenchDistanceEvaluator:
         if object_id < 0:
 
             raise RuntimeError(
-                f"MuJoCo object '{name}' "
-                "was not found."
+                f"MuJoCo object '{name}' was not found."
             )
 
         return object_id
@@ -398,8 +471,7 @@ class ContactWrenchDistanceEvaluator:
         ):
 
             raise ValueError(
-                f"Invalid stance_side: "
-                f"{stance_side}"
+                f"Invalid stance_side: {stance_side}"
             )
 
         if not np.isfinite(
@@ -467,8 +539,7 @@ class ContactWrenchDistanceEvaluator:
         ):
 
             raise RuntimeError(
-                "Recorded qpos/qvel contains "
-                "NaN or Inf."
+                "Recorded qpos/qvel contains NaN or Inf."
             )
 
         self.samples.append(
@@ -481,7 +552,7 @@ class ContactWrenchDistanceEvaluator:
         )
 
     # ========================================================
-    # MASS MATRIX
+    # FULL MASS MATRIX
     # ========================================================
 
     def _full_mass_matrix(
@@ -490,7 +561,7 @@ class ContactWrenchDistanceEvaluator:
         mj_data,
     ) -> np.ndarray:
 
-        M = np.zeros(
+        mass_matrix = np.zeros(
             (
                 self.mj_model.nv,
                 self.mj_model.nv,
@@ -500,13 +571,13 @@ class ContactWrenchDistanceEvaluator:
 
         mujoco.mj_fullM(
             self.mj_model,
-            M,
+            mass_matrix,
             mj_data.qM,
         )
 
         if not np.all(
             np.isfinite(
-                M
+                mass_matrix
             )
         ):
 
@@ -514,7 +585,7 @@ class ContactWrenchDistanceEvaluator:
                 "Mass matrix contains NaN/Inf."
             )
 
-        return M
+        return mass_matrix
 
     # ========================================================
     # COLLISION DIAGNOSTIC
@@ -563,6 +634,12 @@ class ContactWrenchDistanceEvaluator:
         mj_data,
         stance_side,
     ) -> bool:
+        """
+        MuJoCo collision is used only as a diagnostic.
+
+        It does not create, remove, or move the four candidate
+        contact points used by the feasibility model.
+        """
 
         if stance_side == "left":
 
@@ -579,8 +656,7 @@ class ContactWrenchDistanceEvaluator:
         else:
 
             raise ValueError(
-                f"Invalid stance_side: "
-                f"{stance_side}"
+                f"Invalid stance_side: {stance_side}"
             )
 
         for contact_index in range(
@@ -614,14 +690,18 @@ class ContactWrenchDistanceEvaluator:
                 in pair
             ):
 
+                contact_distance = float(
+                    contact.dist
+                )
+
+                include_margin = float(
+                    contact.includemargin
+                )
+
                 if (
-                    float(
-                        contact.dist
-                    )
+                    contact_distance
                     <=
-                    float(
-                        contact.includemargin
-                    )
+                    include_margin
                     +
                     1.0e-9
                 ):
@@ -640,6 +720,18 @@ class ContactWrenchDistanceEvaluator:
         mj_data,
         stance_side,
     ):
+        """
+        Return the four predefined candidate points on the
+        planned stance foot.
+
+        The points are defined in the foot-site frame:
+
+            p_world
+                =
+            p_site_world
+                +
+            R_world_site p_local
+        """
 
         if stance_side == "left":
 
@@ -651,7 +743,7 @@ class ContactWrenchDistanceEvaluator:
                 self.left_foot_body_id
             )
 
-            mu = (
+            friction_coefficient = (
                 self.left_mu
             )
 
@@ -665,40 +757,33 @@ class ContactWrenchDistanceEvaluator:
                 self.right_foot_body_id
             )
 
-            mu = (
+            friction_coefficient = (
                 self.right_mu
             )
 
         else:
 
             raise ValueError(
-                f"Invalid stance_side: "
-                f"{stance_side}"
+                f"Invalid stance_side: {stance_side}"
             )
 
-        site_position_world = (
-            np.asarray(
-                mj_data.site_xpos[
-                    site_id
-                ],
-                dtype=float,
-            )
-            .reshape(
-                3
-            )
+        site_position_world = np.asarray(
+            mj_data.site_xpos[
+                site_id
+            ],
+            dtype=float,
+        ).reshape(
+            3
         )
 
-        R_world_site = (
-            np.asarray(
-                mj_data.site_xmat[
-                    site_id
-                ],
-                dtype=float,
-            )
-            .reshape(
-                3,
-                3,
-            )
+        R_world_site = np.asarray(
+            mj_data.site_xmat[
+                site_id
+            ],
+            dtype=float,
+        ).reshape(
+            3,
+            3,
         )
 
         contacts = []
@@ -720,7 +805,7 @@ class ContactWrenchDistanceEvaluator:
                     point_world.copy(),
                     body_id,
                     float(
-                        mu
+                        friction_coefficient
                     ),
                 )
             )
@@ -728,7 +813,7 @@ class ContactWrenchDistanceEvaluator:
         return contacts
 
     # ========================================================
-    # POINT JACOBIAN
+    # POINT TRANSLATION JACOBIAN
     # ========================================================
 
     def _point_translation_jacobian(
@@ -739,7 +824,7 @@ class ContactWrenchDistanceEvaluator:
         body_id,
     ) -> np.ndarray:
 
-        J = np.zeros(
+        jacobian = np.zeros(
             (
                 3,
                 self.mj_model.nv,
@@ -750,7 +835,7 @@ class ContactWrenchDistanceEvaluator:
         mujoco.mj_jac(
             self.mj_model,
             mj_data,
-            J,
+            jacobian,
             None,
             np.asarray(
                 position_world,
@@ -761,10 +846,20 @@ class ContactWrenchDistanceEvaluator:
             ),
         )
 
-        return J
+        if not np.all(
+            np.isfinite(
+                jacobian
+            )
+        ):
+
+            raise RuntimeError(
+                "Point Jacobian contains NaN/Inf."
+            )
+
+        return jacobian
 
     # ========================================================
-    # CONTACT WRENCH MAP Gi
+    # CONTACT WRENCH MAP
     # ========================================================
 
     def _build_contact_wrench_maps(
@@ -773,6 +868,17 @@ class ContactWrenchDistanceEvaluator:
         mj_data,
         contacts,
     ):
+        """
+        For every contact point i:
+
+            w_i = G_i f_i
+
+        with
+
+            G_i = J_i^T[0:6, :]
+
+        where f_i is expressed in world XYZ coordinates.
+        """
 
         G_blocks = []
 
@@ -781,7 +887,7 @@ class ContactWrenchDistanceEvaluator:
         for (
             position_world,
             body_id,
-            mu,
+            friction_coefficient,
         ) in contacts:
 
             J_i = (
@@ -798,20 +904,6 @@ class ContactWrenchDistanceEvaluator:
                 )
             )
 
-            # -----------------------------------------------
-            # World point force:
-            #
-            #     f_i = [Fx, Fy, Fz]^T
-            #
-            # Floating-base generalized wrench:
-            #
-            #     w_i = G_i f_i
-            #
-            # G_i:
-            #
-            #     6 x 3
-            # -----------------------------------------------
-
             G_i = (
                 J_i.T[
                     0:
@@ -820,13 +912,22 @@ class ContactWrenchDistanceEvaluator:
                 ].copy()
             )
 
+            if G_i.shape != (
+                BASE_DOF,
+                3,
+            ):
+
+                raise RuntimeError(
+                    "Unexpected G_i shape."
+                )
+
             G_blocks.append(
                 G_i
             )
 
             friction_coefficients.append(
                 float(
-                    mu
+                    friction_coefficient
                 )
             )
 
@@ -904,21 +1005,51 @@ class ContactWrenchDistanceEvaluator:
         G_blocks,
         friction_coefficients,
     ):
-
         """
-        Continuous PCwF support mapping.
+        Compute
 
-        No friction-cone discretization is required.
+            h_W(r) = max_{w in W} r^T w
 
-        Code force ordering:
+        and
 
-            [Fx, Fy, Fz]
+            s_W(r) = argmax_{w in W} r^T w.
 
-        Flat ground:
+        The primitive force set at contact i is continuous:
 
-            Fz = 1
+            U_i =
+            {
+                [mu cos(theta),
+                 mu sin(theta),
+                 1]^T
+            }
 
-            sqrt(Fx^2 + Fy^2) = mu
+        but its support mapping has an analytical solution.
+
+        Let
+
+            z_i = G_i^T r
+
+                = [z_x, z_y, z_z]^T.
+
+        Then
+
+            rho = sqrt(z_x^2 + z_y^2)
+
+        and
+
+            h_Ui(z_i)
+                =
+            z_z + mu_i rho.
+
+        For rho > 0:
+
+            s_Ui(z_i)
+                =
+            [
+                mu_i z_x/rho,
+                mu_i z_y/rho,
+                1
+            ]^T.
         """
 
         r = np.asarray(
@@ -928,11 +1059,11 @@ class ContactWrenchDistanceEvaluator:
             BASE_DOF
         )
 
-        best_h = -float(
+        best_support_value = -float(
             "inf"
         )
 
-        best_wrench = None
+        best_primitive_wrench = None
 
         for (
             G_i,
@@ -942,49 +1073,70 @@ class ContactWrenchDistanceEvaluator:
             friction_coefficients,
         ):
 
-            # -----------------------------------------------
-            # u_i = G_i^T r
-            #
-            # Since G_i maps [Fx, Fy, Fz],
-            # u_i has the same component ordering.
-            # -----------------------------------------------
-
-            u_i = (
+            z_i = (
                 G_i.T
                 @
                 r
             )
 
-            tangential_norm = float(
+            z_x = float(
+                z_i[0]
+            )
+
+            z_y = float(
+                z_i[1]
+            )
+
+            z_z = float(
+                z_i[2]
+            )
+
+            rho = float(
                 np.hypot(
-                    u_i[0],
-                    u_i[1],
+                    z_x,
+                    z_y,
                 )
             )
 
             # -----------------------------------------------
-            # s_Ui(G_i^T r)
+            # Analytical support value:
+            #
+            # h_Ui = z_z + mu_i * rho
             # -----------------------------------------------
 
-            if (
-                tangential_norm
-                >
-                1.0e-14
-            ):
+            support_value = (
+                z_z
+                +
+                float(
+                    mu_i
+                )
+                *
+                rho
+            )
+
+            # -----------------------------------------------
+            # Analytical support mapping.
+            # -----------------------------------------------
+
+            if rho > 1.0e-14:
 
                 primitive_force = np.array(
                     [
-                        mu_i
+                        float(
+                            mu_i
+                        )
                         *
-                        u_i[0]
+                        z_x
                         /
-                        tangential_norm,
+                        rho,
 
-                        mu_i
+                        float(
+                            mu_i
+                        )
                         *
-                        u_i[1]
+                        z_y
                         /
-                        tangential_norm,
+                        rho,
 
                         1.0,
                     ],
@@ -993,23 +1145,20 @@ class ContactWrenchDistanceEvaluator:
 
             else:
 
-                # Any point of Ui is valid if the tangential
-                # projection is exactly zero.
+                # When rho = 0, all tangential directions give
+                # the same support value. Any point on the
+                # primitive circle may therefore be selected.
 
                 primitive_force = np.array(
                     [
-                        mu_i,
+                        float(
+                            mu_i
+                        ),
                         0.0,
                         1.0,
                     ],
                     dtype=float,
                 )
-
-            # -----------------------------------------------
-            # Primitive wrench:
-            #
-            #     w_i = G_i s_Ui
-            # -----------------------------------------------
 
             primitive_wrench = (
                 G_i
@@ -1017,36 +1166,91 @@ class ContactWrenchDistanceEvaluator:
                 primitive_force
             )
 
-            support_value = float(
-                r
-                @
-                primitive_wrench
-            )
-
             if (
                 support_value
                 >
-                best_h
+                best_support_value
             ):
 
-                best_h = (
+                best_support_value = float(
                     support_value
                 )
 
-                best_wrench = (
+                best_primitive_wrench = (
                     primitive_wrench.copy()
                 )
 
-        if best_wrench is None:
+        if best_primitive_wrench is None:
 
             raise RuntimeError(
                 "Support mapping failed."
             )
 
+        if not np.all(
+            np.isfinite(
+                best_primitive_wrench
+            )
+        ):
+
+            raise RuntimeError(
+                "Support mapping produced NaN/Inf."
+            )
+
         return (
-            best_h,
-            best_wrench,
+            float(
+                best_support_value
+            ),
+            best_primitive_wrench,
         )
+
+    # ========================================================
+    # GENERATOR COMPARISON
+    # ========================================================
+
+    @staticmethod
+    def _generator_is_duplicate(
+        *,
+        generator,
+        generators,
+    ) -> bool:
+
+        generator = np.asarray(
+            generator,
+            dtype=float,
+        )
+
+        generator_scale = max(
+            1.0,
+            float(
+                np.linalg.norm(
+                    generator
+                )
+            ),
+        )
+
+        for old_generator in (
+            generators
+        ):
+
+            difference = float(
+                np.linalg.norm(
+                    generator
+                    -
+                    old_generator
+                )
+            )
+
+            if (
+                difference
+                <=
+                GENERATOR_TOLERANCE
+                *
+                generator_scale
+            ):
+
+                return True
+
+        return False
 
     # ========================================================
     # CLOSEST POINT ON CURRENT SIMPLICIAL CONE
@@ -1058,17 +1262,31 @@ class ContactWrenchDistanceEvaluator:
         required_wrench,
         generators,
     ):
-
         """
-        Compute the closest point on cone(generators).
+        Solve
 
-        The 2009 paper gives a dedicated subalgorithm.
+            min ||b - A c||
 
-        In this first implementation, all faces of the current
-        simplicial cone are checked explicitly.
+        subject to
 
-        Wrench dimension is only 6, therefore the number of
-        active generators remains small.
+            c >= 0,
+
+        where columns of A are the currently selected primitive
+        wrench generators.
+
+        Rather than discretizing the original friction cone, this
+        routine only works with the small set of generators chosen
+        by the support mapping.
+
+        Every face of the current simplicial cone is checked.
+
+        For one face B, the orthogonal projection onto span(B) is
+
+            c = argmin ||B c - b||.
+
+        The projection belongs to that conic face only when
+
+            c >= 0.
         """
 
         b = np.asarray(
@@ -1094,12 +1312,11 @@ class ContactWrenchDistanceEvaluator:
             generators
         )
 
-        number_generators = (
+        number_generators = int(
             A.shape[1]
         )
 
-        # Origin is always in the cone.
-
+        # Origin is always feasible.
         best_v = np.zeros(
             BASE_DOF,
             dtype=float,
@@ -1113,13 +1330,16 @@ class ContactWrenchDistanceEvaluator:
 
         best_active_generators = []
 
-        # ----------------------------------------------------
-        # Check every face of the current cone.
-        # ----------------------------------------------------
+        # In R^6 no linearly independent subset can contain
+        # more than six generators.
+        maximum_subset_size = min(
+            BASE_DOF,
+            number_generators,
+        )
 
         for subset_size in range(
             1,
-            number_generators + 1,
+            maximum_subset_size + 1,
         ):
 
             for subset_indices in (
@@ -1143,39 +1363,31 @@ class ContactWrenchDistanceEvaluator:
                     )
                 )
 
+                rank_tolerance = (
+                    MATRIX_RCOND
+                    *
+                    max(
+                        B.shape
+                    )
+                    *
+                    max(
+                        matrix_norm,
+                        1.0,
+                    )
+                )
+
                 rank = int(
                     np.linalg.matrix_rank(
                         B,
                         tol=(
-                            MATRIX_RCOND
-                            *
-                            max(
-                                B.shape
-                            )
-                            *
-                            max(
-                                matrix_norm,
-                                1.0,
-                            )
+                            rank_tolerance
                         ),
                     )
                 )
 
-                if (
-                    rank
-                    <
-                    subset_size
-                ):
+                if rank < subset_size:
 
                     continue
-
-                # -------------------------------------------
-                # Orthogonal projection:
-                #
-                #     c = (B^T B)^-1 B^T b
-                #
-                # np.linalg.lstsq is numerically safer.
-                # -------------------------------------------
 
                 coefficients, *_ = (
                     np.linalg.lstsq(
@@ -1185,8 +1397,12 @@ class ContactWrenchDistanceEvaluator:
                     )
                 )
 
-                # Cone coefficients must be nonnegative.
+                coefficients = np.asarray(
+                    coefficients,
+                    dtype=float,
+                )
 
+                # Projection is outside this conic face.
                 if np.any(
                     coefficients
                     <
@@ -1195,53 +1411,59 @@ class ContactWrenchDistanceEvaluator:
 
                     continue
 
+                # Remove tiny numerical negative values.
                 coefficients = np.maximum(
                     coefficients,
                     0.0,
                 )
 
-                v = (
+                v_candidate = (
                     B
                     @
                     coefficients
                 )
 
-                distance = float(
+                distance_candidate = float(
                     np.linalg.norm(
                         b
                         -
-                        v
+                        v_candidate
                     )
                 )
 
                 if (
-                    distance
+                    distance_candidate
                     <
                     best_distance
                     -
-                    1.0e-12
+                    PROGRESS_TOLERANCE
                 ):
 
                     best_distance = (
-                        distance
+                        distance_candidate
                     )
 
                     best_v = (
-                        v.copy()
+                        v_candidate.copy()
                     )
 
                     best_active_generators = [
-                        generators[
-                            index
-                        ]
+                        np.asarray(
+                            generators[
+                                generator_index
+                            ],
+                            dtype=float,
+                        ).copy()
+
                         for (
-                            index,
+                            generator_index,
                             coefficient,
                         )
                         in zip(
                             subset_indices,
                             coefficients,
                         )
+
                         if (
                             coefficient
                             >
@@ -1255,7 +1477,7 @@ class ContactWrenchDistanceEvaluator:
         )
 
     # ========================================================
-    # ZHENG-CHEW DISTANCE ALGORITHM
+    # DISTANCE TO FEASIBLE WRENCH CONE
     # ========================================================
 
     def _distance_to_feasible_wrench_cone(
@@ -1265,6 +1487,36 @@ class ContactWrenchDistanceEvaluator:
         G_blocks,
         friction_coefficients,
     ):
+        """
+        Zheng-Chew outer iteration.
+
+        Initialization:
+
+            v_0 = 0
+
+            r_0 = b
+
+            A_0 = empty.
+
+        At iteration k:
+
+            h_W(r_k),
+            s_W(r_k)
+
+        are evaluated.
+
+        If
+
+            h_W(r_k) <= epsilon,
+
+        the current v_k is the closest point.
+
+        Otherwise the selected primitive wrench is added to the
+        current simplicial cone, the closest point is recomputed,
+        and
+
+            r_{k+1} = b - v_{k+1}.
+        """
 
         b = np.asarray(
             required_wrench,
@@ -1273,12 +1525,18 @@ class ContactWrenchDistanceEvaluator:
             BASE_DOF
         )
 
+        if not np.all(
+            np.isfinite(
+                b
+            )
+        ):
+
+            raise RuntimeError(
+                "Required wrench contains NaN/Inf."
+            )
+
         # ----------------------------------------------------
-        # Paper initialization:
-        #
-        #     v0 = 0
-        #     r0 = b
-        #     A0 = empty
+        # v_0 = 0
         # ----------------------------------------------------
 
         v = np.zeros(
@@ -1286,25 +1544,51 @@ class ContactWrenchDistanceEvaluator:
             dtype=float,
         )
 
+        # ----------------------------------------------------
+        # r_0 = b - v_0 = b
+        # ----------------------------------------------------
+
         residual = (
             b.copy()
         )
 
+        # Minimal generator set representing current v_k.
         active_generators = []
 
         final_support_value = float(
             "nan"
         )
 
-        for iteration in range(
-            MAX_DISTANCE_ITERATIONS
-            +
-            1
+        previous_distance = float(
+            np.linalg.norm(
+                residual
+            )
+        )
+
+        # Special case b = 0.
+        if (
+            previous_distance
+            <=
+            DISTANCE_TOLERANCE
         ):
 
-            # -----------------------------------------------
-            # h_W(r_k), s_W(r_k)
-            # -----------------------------------------------
+            return (
+                previous_distance,
+                v,
+                residual,
+                True,
+                0,
+                0.0,
+                0,
+            )
+
+        for iteration in range(
+            MAX_DISTANCE_ITERATIONS
+        ):
+
+            # ================================================
+            # SUPPORT FUNCTION AND SUPPORT MAPPING
+            # ================================================
 
             (
                 support_value,
@@ -1327,13 +1611,18 @@ class ContactWrenchDistanceEvaluator:
                 support_value
             )
 
-            # -----------------------------------------------
-            # Termination condition from the paper.
-            # -----------------------------------------------
+            # ================================================
+            # TERMINATION
+            # ================================================
+            #
+            # If no primitive wrench has positive support in
+            # the current residual direction, v is the closest
+            # point of the complete feasible wrench cone.
+            # ================================================
 
             if (
                 support_value
-                <
+                <=
                 SUPPORT_TOLERANCE
             ):
 
@@ -1355,11 +1644,48 @@ class ContactWrenchDistanceEvaluator:
                     ),
                 )
 
-            # -----------------------------------------------
+            # ================================================
+            # NUMERICAL DUPLICATE CHECK
+            # ================================================
+
+            if (
+                self._generator_is_duplicate(
+                    generator=(
+                        new_generator
+                    ),
+                    generators=(
+                        active_generators
+                    ),
+                )
+            ):
+
+                # Mathematically, if support_value is still
+                # positive, a new useful generator should be
+                # obtained. Returning converged=False makes a
+                # numerical stall visible instead of silently
+                # accepting an incorrect solution.
+
+                distance = float(
+                    np.linalg.norm(
+                        residual
+                    )
+                )
+
+                return (
+                    distance,
+                    v,
+                    residual,
+                    False,
+                    iteration,
+                    final_support_value,
+                    len(
+                        active_generators
+                    ),
+                )
+
+            # ================================================
             # A_{k+1}
-            #
-            # Add the newly selected primitive wrench.
-            # -----------------------------------------------
+            # ================================================
 
             candidate_generators = (
                 active_generators
@@ -1369,13 +1695,13 @@ class ContactWrenchDistanceEvaluator:
                 ]
             )
 
-            # -----------------------------------------------
-            # Find v_{k+1}.
-            # -----------------------------------------------
+            # ================================================
+            # CLOSEST POINT ON cone(A_{k+1})
+            # ================================================
 
             (
-                v,
-                active_generators,
+                v_new,
+                active_generators_new,
             ) = (
                 self._closest_point_on_current_cone(
                     required_wrench=(
@@ -1387,43 +1713,102 @@ class ContactWrenchDistanceEvaluator:
                 )
             )
 
-            # -----------------------------------------------
+            # ================================================
             # r_{k+1} = b - v_{k+1}
-            # -----------------------------------------------
+            # ================================================
 
-            residual = (
+            residual_new = (
                 b
                 -
-                v
+                v_new
             )
 
-            # Required wrench lies in the cone.
+            distance_new = float(
+                np.linalg.norm(
+                    residual_new
+                )
+            )
+
+            # ================================================
+            # NUMERICALLY INSIDE THE CONE
+            # ================================================
 
             if (
-                float(
-                    np.linalg.norm(
-                        residual
-                    )
-                )
+                distance_new
                 <=
                 DISTANCE_TOLERANCE
             ):
 
                 return (
-                    0.0,
-                    v,
-                    residual,
+                    distance_new,
+                    v_new,
+                    residual_new,
                     True,
                     iteration + 1,
                     0.0,
                     len(
-                        active_generators
+                        active_generators_new
                     ),
                 )
 
-        # ----------------------------------------------------
-        # Maximum iteration reached.
-        # ----------------------------------------------------
+            # ================================================
+            # STAGNATION CHECK
+            # ================================================
+
+            improvement = (
+                previous_distance
+                -
+                distance_new
+            )
+
+            scale = max(
+                1.0,
+                previous_distance,
+            )
+
+            if (
+                improvement
+                <=
+                PROGRESS_TOLERANCE
+                *
+                scale
+            ):
+
+                return (
+                    distance_new,
+                    v_new,
+                    residual_new,
+                    False,
+                    iteration + 1,
+                    final_support_value,
+                    len(
+                        active_generators_new
+                    ),
+                )
+
+            # ================================================
+            # NEXT ITERATION
+            # ================================================
+
+            v = (
+                v_new
+            )
+
+            residual = (
+                residual_new
+            )
+
+            active_generators = (
+                active_generators_new
+            )
+
+            previous_distance = (
+                distance_new
+            )
+
+        # ====================================================
+        # MAXIMUM ITERATION REACHED
+        # ====================================================
 
         distance = float(
             np.linalg.norm(
@@ -1462,8 +1847,18 @@ class ContactWrenchDistanceEvaluator:
             self.mj_model.nv
         )
 
+        if not np.all(
+            np.isfinite(
+                qacc
+            )
+        ):
+
+            raise RuntimeError(
+                "qacc contains NaN/Inf."
+            )
+
         # ====================================================
-        # RESTORE STATE
+        # RESTORE RECORDED STATE
         # ====================================================
 
         scratch_data.qpos[:] = (
@@ -1487,10 +1882,39 @@ class ContactWrenchDistanceEvaluator:
         )
 
         # ====================================================
-        # REQUIRED FLOATING-BASE WRENCH
+        # REQUIRED GENERALIZED FORCE
+        # ====================================================
+        #
+        # Dynamics convention:
+        #
+        #     M qdd + qfrc_bias
+        #
+        #       =
+        #
+        #     qfrc_passive
+        #       + S^T tau
+        #       + J_c^T f_c
+        #
+        # Therefore:
+        #
+        #     required_generalized_force
+        #
+        #       =
+        #
+        #     M qdd
+        #       + qfrc_bias
+        #       - qfrc_passive
+        #
+        # For the unactuated floating base:
+        #
+        #     b
+        #
+        #       =
+        #
+        #     required_generalized_force[0:6].
         # ====================================================
 
-        M = (
+        mass_matrix = (
             self._full_mass_matrix(
                 mj_data=(
                     scratch_data
@@ -1499,7 +1923,7 @@ class ContactWrenchDistanceEvaluator:
         )
 
         required_generalized_force = (
-            M
+            mass_matrix
             @
             qacc
             +
@@ -1522,7 +1946,7 @@ class ContactWrenchDistanceEvaluator:
         )
 
         # ====================================================
-        # CONTACT MODE / CONTACT GEOMETRY
+        # CONTACT MODE
         # ====================================================
 
         collision_detected = (
@@ -1547,10 +1971,12 @@ class ContactWrenchDistanceEvaluator:
             )
         )
 
+        number_contacts = len(
+            contacts
+        )
+
         if (
-            len(
-                contacts
-            )
+            number_contacts
             !=
             NUMBER_CONTACT_POINTS_PER_FOOT
         ):
@@ -1560,7 +1986,7 @@ class ContactWrenchDistanceEvaluator:
             )
 
         # ====================================================
-        # Gi MATRICES
+        # CONTACT WRENCH MAPS
         # ====================================================
 
         (
@@ -1577,19 +2003,19 @@ class ContactWrenchDistanceEvaluator:
             )
         )
 
-        G = np.hstack(
+        G_total = np.hstack(
             G_blocks
         )
 
         dynamics_rank = int(
             np.linalg.matrix_rank(
-                G
+                G_total
             )
         )
 
         dynamics_condition_number = (
             self._matrix_condition_number(
-                G
+                G_total
             )
         )
 
@@ -1631,61 +2057,72 @@ class ContactWrenchDistanceEvaluator:
             time=float(
                 sample.time
             ),
+
             stance_side=(
                 sample.stance_side
             ),
-            number_contacts=len(
-                contacts
+
+            number_contacts=int(
+                number_contacts
             ),
+
             collision_detected=bool(
                 collision_detected
             ),
-            dynamics_rank=(
+
+            dynamics_rank=int(
                 dynamics_rank
             ),
+
             dynamics_condition_number=float(
                 dynamics_condition_number
             ),
+
             qacc=(
                 qacc.copy()
             ),
+
             required_wrench=(
                 required_wrench.copy()
             ),
-            closest_wrench=(
-                np.asarray(
-                    closest_wrench,
-                    dtype=float,
-                ).copy()
-            ),
-            residual_wrench=(
-                np.asarray(
-                    residual_wrench,
-                    dtype=float,
-                ).copy()
-            ),
+
+            closest_wrench=np.asarray(
+                closest_wrench,
+                dtype=float,
+            ).copy(),
+
+            residual_wrench=np.asarray(
+                residual_wrench,
+                dtype=float,
+            ).copy(),
+
             distance=float(
                 distance
             ),
-            feasible=(
+
+            feasible=bool(
                 feasible
             ),
+
             converged=bool(
                 converged
             ),
+
             iterations=int(
                 iterations
             ),
+
             final_support_value=float(
                 final_support_value
             ),
+
             active_generator_count=int(
                 active_generator_count
             ),
         )
 
     # ========================================================
-    # SOLVE COMPLETE TRAJECTORY
+    # SOLVE COMPLETE RECORDED TRAJECTORY
     # ========================================================
 
     def solve_all(
@@ -1701,8 +2138,7 @@ class ContactWrenchDistanceEvaluator:
         if number_samples < 3:
 
             raise RuntimeError(
-                "At least three trajectory samples "
-                "are required."
+                "At least three trajectory samples are required."
             )
 
         time = np.asarray(
@@ -1735,7 +2171,12 @@ class ContactWrenchDistanceEvaluator:
         )
 
         # ----------------------------------------------------
-        # Offline qdd reconstruction.
+        # Offline acceleration reconstruction:
+        #
+        #     qdd(t_k) = d qdot / dt
+        #
+        # Central difference is used by numpy for interior
+        # samples with edge_order=2 at both trajectory ends.
         # ----------------------------------------------------
 
         qacc = np.gradient(
@@ -1745,10 +2186,8 @@ class ContactWrenchDistanceEvaluator:
             edge_order=2,
         )
 
-        scratch_data = (
-            mujoco.MjData(
-                self.mj_model
-            )
+        scratch_data = mujoco.MjData(
+            self.mj_model
         )
 
         results = []
@@ -1760,7 +2199,7 @@ class ContactWrenchDistanceEvaluator:
             self.samples
         ):
 
-            results.append(
+            result = (
                 self._solve_one(
                     sample=(
                         sample
@@ -1774,6 +2213,10 @@ class ContactWrenchDistanceEvaluator:
                         scratch_data
                     ),
                 )
+            )
+
+            results.append(
+                result
             )
 
         return results
@@ -1828,6 +2271,15 @@ class ContactWrenchDistanceEvaluator:
             dtype=bool,
         )
 
+        collision = np.asarray(
+            [
+                result.collision_detected
+                for result
+                in results
+            ],
+            dtype=bool,
+        )
+
         iterations = np.asarray(
             [
                 result.iterations
@@ -1837,13 +2289,13 @@ class ContactWrenchDistanceEvaluator:
             dtype=int,
         )
 
-        collision = np.asarray(
+        generator_count = np.asarray(
             [
-                result.collision_detected
+                result.active_generator_count
                 for result
                 in results
             ],
-            dtype=bool,
+            dtype=int,
         )
 
         ranks = np.asarray(
@@ -1911,6 +2363,11 @@ class ContactWrenchDistanceEvaluator:
         )
 
         print(
+            f"Max active generators  : "
+            f"{np.max(generator_count)}"
+        )
+
+        print(
             "================================================"
         )
         print()
@@ -1925,6 +2382,13 @@ def plot_wrench_distance_results(
     *,
     show=False,
 ):
+    """
+    Plot
+
+        d(t) = ||w_required - w_closest||
+
+    over the recorded trajectory.
+    """
 
     import matplotlib.pyplot as plt
 
@@ -1936,7 +2400,7 @@ def plot_wrench_distance_results(
         results
     ) == 0:
 
-        return
+        return None
 
     time = np.asarray(
         [
@@ -1956,7 +2420,16 @@ def plot_wrench_distance_results(
         dtype=float,
     )
 
-    fig, axis = (
+    converged = np.asarray(
+        [
+            result.converged
+            for result
+            in results
+        ],
+        dtype=bool,
+    )
+
+    figure, axis = (
         plt.subplots()
     )
 
@@ -1964,37 +2437,63 @@ def plot_wrench_distance_results(
         time,
         distance,
         linewidth=1.5,
+        label="Wrench distance",
     )
 
     axis.axhline(
         DISTANCE_TOLERANCE,
         linestyle="--",
         linewidth=1.0,
+        label="Distance tolerance",
     )
+
+    # Mark samples where the numerical algorithm did not
+    # converge.
+    invalid = np.logical_not(
+        converged
+    )
+
+    if np.any(
+        invalid
+    ):
+
+        axis.plot(
+            time[
+                invalid
+            ],
+            distance[
+                invalid
+            ],
+            "x",
+            markersize=5,
+            label="Not converged",
+        )
 
     axis.set_xlabel(
         "Time [s]"
     )
 
     axis.set_ylabel(
-        "Distance to feasible wrench cone"
+        "Euclidean wrench distance"
     )
 
     axis.set_title(
-        "Contact-wrench feasibility distance"
+        "Distance to feasible contact-wrench cone"
     )
 
     axis.grid(
         True
     )
 
-    fig.tight_layout()
+    axis.legend()
+
+    figure.tight_layout()
 
     if show:
 
         plt.show()
 
     return (
-        fig,
+        figure,
         axis,
     )

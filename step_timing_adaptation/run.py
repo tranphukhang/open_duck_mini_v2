@@ -1603,7 +1603,6 @@ def run_walk(
     else:
         wrench_distance_evaluator = None
 
-    joint_torque_results = None
 
     # ========================================================
     # INITIAL SETTLED CONFIGURATION
