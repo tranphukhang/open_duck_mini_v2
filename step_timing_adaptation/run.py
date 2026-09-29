@@ -89,18 +89,14 @@ if __package__:
         plot_simulation_results,
     )
 
-    from .contact_force_reconstruction import (
-        ContactForceReconstructor,
-        plot_contact_force_results,
-    )
-
     from .data_logger import (
         JointAngleDataLogger,
         ExperimentCSVDataLogger,
     )
 
-    from .joint_torque_reconstruction import (
-        JointTorqueReconstructor,
+    from .contact_wrench_distance import (
+        ContactWrenchDistanceEvaluator,
+        plot_wrench_distance_results,
     )
 
 else:
@@ -124,18 +120,14 @@ else:
         plot_simulation_results,
     )
 
-    from contact_force_reconstruction import (
-        ContactForceReconstructor,
-        plot_contact_force_results,
-    )
-
     from data_logger import (
         JointAngleDataLogger,
         ExperimentCSVDataLogger,
     )
 
-    from joint_torque_reconstruction import (
-        JointTorqueReconstructor,
+    from contact_wrench_distance import (
+        ContactWrenchDistanceEvaluator,
+        plot_wrench_distance_results,
     )
 
 
@@ -225,48 +217,21 @@ STATUS_PRINT_PERIOD = 0.10
 
 TIME_TOLERANCE = 1.0e-10
 
-
 # ============================================================
-# CONTACT FORCE RECONSTRUCTION
+# CONTACT WRENCH FEASIBILITY
 # ============================================================
 #
 # True:
-#   - record same-time qpos/qvel = q(t_k), qdot(t_k)
-#   - reconstruct qdd(t_k) offline from the qdot history
-#   - reconstruct point-contact forces from the first six
-#     floating-base dynamic equations
+#   - record q(t_k), qdot(t_k)
+#   - reconstruct qdd(t_k) offline
+#   - compute required floating-base wrench
+#   - evaluate distance to feasible contact-wrench cone
 #
 # False:
-#   - skip this reconstruction completely
-#
-# Unilateral and optional friction-cone constraints are handled
-# inside contact_force_reconstruction.py.
+#   - skip the wrench feasibility evaluation
 # ============================================================
 
-ENABLE_CONTACT_FORCE_RECONSTRUCTION = True
-
-
-# ============================================================
-# JOINT TORQUE RECONSTRUCTION
-# ============================================================
-#
-# Joint torques are reconstructed offline only after a valid
-# contact-force distribution has been obtained.
-#
-# Remaining rigid-body equations:
-#
-#     tau =
-#         M(q) qdd
-#         + qfrc_bias
-#         - qfrc_passive
-#         - J_c(q)^T f_c
-#
-# The first six floating-base components are retained only as
-# a consistency residual. The actuated single-DoF components
-# are reported as reconstructed joint torques.
-# ============================================================
-
-ENABLE_JOINT_TORQUE_RECONSTRUCTION = True
+ENABLE_CONTACT_WRENCH_DISTANCE = True
 
 
 # ============================================================
@@ -1624,22 +1589,19 @@ def run_walk(
     )
 
     # ========================================================
-    # CONTACT FORCE RECONSTRUCTOR
+    # CONTACT WRENCH DISTANCE
     # ========================================================
 
-    if ENABLE_CONTACT_FORCE_RECONSTRUCTION:
-
-        contact_force_reconstructor = (
-            ContactForceReconstructor(
+    if ENABLE_CONTACT_WRENCH_DISTANCE:
+        wrench_distance_evaluator = (
+            ContactWrenchDistanceEvaluator(
                 mj_model=(
                     mj_model
                 )
             )
         )
-
     else:
-
-        contact_force_reconstructor = None
+        wrench_distance_evaluator = None
 
     joint_torque_results = None
 
@@ -2717,12 +2679,12 @@ def run_walk(
         # ====================================================
 
         if (
-            ENABLE_CONTACT_FORCE_RECONSTRUCTION
+            ENABLE_CONTACT_WRENCH_DISTANCE
             and
             data_collection_started
         ):
 
-            contact_force_reconstructor.record_sample(
+            wrench_distance_evaluator.record_sample(
                 time=(
                     data_time
                 ),
@@ -3053,99 +3015,33 @@ def run_walk(
     print()
 
     # ========================================================
-    # OFFLINE FLOATING-BASE CONTACT FORCE RECONSTRUCTION
+    # OFFLINE CONTACT WRENCH FEASIBILITY
     # ========================================================
 
-    if ENABLE_CONTACT_FORCE_RECONSTRUCTION:
+    if ENABLE_CONTACT_WRENCH_DISTANCE:
 
         print()
-
         print(
-            "Reconstructing contact forces from "
-            "floating-base dynamics..."
+            "Evaluating contact-wrench feasibility..."
         )
 
-        contact_force_results = (
-            contact_force_reconstructor.solve_all()
+        wrench_distance_results = (
+            wrench_distance_evaluator.solve_all()
         )
 
-        contact_force_reconstructor.print_summary(
-            contact_force_results
+        wrench_distance_evaluator.print_summary(
+            wrench_distance_results
         )
 
     else:
 
         print()
-
         print(
-            "Contact-force reconstruction skipped "
-            "(ENABLE_CONTACT_FORCE_RECONSTRUCTION=False)."
+            "Contact-wrench feasibility skipped "
+            "(ENABLE_CONTACT_WRENCH_DISTANCE=False)."
         )
 
-        contact_force_results = None
-
-    # ========================================================
-    # OFFLINE JOINT TORQUE RECONSTRUCTION
-    # ========================================================
-
-    if ENABLE_JOINT_TORQUE_RECONSTRUCTION:
-
-        if (
-            contact_force_results
-            is None
-            or
-            contact_force_reconstructor
-            is None
-        ):
-
-            print()
-            print(
-                "Joint-torque reconstruction skipped because "
-                "contact-force reconstruction is unavailable."
-            )
-
-            joint_torque_results = None
-
-        else:
-
-            print()
-            print(
-                "Reconstructing joint torques from the "
-                "remaining rigid-body dynamics..."
-            )
-
-            joint_torque_reconstructor = (
-                JointTorqueReconstructor(
-                    mj_model=(
-                        mj_model
-                    )
-                )
-            )
-
-            joint_torque_results = (
-                joint_torque_reconstructor.solve_all(
-                    trajectory_samples=(
-                        contact_force_reconstructor.samples
-                    ),
-                    contact_force_results=(
-                        contact_force_results
-                    ),
-                )
-            )
-
-            joint_torque_reconstructor.print_summary(
-                joint_torque_results
-            )
-
-    else:
-
-        print()
-        print(
-            "Joint-torque reconstruction skipped "
-            "(ENABLE_JOINT_TORQUE_RECONSTRUCTION=False)."
-        )
-
-        joint_torque_results = None
+        wrench_distance_results = None
 
     # ========================================================
     # SAVE PROCESSED EXPERIMENT CSV DATA
@@ -3166,11 +3062,8 @@ def run_walk(
             simulation_log=(
                 simulation_log
             ),
-            contact_force_results=(
-                contact_force_results
-            ),
-            joint_torque_results=(
-                joint_torque_results
+            wrench_distance_results=(
+                wrench_distance_results
             ),
         )
     )
@@ -3193,11 +3086,7 @@ def run_walk(
 
     print()
 
-    return (
-        simulation_log,
-        contact_force_results,
-        joint_torque_results,
-    )
+    return (simulation_log, wrench_distance_results,)
 
 
 # ============================================================
@@ -3385,8 +3274,7 @@ def main():
 
             (
                 simulation_log,
-                contact_force_results,
-                joint_torque_results,
+                wrench_distance_results,
             ) = (
                 run_walk(
                     mj_model=(
@@ -3411,8 +3299,7 @@ def main():
 
         (
             simulation_log,
-            contact_force_results,
-            joint_torque_results,
+            wrench_distance_results,
         ) = (
             run_walk(
                 mj_model=(
@@ -3442,15 +3329,12 @@ def main():
     # ========================================================
 
     if (
-        contact_force_results
+        wrench_distance_results
         is not None
     ):
 
-        plot_contact_force_results(
-            contact_force_results,
-            mj_model=(
-                mj_model
-            ),
+        plot_wrench_distance_results(
+            wrench_distance_results,
             show=False,
         )
 
@@ -3459,10 +3343,7 @@ def main():
     # ========================================================
 
     plot_simulation_results(
-        simulation_log,
-        joint_torque_results=(
-            joint_torque_results
-        ),
+        simulation_log
     )
 
 

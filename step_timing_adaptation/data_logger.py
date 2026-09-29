@@ -951,3 +951,193 @@ class ExperimentCSVDataLogger:
         )
 
         return saved_files
+
+
+        # ========================================================
+    # CONTACT WRENCH DISTANCE
+    # ========================================================
+
+    def _save_wrench_distance(
+        self,
+        *,
+        wrench_distance_results,
+    ) -> Path:
+
+        if wrench_distance_results is None:
+
+            raise RuntimeError(
+                "Wrench-distance results are unavailable."
+            )
+
+        results = list(
+            wrench_distance_results
+        )
+
+        if len(
+            results
+        ) == 0:
+
+            raise RuntimeError(
+                "Wrench-distance result list is empty."
+            )
+
+        time = np.asarray(
+            [
+                result.time
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+
+        distance = np.asarray(
+            [
+                result.distance
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+
+        feasible = np.asarray(
+            [
+                int(
+                    result.feasible
+                )
+                for result
+                in results
+            ],
+            dtype=int,
+        )
+
+        converged = np.asarray(
+            [
+                int(
+                    result.converged
+                )
+                for result
+                in results
+            ],
+            dtype=int,
+        )
+
+        iterations = np.asarray(
+            [
+                result.iterations
+                for result
+                in results
+            ],
+            dtype=int,
+        )
+
+        generator_count = np.asarray(
+            [
+                result.active_generator_count
+                for result
+                in results
+            ],
+            dtype=int,
+        )
+
+        required = np.vstack(
+            [
+                result.required_wrench
+                for result
+                in results
+            ]
+        )
+
+        closest = np.vstack(
+            [
+                result.closest_wrench
+                for result
+                in results
+            ]
+        )
+
+        residual = np.vstack(
+            [
+                result.residual_wrench
+                for result
+                in results
+            ]
+        )
+
+        return self._write_columns(
+            filename=(
+                "wrench_distance.csv"
+            ),
+            columns={
+                "time_s":
+                    time,
+
+                "distance":
+                    distance,
+
+                "feasible":
+                    feasible,
+
+                "converged":
+                    converged,
+
+                "iterations":
+                    iterations,
+
+                "active_generators":
+                    generator_count,
+
+                "required_0":
+                    required[:, 0],
+
+                "required_1":
+                    required[:, 1],
+
+                "required_2":
+                    required[:, 2],
+
+                "required_3":
+                    required[:, 3],
+
+                "required_4":
+                    required[:, 4],
+
+                "required_5":
+                    required[:, 5],
+
+                "closest_0":
+                    closest[:, 0],
+
+                "closest_1":
+                    closest[:, 1],
+
+                "closest_2":
+                    closest[:, 2],
+
+                "closest_3":
+                    closest[:, 3],
+
+                "closest_4":
+                    closest[:, 4],
+
+                "closest_5":
+                    closest[:, 5],
+
+                "residual_0":
+                    residual[:, 0],
+
+                "residual_1":
+                    residual[:, 1],
+
+                "residual_2":
+                    residual[:, 2],
+
+                "residual_3":
+                    residual[:, 3],
+
+                "residual_4":
+                    residual[:, 4],
+
+                "residual_5":
+                    residual[:, 5],
+            },
+        )
