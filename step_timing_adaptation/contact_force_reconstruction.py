@@ -121,7 +121,7 @@ NUMBER_CONTACT_POINTS_PER_FOOT = 4
 # checks the unilateral contact condition.
 # ============================================================
 
-ENABLE_FRICTION_CONE = False
+ENABLE_FRICTION_CONE = True
 
 FRICTION_CONE_TOLERANCE = 1.0e-8
 FRICTION_SOLVER_MAX_ITERATIONS = 300
@@ -2415,6 +2415,17 @@ class ContactForceReconstructor:
             in results
         )
 
+        friction_feasible_count = sum(
+            1
+            for result
+            in results
+            if (
+                result.friction_cone_enabled
+                and
+                result.friction_cone_feasible
+            )
+        )
+
         collision_detected_count = sum(
             result.collision_detected
             for result
@@ -2471,6 +2482,12 @@ class ContactForceReconstructor:
             "Unilateral feasible      : "
             f"{unilateral_feasible_count}/{total}"
         )
+
+        if ENABLE_FRICTION_CONE:
+            print(
+                "Friction-cone feasible  : "
+                f"{friction_feasible_count}/{total}"
+            )
 
         print(
             "Planned stance collision : "
