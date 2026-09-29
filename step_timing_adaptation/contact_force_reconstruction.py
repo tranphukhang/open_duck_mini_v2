@@ -388,9 +388,9 @@ class ContactForceReconstructor:
         )
         print(
             "Contact rectangle:"
-            f" {FOOT_CONTACT_LENGTH_X * 1000.0:.1f}"
+            f" {(FOOT_CONTACT_X_MAX - FOOT_CONTACT_X_MIN) * 1000.0:.2f}"
             " x "
-            f"{FOOT_CONTACT_WIDTH_Y * 1000.0:.1f}"
+            f"{(FOOT_CONTACT_Y_MAX - FOOT_CONTACT_Y_MIN) * 1000.0:.2f}"
             " mm"
         )
         print(
