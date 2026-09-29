@@ -25,8 +25,12 @@
 #   - q(t_k), qdot(t_k) are recorded BEFORE integration
 #   - qdot is converted from Pinocchio to MuJoCo convention
 #   - qdd(t_k) is reconstructed offline from the qdot history
-#   - MuJoCo provides M(q), qfrc_bias, qfrc_passive,
-#     contact points, and contact Jacobians
+# - MuJoCo provides M(q), qfrc_bias and qfrc_passive
+# - contact mode is provided by the gait state machine
+# - each stance foot uses four fixed contact points
+#   centered at the predefined foot site
+# - contact point Jacobians are computed at these fixed points
+# - MuJoCo collision detection is used only as a diagnostic
 #   - only the first six floating-base equations are used:
 #
 #       M_b(q) qdd + h_b(q, qdot) = J_c,b(q)^T f_c
@@ -2724,6 +2728,9 @@ def run_walk(
                 ),
                 mj_data=(
                     mj_data
+                ),
+                stance_side=(
+                    stance_side
                 ),
             )
 
