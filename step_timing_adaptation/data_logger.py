@@ -657,7 +657,7 @@ class ExperimentCSVDataLogger:
         saved_files = {}
 
         # ----------------------------------------------------
-        # Contact-wrench distance
+        # Contact-wrench feasibility
         # ----------------------------------------------------
 
         if wrench_distance_results is not None:
@@ -666,6 +666,26 @@ class ExperimentCSVDataLogger:
                 "wrench_distance"
             ] = (
                 self._save_wrench_distance(
+                    wrench_distance_results=(
+                        wrench_distance_results
+                    )
+                )
+            )
+
+            saved_files[
+                "qacc_norm"
+            ] = (
+                self._save_qacc_norm(
+                    wrench_distance_results=(
+                        wrench_distance_results
+                    )
+                )
+            )
+
+            saved_files[
+                "required_wrench_norm"
+            ] = (
+                self._save_required_wrench_norm(
                     wrench_distance_results=(
                         wrench_distance_results
                     )
@@ -931,5 +951,217 @@ class ExperimentCSVDataLogger:
 
                 "residual_5":
                     residual[:, 5],
+            },
+        )
+
+    # ========================================================
+    # GENERALIZED ACCELERATION NORM
+    # ========================================================
+
+    def _save_qacc_norm(
+        self,
+        *,
+        wrench_distance_results,
+    ) -> Path:
+
+        if wrench_distance_results is None:
+
+            raise RuntimeError(
+                "Wrench-distance results are unavailable."
+            )
+
+        results = list(
+            wrench_distance_results
+        )
+
+        if len(
+            results
+        ) == 0:
+
+            raise RuntimeError(
+                "Wrench-distance result list is empty."
+            )
+
+        time = np.asarray(
+            [
+                result.time
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+
+        qacc_norm = np.asarray(
+            [
+                np.linalg.norm(
+                    result.qacc
+                )
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+
+        stance_side = np.asarray(
+            [
+                0
+                if result.stance_side == "left"
+                else 1
+                for result
+                in results
+            ],
+            dtype=int,
+        )
+
+        stance_switch = np.zeros(
+            len(
+                results
+            ),
+            dtype=int,
+        )
+
+        for index in range(
+            1,
+            len(
+                results
+            ),
+        ):
+
+            if (
+                results[
+                    index
+                ].stance_side
+                !=
+                results[
+                    index - 1
+                ].stance_side
+            ):
+
+                stance_switch[
+                    index
+                ] = 1
+
+        return self._write_columns(
+            filename=(
+                "qacc_norm.csv"
+            ),
+            columns={
+                "time_s":
+                    time,
+
+                "qacc_norm":
+                    qacc_norm,
+
+                "stance_side":
+                    stance_side,
+
+                "stance_switch":
+                    stance_switch,
+            },
+        )
+
+    # ========================================================
+    # REQUIRED WRENCH NORM
+    # ========================================================
+
+    def _save_required_wrench_norm(
+        self,
+        *,
+        wrench_distance_results,
+    ) -> Path:
+
+        if wrench_distance_results is None:
+
+            raise RuntimeError(
+                "Wrench-distance results are unavailable."
+            )
+
+        results = list(
+            wrench_distance_results
+        )
+
+        if len(
+            results
+        ) == 0:
+
+            raise RuntimeError(
+                "Wrench-distance result list is empty."
+            )
+
+        time = np.asarray(
+            [
+                result.time
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+
+        required_wrench_norm = np.asarray(
+            [
+                np.linalg.norm(
+                    result.required_wrench
+                )
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+
+        stance_side = np.asarray(
+            [
+                0
+                if result.stance_side == "left"
+                else 1
+                for result
+                in results
+            ],
+            dtype=int,
+        )
+
+        stance_switch = np.zeros(
+            len(
+                results
+            ),
+            dtype=int,
+        )
+
+        for index in range(
+            1,
+            len(
+                results
+            ),
+        ):
+
+            if (
+                results[
+                    index
+                ].stance_side
+                !=
+                results[
+                    index - 1
+                ].stance_side
+            ):
+
+                stance_switch[
+                    index
+                ] = 1
+
+        return self._write_columns(
+            filename=(
+                "required_wrench_norm.csv"
+            ),
+            columns={
+                "time_s":
+                    time,
+
+                "required_wrench_norm":
+                    required_wrench_norm,
+
+                "stance_side":
+                    stance_side,
+
+                "stance_switch":
+                    stance_switch,
             },
         )
