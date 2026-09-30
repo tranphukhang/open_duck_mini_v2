@@ -337,8 +337,8 @@ STEP_LENGTH_MAX = +0.05
 STEP_WIDTH_MIN = -0.03
 STEP_WIDTH_MAX = +0.03
 
-STEP_TIME_MIN = 0.2
-STEP_TIME_MAX = 0.4
+STEP_TIME_MIN = 0.3
+STEP_TIME_MAX = 0.5
 
 
 # ============================================================
