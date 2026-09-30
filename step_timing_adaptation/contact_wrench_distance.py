@@ -2497,3 +2497,112 @@ def plot_wrench_distance_results(
         figure,
         axis,
     )
+
+
+# ============================================================
+# CONTACT FORCE PLOTS
+# ============================================================
+
+def plot_contact_force_results(
+    results,
+    *,
+    show=False,
+):
+    """
+    Plot total contact force of the left and right feet.
+
+    Each foot is plotted in a separate figure with world-frame
+    components Fx, Fy and Fz. These forces are reconstructed
+    from the final primitive-generator set of the contact-wrench
+    distance algorithm; they are not raw MuJoCo contact forces.
+    """
+
+    import matplotlib.pyplot as plt
+
+    results = list(results)
+
+    if not results:
+        return None
+
+    time = np.asarray(
+        [result.time for result in results],
+        dtype=float,
+    )
+
+    left_force = np.vstack(
+        [result.left_total_force for result in results]
+    )
+
+    right_force = np.vstack(
+        [result.right_total_force for result in results]
+    )
+
+    if left_force.ndim != 2 or left_force.shape[1] != 3:
+        raise RuntimeError(
+            "left_total_force must have shape (N, 3)."
+        )
+
+    if right_force.ndim != 2 or right_force.shape[1] != 3:
+        raise RuntimeError(
+            "right_total_force must have shape (N, 3)."
+        )
+
+    component_labels = (
+        "Fx",
+        "Fy",
+        "Fz",
+    )
+
+    # --------------------------------------------------------
+    # LEFT FOOT
+    # --------------------------------------------------------
+
+    figure_left, axis_left = plt.subplots()
+
+    for component_index, component_label in enumerate(
+        component_labels
+    ):
+        axis_left.plot(
+            time,
+            left_force[:, component_index],
+            linewidth=1.5,
+            label=component_label,
+        )
+
+    axis_left.set_xlabel("Time [s]")
+    axis_left.set_ylabel("Force [N]")
+    axis_left.set_title("Left foot contact force")
+    axis_left.grid(True)
+    axis_left.legend()
+    figure_left.tight_layout()
+
+    # --------------------------------------------------------
+    # RIGHT FOOT
+    # --------------------------------------------------------
+
+    figure_right, axis_right = plt.subplots()
+
+    for component_index, component_label in enumerate(
+        component_labels
+    ):
+        axis_right.plot(
+            time,
+            right_force[:, component_index],
+            linewidth=1.5,
+            label=component_label,
+        )
+
+    axis_right.set_xlabel("Time [s]")
+    axis_right.set_ylabel("Force [N]")
+    axis_right.set_title("Right foot contact force")
+    axis_right.grid(True)
+    axis_right.legend()
+    figure_right.tight_layout()
+
+    if show:
+        plt.show()
+
+    return (
+        (figure_left, axis_left),
+        (figure_right, axis_right),
+    )

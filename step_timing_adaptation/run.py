@@ -97,6 +97,7 @@ if __package__:
     from .contact_wrench_distance import (
         ContactWrenchDistanceEvaluator,
         plot_wrench_distance_results,
+        plot_contact_force_results,
         FOOT_CONTACT_POINTS_LOCAL,
         FLOOR_GEOM_NAME,
         LEFT_FOOT_GEOM_NAME,
@@ -134,6 +135,7 @@ else:
     from contact_wrench_distance import (
         ContactWrenchDistanceEvaluator,
         plot_wrench_distance_results,
+        plot_contact_force_results,
         FOOT_CONTACT_POINTS_LOCAL,
         FLOOR_GEOM_NAME,
         LEFT_FOOT_GEOM_NAME,
@@ -3905,6 +3907,11 @@ def main():
     ):
 
         plot_wrench_distance_results(
+            wrench_distance_results,
+            show=False,
+        )
+
+        plot_contact_force_results(
             wrench_distance_results,
             show=False,
         )
