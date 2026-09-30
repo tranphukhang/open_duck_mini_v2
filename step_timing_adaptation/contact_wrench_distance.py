@@ -2963,7 +2963,7 @@ def plot_contact_force_results(
 
 
 # ============================================================
-# JOINT TORQUE PLOTS
+# LEG JOINT TORQUE PLOTS
 # ============================================================
 
 def plot_joint_torque_results(
@@ -2974,17 +2974,17 @@ def plot_joint_torque_results(
     """
     Plot reconstructed leg-joint torques.
 
-    Two separate figures are created:
-        - left leg: 5 joints
-        - right leg: 5 joints
+    Layout follows the leg-joint-angle figure:
+        5 rows x 2 columns
 
-    The plotted quantities are the generalized joint torques
-    reconstructed from
+        row 1 : Hip Yaw
+        row 2 : Hip Roll
+        row 3 : Hip Pitch
+        row 4 : Knee
+        row 5 : Ankle
 
-        M qdd + qfrc_bias - qfrc_passive
-        - sum_i Jv_i^T f_i
-
-    for the 10 leg joints.
+        left column  : left leg
+        right column : right leg
     """
 
     import matplotlib.pyplot as plt
@@ -2996,9 +2996,9 @@ def plot_joint_torque_results(
     if not results:
         return None
 
-    # --------------------------------------------------------
+    # ========================================================
     # TIME
-    # --------------------------------------------------------
+    # ========================================================
 
     time = np.asarray(
         [
@@ -3009,9 +3009,9 @@ def plot_joint_torque_results(
         dtype=float,
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # JOINT NAMES
-    # --------------------------------------------------------
+    # ========================================================
 
     joint_names = tuple(
         results[0].joint_torque_names
@@ -3025,7 +3025,7 @@ def plot_joint_torque_results(
             "joint_torque_names is empty."
         )
 
-    # Check that joint ordering is unchanged for all samples.
+    # Make sure joint ordering is unchanged between samples.
     for result in results:
 
         if tuple(
@@ -3037,19 +3037,22 @@ def plot_joint_torque_results(
                 "between samples."
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # TORQUE MATRIX
-    # --------------------------------------------------------
+    # ========================================================
     #
     # Shape:
     #
     #     (number_samples, number_joints)
     #
-    # --------------------------------------------------------
+    # ========================================================
 
     torque = np.vstack(
         [
-            result.joint_torques
+            np.asarray(
+                result.joint_torques,
+                dtype=float,
+            )
             for result
             in results
         ]
@@ -3075,157 +3078,202 @@ def plot_joint_torque_results(
             "joint_torques contains NaN/Inf."
         )
 
-    # --------------------------------------------------------
-    # LEFT / RIGHT JOINT INDICES
-    # --------------------------------------------------------
+    # ========================================================
+    # NAME -> COLUMN INDEX
+    # ========================================================
 
-    left_indices = [
-        index
+    joint_index = {
+        joint_name: index
         for index, joint_name
-        in enumerate(joint_names)
-        if joint_name.startswith(
-            "left_"
+        in enumerate(
+            joint_names
         )
-    ]
-
-    right_indices = [
-        index
-        for index, joint_name
-        in enumerate(joint_names)
-        if joint_name.startswith(
-            "right_"
-        )
-    ]
-
-    if len(left_indices) == 0:
-
-        raise RuntimeError(
-            "No left-leg joints were found."
-        )
-
-    if len(right_indices) == 0:
-
-        raise RuntimeError(
-            "No right-leg joints were found."
-        )
+    }
 
     # ========================================================
-    # LEFT LEG
+    # LEFT / RIGHT JOINT PAIRS
     # ========================================================
 
-    figure_left, axis_left = (
-        plt.subplots()
+    joint_pairs = (
+        (
+            "left_hip_yaw",
+            "right_hip_yaw",
+            "Hip Yaw",
+        ),
+        (
+            "left_hip_roll",
+            "right_hip_roll",
+            "Hip Roll",
+        ),
+        (
+            "left_hip_pitch",
+            "right_hip_pitch",
+            "Hip Pitch",
+        ),
+        (
+            "left_knee",
+            "right_knee",
+            "Knee",
+        ),
+        (
+            "left_ankle",
+            "right_ankle",
+            "Ankle",
+        ),
     )
 
-    for joint_index in left_indices:
+    # Check required joints.
+    for (
+        left_joint,
+        right_joint,
+        _,
+    ) in joint_pairs:
 
-        joint_name = (
-            joint_names[
-                joint_index
-            ]
-        )
+        if left_joint not in joint_index:
 
-        axis_left.plot(
-            time,
-            torque[
-                :,
-                joint_index
-            ],
-            linewidth=1.5,
-            label=(
-                joint_name
-            ),
-        )
+            raise KeyError(
+                f"Torque data for '{left_joint}' "
+                "were not found."
+            )
 
-    axis_left.axhline(
-        0.0,
-        linewidth=0.8,
-    )
+        if right_joint not in joint_index:
 
-    axis_left.set_xlabel(
-        "Time [s]"
-    )
-
-    axis_left.set_ylabel(
-        "Torque [N m]"
-    )
-
-    axis_left.set_title(
-        "Left leg joint torques"
-    )
-
-    axis_left.grid(
-        True
-    )
-
-    axis_left.legend()
-
-    figure_left.tight_layout()
+            raise KeyError(
+                f"Torque data for '{right_joint}' "
+                "were not found."
+            )
 
     # ========================================================
-    # RIGHT LEG
+    # FIGURE
     # ========================================================
 
-    figure_right, axis_right = (
-        plt.subplots()
+    figure, axes = plt.subplots(
+        5,
+        2,
+        figsize=(
+            14,
+            15,
+        ),
+        sharex=True,
     )
 
-    for joint_index in right_indices:
+    # ========================================================
+    # PLOT EACH JOINT
+    # ========================================================
 
-        joint_name = (
-            joint_names[
-                joint_index
-            ]
+    for row, (
+        left_joint,
+        right_joint,
+        joint_label,
+    ) in enumerate(
+        joint_pairs
+    ):
+
+        for column, (
+            joint_name,
+            side_name,
+        ) in enumerate(
+            (
+                (
+                    left_joint,
+                    "Left",
+                ),
+                (
+                    right_joint,
+                    "Right",
+                ),
+            )
+        ):
+
+            axis = (
+                axes[
+                    row,
+                    column,
+                ]
+            )
+
+            torque_column = (
+                joint_index[
+                    joint_name
+                ]
+            )
+
+            axis.plot(
+                time,
+                torque[
+                    :,
+                    torque_column
+                ],
+                linewidth=1.5,
+                label="Joint torque",
+            )
+
+            # Zero reference line.
+            axis.axhline(
+                y=0.0,
+                linewidth=0.8,
+                alpha=0.5,
+            )
+
+            axis.set_title(
+                f"{side_name} {joint_label}"
+            )
+
+            axis.set_ylabel(
+                "Torque (N m)"
+            )
+
+            axis.grid(
+                True,
+                alpha=0.3,
+            )
+
+            axis.legend(
+                loc="best",
+                fontsize=8,
+            )
+
+    # ========================================================
+    # X LABEL
+    # ========================================================
+
+    axes[
+        -1,
+        0,
+    ].set_xlabel(
+        "Time (s)"
+    )
+
+    axes[
+        -1,
+        1,
+    ].set_xlabel(
+        "Time (s)"
+    )
+
+    # ========================================================
+    # MAIN TITLE
+    # ========================================================
+
+    figure.suptitle(
+        "Reconstructed Leg Joint Torques",
+        fontsize=14,
+    )
+
+    figure.tight_layout(
+        rect=(
+            0.0,
+            0.0,
+            1.0,
+            0.97,
         )
-
-        axis_right.plot(
-            time,
-            torque[
-                :,
-                joint_index
-            ],
-            linewidth=1.5,
-            label=(
-                joint_name
-            ),
-        )
-
-    axis_right.axhline(
-        0.0,
-        linewidth=0.8,
     )
-
-    axis_right.set_xlabel(
-        "Time [s]"
-    )
-
-    axis_right.set_ylabel(
-        "Torque [N m]"
-    )
-
-    axis_right.set_title(
-        "Right leg joint torques"
-    )
-
-    axis_right.grid(
-        True
-    )
-
-    axis_right.legend()
-
-    figure_right.tight_layout()
 
     if show:
 
         plt.show()
 
     return (
-        (
-            figure_left,
-            axis_left,
-        ),
-        (
-            figure_right,
-            axis_right,
-        ),
+        figure,
+        axes,
     )
