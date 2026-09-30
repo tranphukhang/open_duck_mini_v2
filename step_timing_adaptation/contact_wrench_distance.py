@@ -65,6 +65,21 @@ LEFT_FOOT_SITE_NAME = "left_foot"
 RIGHT_FOOT_SITE_NAME = "right_foot"
 FLOATING_BASE_JOINT_NAME = "floating_base"
 
+# Leg joints whose required generalized torques are reconstructed.
+# Neck/head joints are intentionally excluded.
+LEG_JOINT_NAMES = (
+    "left_hip_yaw",
+    "left_hip_roll",
+    "left_hip_pitch",
+    "left_knee",
+    "left_ankle",
+    "right_hip_yaw",
+    "right_hip_roll",
+    "right_hip_pitch",
+    "right_knee",
+    "right_ankle",
+)
+
 
 # ============================================================
 # DATA STRUCTURES
@@ -147,10 +162,25 @@ class WrenchDistanceResult:
     left_total_force: np.ndarray
     right_total_force: np.ndarray
 
-    # Diagnostics.
+    # Diagnostics for the 6 floating-base equations.
     reconstructed_contact_wrench: np.ndarray
     force_reconstruction_error: float
     force_balance_error: float
+
+    # Full generalized-force quantities.
+    # required_generalized_force =
+    #     M @ qacc + qfrc_bias - qfrc_passive
+    required_generalized_force: np.ndarray
+
+    # Sum_i Jv_i^T f_i over all active fixed contact points.
+    generalized_contact_force: np.ndarray
+
+    # Residual of the six unactuated floating-base equations.
+    base_dynamics_residual: np.ndarray
+
+    # Required generalized torques at the 10 leg joints.
+    joint_torque_names: tuple[str, ...]
+    joint_torques: np.ndarray
 
 
 # ============================================================
@@ -184,6 +214,19 @@ class ContactWrenchDistanceEvaluator:
             f_i = sum_{j : I(j)=i} c_j s_j,
 
         corresponding to Eq. (50)-(51) of Zheng & Chew (2009).
+
+    Joint-torque reconstruction:
+        This is a rigid-body inverse-dynamics post-processing step,
+        not an additional step of the Zheng-Chew distance algorithm.
+
+        After the point-contact forces f_i are recovered,
+
+            Q_c = sum_i Jv_i^T f_i
+
+        and the required leg-joint generalized torques are obtained
+        from the actuated components of
+
+            M qdd + qfrc_bias - qfrc_passive - Q_c.
     """
 
     def __init__(self, *, mj_model) -> None:
@@ -241,6 +284,68 @@ class ContactWrenchDistanceEvaluator:
                 "MuJoCo model has fewer than six generalized DoFs."
             )
 
+        # ----------------------------------------------------
+        # LEG JOINT GENERALIZED-VELOCITY INDICES
+        # ----------------------------------------------------
+        #
+        # For each 1-DoF hinge joint, jnt_dofadr gives the row
+        # index of its generalized velocity/force in MuJoCo.
+        # These indices are used later to extract the required
+        # leg-joint generalized torques from
+        #
+        #     M qdd + qfrc_bias - qfrc_passive - Jv^T f.
+        #
+        self.leg_joint_names = tuple(
+            LEG_JOINT_NAMES
+        )
+
+        leg_dof_indices = []
+
+        for joint_name in self.leg_joint_names:
+            joint_id = self._require_id(
+                mujoco.mjtObj.mjOBJ_JOINT,
+                joint_name,
+            )
+
+            joint_type = int(
+                self.mj_model.jnt_type[
+                    joint_id
+                ]
+            )
+
+            if joint_type != int(
+                mujoco.mjtJoint.mjJNT_HINGE
+            ):
+                raise RuntimeError(
+                    f"Leg joint '{joint_name}' is not a hinge joint."
+                )
+
+            dof_index = int(
+                self.mj_model.jnt_dofadr[
+                    joint_id
+                ]
+            )
+
+            if dof_index < BASE_DOF:
+                raise RuntimeError(
+                    f"Leg joint '{joint_name}' overlaps the floating-base DoFs."
+                )
+
+            leg_dof_indices.append(
+                dof_index
+            )
+
+        if len(set(leg_dof_indices)) != len(leg_dof_indices):
+            raise RuntimeError(
+                "Duplicate generalized-velocity index detected "
+                "among the leg joints."
+            )
+
+        self.leg_dof_indices = np.asarray(
+            leg_dof_indices,
+            dtype=int,
+        )
+
         floor_mu = float(
             self.mj_model.geom_friction[self.floor_geom_id, 0]
         )
@@ -283,6 +388,10 @@ class ContactWrenchDistanceEvaluator:
         print(
             "Force distribution: "
             "Zheng & Chew (2009), Eq. (50)-(51)"
+        )
+        print(
+            "Joint torque reconstruction: "
+            f"{len(self.leg_joint_names)} leg joints"
         )
         print("================================================")
         print()
@@ -650,11 +759,30 @@ class ContactWrenchDistanceEvaluator:
         mj_data,
         contacts,
     ):
+        """
+        Build both forms needed later:
+
+        Jv_i:
+            Full translational point Jacobian,
+            shape (3, nv).
+
+        G_i:
+            Floating-base wrench map,
+            G_i = Jv_i.T[0:6, :],
+            shape (6, 3).
+
+        G_i is used by the Zheng-Chew wrench-distance algorithm.
+        The full Jv_i is retained so that, after f_i has been
+        reconstructed, Jv_i.T @ f_i can be used in the complete
+        rigid-body dynamics.
+        """
+
         G_blocks = []
+        Jv_blocks = []
         friction_coefficients = []
 
         for contact in contacts:
-            J_i = self._point_translation_jacobian(
+            Jv_i = self._point_translation_jacobian(
                 mj_data=mj_data,
                 position_world=(
                     contact.position_world
@@ -664,7 +792,15 @@ class ContactWrenchDistanceEvaluator:
                 ),
             )
 
-            G_i = J_i.T[
+            if Jv_i.shape != (
+                3,
+                self.mj_model.nv,
+            ):
+                raise RuntimeError(
+                    f"Unexpected Jv_i shape: {Jv_i.shape}"
+                )
+
+            G_i = Jv_i.T[
                 0:BASE_DOF,
                 :
             ].copy()
@@ -677,6 +813,9 @@ class ContactWrenchDistanceEvaluator:
                     f"Unexpected G_i shape: {G_i.shape}"
                 )
 
+            Jv_blocks.append(
+                Jv_i.copy()
+            )
             G_blocks.append(
                 G_i
             )
@@ -686,6 +825,7 @@ class ContactWrenchDistanceEvaluator:
 
         return (
             G_blocks,
+            Jv_blocks,
             np.asarray(
                 friction_coefficients,
                 dtype=float,
@@ -1720,6 +1860,92 @@ class ContactWrenchDistanceEvaluator:
         )
 
     # ========================================================
+    # FULL GENERALIZED CONTACT FORCE / JOINT TORQUES
+    # ========================================================
+
+    def _generalized_contact_force(
+        self,
+        *,
+        contacts,
+        Jv_blocks,
+        left_contact_forces,
+        right_contact_forces,
+    ) -> np.ndarray:
+        """
+        Compute
+
+            Q_c = sum_i Jv_i^T f_i
+
+        using the same fixed contact points and reconstructed
+        point-contact forces used by the wrench-distance method.
+
+        This is the generalized contact-force contribution in the
+        complete floating-base rigid-body dynamics.
+        """
+
+        if len(contacts) != len(Jv_blocks):
+            raise RuntimeError(
+                "contacts and Jv_blocks have inconsistent lengths."
+            )
+
+        generalized_contact_force = np.zeros(
+            self.mj_model.nv,
+            dtype=float,
+        )
+
+        for contact, Jv_i in zip(
+            contacts,
+            Jv_blocks,
+        ):
+            if contact.side == "left":
+                force_i = left_contact_forces[
+                    contact.point_index
+                ]
+            elif contact.side == "right":
+                force_i = right_contact_forces[
+                    contact.point_index
+                ]
+            else:
+                raise RuntimeError(
+                    f"Invalid contact side: {contact.side}"
+                )
+
+            force_i = np.asarray(
+                force_i,
+                dtype=float,
+            ).reshape(3)
+
+            Jv_i = np.asarray(
+                Jv_i,
+                dtype=float,
+            )
+
+            if Jv_i.shape != (
+                3,
+                self.mj_model.nv,
+            ):
+                raise RuntimeError(
+                    f"Unexpected Jv_i shape: {Jv_i.shape}"
+                )
+
+            generalized_contact_force += (
+                Jv_i.T
+                @
+                force_i
+            )
+
+        if not np.all(
+            np.isfinite(
+                generalized_contact_force
+            )
+        ):
+            raise RuntimeError(
+                "Generalized contact force contains NaN/Inf."
+            )
+
+        return generalized_contact_force
+
+    # ========================================================
     # NO SUPPORT SPECIAL CASE
     # ========================================================
 
@@ -1867,6 +2093,7 @@ class ContactWrenchDistanceEvaluator:
             )
 
         G_blocks = []
+        Jv_blocks = []
 
         if number_contacts == 0:
             dynamics_rank = 0
@@ -1891,6 +2118,7 @@ class ContactWrenchDistanceEvaluator:
         else:
             (
                 G_blocks,
+                Jv_blocks,
                 friction_coefficients,
             ) = self._build_contact_wrench_maps(
                 mj_data=scratch_data,
@@ -2012,6 +2240,86 @@ class ContactWrenchDistanceEvaluator:
                 ),
             )
 
+        # ----------------------------------------------------
+        # FULL GENERALIZED CONTACT FORCE
+        # ----------------------------------------------------
+        #
+        # Complete floating-base dynamics:
+        #
+        #   M qdd + qfrc_bias - qfrc_passive
+        #       = S^T tau + sum_i Jv_i^T f_i
+        #
+        # Therefore:
+        #
+        #   S^T tau
+        #       = required_generalized_force
+        #         - generalized_contact_force
+        #
+        # The first six components should be approximately zero
+        # for a contact-wrench-feasible sample. The selected
+        # leg-joint components are the required joint torques.
+        #
+        if number_contacts == 0:
+            generalized_contact_force = np.zeros(
+                self.mj_model.nv,
+                dtype=float,
+            )
+        else:
+            generalized_contact_force = (
+                self._generalized_contact_force(
+                    contacts=contacts,
+                    Jv_blocks=Jv_blocks,
+                    left_contact_forces=(
+                        left_contact_forces
+                    ),
+                    right_contact_forces=(
+                        right_contact_forces
+                    ),
+                )
+            )
+
+        generalized_dynamics_residual = (
+            required_generalized_force
+            -
+            generalized_contact_force
+        )
+
+        base_dynamics_residual = (
+            generalized_dynamics_residual[
+                0:BASE_DOF
+            ].copy()
+        )
+
+        joint_torques = (
+            generalized_dynamics_residual[
+                self.leg_dof_indices
+            ].copy()
+        )
+
+        if joint_torques.shape != (
+            len(self.leg_joint_names),
+        ):
+            raise RuntimeError(
+                "Unexpected reconstructed joint-torque shape."
+            )
+
+        if (
+            not np.all(
+                np.isfinite(
+                    base_dynamics_residual
+                )
+            )
+            or
+            not np.all(
+                np.isfinite(
+                    joint_torques
+                )
+            )
+        ):
+            raise RuntimeError(
+                "Reconstructed dynamics contains NaN/Inf."
+            )
+
         return WrenchDistanceResult(
             time=float(
                 sample.time
@@ -2098,6 +2406,25 @@ class ContactWrenchDistanceEvaluator:
             force_balance_error=float(
                 force_balance_error
             ),
+            required_generalized_force=np.asarray(
+                required_generalized_force,
+                dtype=float,
+            ).copy(),
+            generalized_contact_force=np.asarray(
+                generalized_contact_force,
+                dtype=float,
+            ).copy(),
+            base_dynamics_residual=np.asarray(
+                base_dynamics_residual,
+                dtype=float,
+            ).copy(),
+            joint_torque_names=tuple(
+                self.leg_joint_names
+            ),
+            joint_torques=np.asarray(
+                joint_torques,
+                dtype=float,
+            ).copy(),
         )
 
     # ========================================================
@@ -2263,6 +2590,25 @@ class ContactWrenchDistanceEvaluator:
             dtype=float,
         )
 
+        base_dynamics_residual_norm = np.asarray(
+            [
+                np.linalg.norm(
+                    result.base_dynamics_residual
+                )
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+
+        joint_torque_matrix = np.vstack(
+            [
+                result.joint_torques
+                for result
+                in results
+            ]
+        )
+
         contact_modes = [
             result.contact_mode
             for result
@@ -2362,6 +2708,14 @@ class ContactWrenchDistanceEvaluator:
         print(
             "Max force balance error: "
             f"{np.max(force_balance_error):.6e}"
+        )
+        print(
+            "Max base dyn residual   : "
+            f"{np.max(base_dynamics_residual_norm):.6e}"
+        )
+        print(
+            "Max abs leg torque [Nm] : "
+            f"{np.max(np.abs(joint_torque_matrix)):.6e}"
         )
         print("================================================")
         print()
