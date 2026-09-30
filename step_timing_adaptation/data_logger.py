@@ -258,6 +258,12 @@ class ExperimentCSVDataLogger:
         right_swing_height.csv
         sagittal_motion.csv
         lateral_motion.csv
+        wrench_distance.csv
+        qacc_norm.csv
+        required_wrench_norm.csv
+        left_contact_force.csv
+        right_contact_force.csv
+        joint_torque.csv
     """
 
     def __init__(
@@ -657,7 +663,7 @@ class ExperimentCSVDataLogger:
         saved_files = {}
 
         # ----------------------------------------------------
-        # Contact-wrench feasibility
+        # Contact-wrench feasibility / force / torque
         # ----------------------------------------------------
 
         if wrench_distance_results is not None:
@@ -706,6 +712,16 @@ class ExperimentCSVDataLogger:
                 "right_contact_force"
             ] = (
                 self._save_right_contact_force(
+                    wrench_distance_results=(
+                        wrench_distance_results
+                    )
+                )
+            )
+
+            saved_files[
+                "joint_torque"
+            ] = (
+                self._save_joint_torque(
                     wrench_distance_results=(
                         wrench_distance_results
                     )
@@ -785,7 +801,8 @@ class ExperimentCSVDataLogger:
         )
 
         return saved_files
-    
+
+    # ========================================================
     # CONTACT WRENCH DISTANCE
     # ========================================================
 
@@ -1121,6 +1138,159 @@ class ExperimentCSVDataLogger:
                 "force_z_N":
                     force[:, 2],
             },
+        )
+
+
+    # ========================================================
+    # LEG JOINT TORQUE
+    # ========================================================
+
+    def _save_joint_torque(
+        self,
+        *,
+        wrench_distance_results,
+    ) -> Path:
+        """
+        Save the required generalized torques of the leg joints.
+
+        The torque values are reconstructed in
+        contact_wrench_distance.py from the actuated components of
+
+            M qdd + qfrc_bias - qfrc_passive
+            - sum_i Jv_i^T f_i.
+
+        For the current model all listed leg joints are 1-DoF
+        hinge joints, so the generalized torque unit is N m.
+        """
+
+        if wrench_distance_results is None:
+
+            raise RuntimeError(
+                "Wrench-distance results are unavailable."
+            )
+
+        results = list(
+            wrench_distance_results
+        )
+
+        if len(
+            results
+        ) == 0:
+
+            raise RuntimeError(
+                "Wrench-distance result list is empty."
+            )
+
+        joint_names = tuple(
+            str(name)
+            for name
+            in results[0].joint_torque_names
+        )
+
+        if len(
+            joint_names
+        ) == 0:
+
+            raise RuntimeError(
+                "joint_torque_names is empty."
+            )
+
+        if len(
+            set(
+                joint_names
+            )
+        ) != len(
+            joint_names
+        ):
+
+            raise RuntimeError(
+                "joint_torque_names contains duplicates."
+            )
+
+        for result in results:
+
+            current_names = tuple(
+                str(name)
+                for name
+                in result.joint_torque_names
+            )
+
+            if current_names != joint_names:
+
+                raise RuntimeError(
+                    "Joint-torque name ordering changes "
+                    "between samples."
+                )
+
+        time = np.asarray(
+            [
+                result.time
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+
+        torque = np.vstack(
+            [
+                np.asarray(
+                    result.joint_torques,
+                    dtype=float,
+                ).reshape(-1)
+                for result
+                in results
+            ]
+        )
+
+        expected_shape = (
+            len(
+                results
+            ),
+            len(
+                joint_names
+            ),
+        )
+
+        if torque.shape != expected_shape:
+
+            raise RuntimeError(
+                "joint_torques has unexpected shape: "
+                f"{torque.shape}, expected {expected_shape}."
+            )
+
+        if not np.all(
+            np.isfinite(
+                torque
+            )
+        ):
+
+            raise RuntimeError(
+                "joint_torques contains NaN/Inf."
+            )
+
+        columns = {
+            "time_s":
+                time,
+        }
+
+        for joint_index, joint_name in enumerate(
+            joint_names
+        ):
+
+            columns[
+                f"{joint_name}_Nm"
+            ] = (
+                torque[
+                    :,
+                    joint_index
+                ]
+            )
+
+        return self._write_columns(
+            filename=(
+                "joint_torque.csv"
+            ),
+            columns=columns,
         )
 
 
