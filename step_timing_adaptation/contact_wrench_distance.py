@@ -18,11 +18,14 @@ BASE_DOF = 6
 # Zheng & Chew (2009), Distance Algorithm Step 2.
 SUPPORT_TOLERANCE = 1.0e-8
 
-# Software tolerance used only to classify d ~= 0.
+# Numerical tolerance used only to classify d ~= 0 in software.
 DISTANCE_TOLERANCE = 1.0e-6
 
-# Numerical tolerances for the paper subalgorithm.
+# Numerical interpretation of negative / zero / positive
+# coefficients in the paper subalgorithm.
 COEFFICIENT_TOLERANCE = 1.0e-10
+
+# Numerical interpretation of Theorem 4 condition 2.
 SUPPORT_PLANE_TOLERANCE = 1.0e-10
 
 # Programming guard only; not an additional paper step.
@@ -40,26 +43,10 @@ FOOT_CONTACT_Y_MIN = -0.01822
 
 FOOT_CONTACT_POINTS_LOCAL = np.array(
     [
-        [
-            FOOT_CONTACT_X_MAX,
-            FOOT_CONTACT_Y_MAX,
-            0.0,
-        ],
-        [
-            FOOT_CONTACT_X_MAX,
-            FOOT_CONTACT_Y_MIN,
-            0.0,
-        ],
-        [
-            FOOT_CONTACT_X_MIN,
-            FOOT_CONTACT_Y_MAX,
-            0.0,
-        ],
-        [
-            FOOT_CONTACT_X_MIN,
-            FOOT_CONTACT_Y_MIN,
-            0.0,
-        ],
+        [FOOT_CONTACT_X_MAX, FOOT_CONTACT_Y_MAX, 0.0],
+        [FOOT_CONTACT_X_MAX, FOOT_CONTACT_Y_MIN, 0.0],
+        [FOOT_CONTACT_X_MIN, FOOT_CONTACT_Y_MAX, 0.0],
+        [FOOT_CONTACT_X_MIN, FOOT_CONTACT_Y_MIN, 0.0],
     ],
     dtype=float,
 )
@@ -72,21 +59,11 @@ NUMBER_CONTACT_POINTS_PER_FOOT = 4
 # ============================================================
 
 FLOOR_GEOM_NAME = "floor"
-
-LEFT_FOOT_GEOM_NAME = (
-    "left_foot_bottom_tpu"
-)
-
-RIGHT_FOOT_GEOM_NAME = (
-    "right_foot_bottom_tpu"
-)
-
+LEFT_FOOT_GEOM_NAME = "left_foot_bottom_tpu"
+RIGHT_FOOT_GEOM_NAME = "right_foot_bottom_tpu"
 LEFT_FOOT_SITE_NAME = "left_foot"
 RIGHT_FOOT_SITE_NAME = "right_foot"
-
-FLOATING_BASE_JOINT_NAME = (
-    "floating_base"
-)
+FLOATING_BASE_JOINT_NAME = "floating_base"
 
 
 # ============================================================
@@ -95,58 +72,85 @@ FLOATING_BASE_JOINT_NAME = (
 
 @dataclass(frozen=True)
 class TrajectorySample:
-
     time: float
-
     qpos: np.ndarray
     qvel: np.ndarray
-
-    # Logical stance from gait planner.
     stance_side: str
 
 
 @dataclass(frozen=True)
+class FixedContact:
+    position_world: np.ndarray
+    body_id: int
+    mu: float
+    side: str
+    point_index: int
+
+
+@dataclass(frozen=True)
+class PrimitiveGenerator:
+    """
+    Primitive generator selected by the support mapping.
+
+    wrench:
+        w_j = G_i s_j
+
+    force:
+        s_j in U_i
+
+    contact_index:
+        Index of the active fixed contact in the current sample.
+    """
+
+    wrench: np.ndarray
+    force: np.ndarray
+    contact_index: int
+    side: str
+    point_index: int
+
+
+@dataclass(frozen=True)
 class WrenchDistanceResult:
-
     time: float
-
-    # Logical gait state.
     stance_side: str
 
-    # Actual support mode from MuJoCo.
     contact_mode: str
-
     left_collision_detected: bool
     right_collision_detected: bool
-
     collision_detected: bool
 
-    # 4 for SS, 8 for DS, 0 for no support.
     number_contacts: int
 
     dynamics_rank: int
-
     dynamics_condition_number: float
 
     qacc: np.ndarray
 
     required_wrench: np.ndarray
-
     closest_wrench: np.ndarray
-
     residual_wrench: np.ndarray
 
     distance: float
-
     feasible: bool
 
     converged: bool
-
     iterations: int
-
     final_support_value: float
-
     active_generator_count: int
+
+    # Contact forces at the four predefined points of each foot.
+    # Shape: (4, 3), world ordering [Fx, Fy, Fz].
+    left_contact_forces: np.ndarray
+    right_contact_forces: np.ndarray
+
+    # Total force of each foot, world ordering [Fx, Fy, Fz].
+    left_total_force: np.ndarray
+    right_total_force: np.ndarray
+
+    # Diagnostics.
+    reconstructed_contact_wrench: np.ndarray
+    force_reconstruction_error: float
+    force_balance_error: float
 
 
 # ============================================================
@@ -154,289 +158,140 @@ class WrenchDistanceResult:
 # ============================================================
 
 class ContactWrenchDistanceEvaluator:
-
     """
-    Distance from the required floating-base generalized wrench
-    to the feasible contact-wrench cone.
+    Evaluate contact-wrench feasibility and recover contact forces.
 
-    Contact mode is determined using MuJoCo collision:
+    Contact mode:
+        left only  -> left single support  -> 4 fixed points
+        right only -> right single support -> 4 fixed points
+        both feet  -> double support       -> 8 fixed points
+        neither    -> no support
 
-        left only
-            -> left single support
-            -> 4 fixed contact points
+    MuJoCo collision detection only decides which foot is active.
+    Actual MuJoCo collision locations are not used to construct V.
 
-        right only
-            -> right single support
-            -> 4 fixed contact points
+    Distance:
+        Zheng & Chew (2009) convex-cone distance algorithm.
 
-        both feet
-            -> double support
-            -> 8 fixed contact points
+    Force distribution:
+        From the final active primitive set W_hat,
 
-        neither foot
-            -> no support
-            -> V = {0}
+            w_j = G_{I(j)} s_j,
 
-    MuJoCo collision determines only which foot is active.
+        the coefficients c_j are recovered from the paper's
+        projection relation and
 
-    The actual MuJoCo contact positions are NOT used to build
-    the feasible wrench cone.
+            f_i = sum_{j : I(j)=i} c_j s_j,
 
-    Each active foot still uses the four predefined fixed
-    contact points.
-
-    The contact-wrench cone and distance algorithm follow
-    Zheng & Chew (2009).
+        corresponding to Eq. (50)-(51) of Zheng & Chew (2009).
     """
 
-    # ========================================================
-    # INITIALIZATION
-    # ========================================================
+    def __init__(self, *, mj_model) -> None:
+        self.mj_model = mj_model
+        self.samples: list[TrajectorySample] = []
 
-    def __init__(
-        self,
-        *,
-        mj_model,
-    ) -> None:
-
-        self.mj_model = (
-            mj_model
+        self.floor_geom_id = self._require_id(
+            mujoco.mjtObj.mjOBJ_GEOM,
+            FLOOR_GEOM_NAME,
         )
-
-        self.samples: list[
-            TrajectorySample
-        ] = []
-
-        # ----------------------------------------------------
-        # MuJoCo object IDs
-        # ----------------------------------------------------
-
-        self.floor_geom_id = (
-            self._require_id(
-                mujoco.mjtObj.mjOBJ_GEOM,
-                FLOOR_GEOM_NAME,
-            )
+        self.left_foot_geom_id = self._require_id(
+            mujoco.mjtObj.mjOBJ_GEOM,
+            LEFT_FOOT_GEOM_NAME,
         )
-
-        self.left_foot_geom_id = (
-            self._require_id(
-                mujoco.mjtObj.mjOBJ_GEOM,
-                LEFT_FOOT_GEOM_NAME,
-            )
+        self.right_foot_geom_id = self._require_id(
+            mujoco.mjtObj.mjOBJ_GEOM,
+            RIGHT_FOOT_GEOM_NAME,
         )
-
-        self.right_foot_geom_id = (
-            self._require_id(
-                mujoco.mjtObj.mjOBJ_GEOM,
-                RIGHT_FOOT_GEOM_NAME,
-            )
+        self.left_foot_site_id = self._require_id(
+            mujoco.mjtObj.mjOBJ_SITE,
+            LEFT_FOOT_SITE_NAME,
         )
-
-        self.left_foot_site_id = (
-            self._require_id(
-                mujoco.mjtObj.mjOBJ_SITE,
-                LEFT_FOOT_SITE_NAME,
-            )
-        )
-
-        self.right_foot_site_id = (
-            self._require_id(
-                mujoco.mjtObj.mjOBJ_SITE,
-                RIGHT_FOOT_SITE_NAME,
-            )
+        self.right_foot_site_id = self._require_id(
+            mujoco.mjtObj.mjOBJ_SITE,
+            RIGHT_FOOT_SITE_NAME,
         )
 
         self.left_foot_body_id = int(
-            self.mj_model.site_bodyid[
-                self.left_foot_site_id
-            ]
+            self.mj_model.site_bodyid[self.left_foot_site_id]
         )
-
         self.right_foot_body_id = int(
-            self.mj_model.site_bodyid[
-                self.right_foot_site_id
-            ]
+            self.mj_model.site_bodyid[self.right_foot_site_id]
         )
 
-        # ----------------------------------------------------
-        # Floating base
-        # ----------------------------------------------------
-
-        floating_base_joint_id = (
-            self._require_id(
-                mujoco.mjtObj.mjOBJ_JOINT,
-                FLOATING_BASE_JOINT_NAME,
-            )
+        floating_base_joint_id = self._require_id(
+            mujoco.mjtObj.mjOBJ_JOINT,
+            FLOATING_BASE_JOINT_NAME,
         )
 
-        if (
-            int(
-                self.mj_model.jnt_type[
-                    floating_base_joint_id
-                ]
-            )
-            !=
-            int(
-                mujoco.mjtJoint.mjJNT_FREE
-            )
+        if int(self.mj_model.jnt_type[floating_base_joint_id]) != int(
+            mujoco.mjtJoint.mjJNT_FREE
         ):
-
             raise RuntimeError(
-                f"Joint "
-                f"'{FLOATING_BASE_JOINT_NAME}' "
-                f"is not a free joint."
+                f"Joint '{FLOATING_BASE_JOINT_NAME}' is not a free joint."
             )
 
-        if (
-            int(
-                self.mj_model.jnt_dofadr[
-                    floating_base_joint_id
-                ]
-            )
-            !=
-            0
-        ):
-
+        if int(self.mj_model.jnt_dofadr[floating_base_joint_id]) != 0:
             raise RuntimeError(
-                "This implementation assumes that "
-                "the first six qvel coordinates "
-                "belong to the floating base."
+                "This implementation assumes that the first six qvel "
+                "coordinates belong to the floating base."
             )
 
-        if (
-            self.mj_model.nv
-            <
-            BASE_DOF
-        ):
-
+        if self.mj_model.nv < BASE_DOF:
             raise RuntimeError(
-                "MuJoCo model has fewer than "
-                "six generalized DoFs."
+                "MuJoCo model has fewer than six generalized DoFs."
             )
-
-        # ----------------------------------------------------
-        # Friction coefficients
-        # ----------------------------------------------------
 
         floor_mu = float(
-            self.mj_model.geom_friction[
-                self.floor_geom_id,
-                0,
-            ]
+            self.mj_model.geom_friction[self.floor_geom_id, 0]
         )
-
         left_mu = float(
-            self.mj_model.geom_friction[
-                self.left_foot_geom_id,
-                0,
-            ]
+            self.mj_model.geom_friction[self.left_foot_geom_id, 0]
         )
-
         right_mu = float(
-            self.mj_model.geom_friction[
-                self.right_foot_geom_id,
-                0,
-            ]
+            self.mj_model.geom_friction[self.right_foot_geom_id, 0]
         )
 
-        self.left_mu = min(
-            floor_mu,
-            left_mu,
-        )
-
-        self.right_mu = min(
-            floor_mu,
-            right_mu,
-        )
-
-        # ----------------------------------------------------
-        # Display information
-        # ----------------------------------------------------
+        self.left_mu = min(floor_mu, left_mu)
+        self.right_mu = min(floor_mu, right_mu)
 
         contact_length_mm = (
-            FOOT_CONTACT_X_MAX
-            -
-            FOOT_CONTACT_X_MIN
+            FOOT_CONTACT_X_MAX - FOOT_CONTACT_X_MIN
         ) * 1000.0
-
         contact_width_mm = (
-            FOOT_CONTACT_Y_MAX
-            -
-            FOOT_CONTACT_Y_MIN
+            FOOT_CONTACT_Y_MAX - FOOT_CONTACT_Y_MIN
         ) * 1000.0
 
         print()
-
-        print(
-            "================================================"
-        )
-
-        print(
-            "CONTACT WRENCH DISTANCE EVALUATOR"
-        )
-
-        print(
-            "================================================"
-        )
-
+        print("================================================")
+        print("CONTACT WRENCH DISTANCE / FORCE DISTRIBUTION")
+        print("================================================")
         print(
             "Contact rectangle: "
             f"{contact_length_mm:.2f} x "
             f"{contact_width_mm:.2f} mm"
         )
-
         print(
             "Contact points / active foot: "
             f"{NUMBER_CONTACT_POINTS_PER_FOOT}"
         )
-
-        print(
-            "Left friction coefficient : "
-            f"{self.left_mu:.4f}"
-        )
-
-        print(
-            "Right friction coefficient: "
-            f"{self.right_mu:.4f}"
-        )
-
+        print(f"Left friction coefficient : {self.left_mu:.4f}")
+        print(f"Right friction coefficient: {self.right_mu:.4f}")
         print(
             "Contact mode source: "
             "MuJoCo foot-floor collision detection"
         )
-
         print(
-            "SS contact model: "
-            "4 fixed points"
+            "Force distribution: "
+            "Zheng & Chew (2009), Eq. (50)-(51)"
         )
-
-        print(
-            "DS contact model: "
-            "8 fixed points "
-            "(4 left + 4 right)"
-        )
-
-        print(
-            "MuJoCo contact locations are not "
-            "used for the wrench cone."
-        )
-
-        print(
-            "================================================"
-        )
-
+        print("================================================")
         print()
 
     # ========================================================
     # BASIC MODEL HELPERS
     # ========================================================
 
-    def _require_id(
-        self,
-        object_type,
-        name: str,
-    ) -> int:
-
+    def _require_id(self, object_type, name: str) -> int:
         object_id = int(
             mujoco.mj_name2id(
                 self.mj_model,
@@ -444,24 +299,11 @@ class ContactWrenchDistanceEvaluator:
                 name,
             )
         )
-
-        if (
-            object_id
-            <
-            0
-        ):
-
+        if object_id < 0:
             raise RuntimeError(
-                f"MuJoCo object "
-                f"'{name}' "
-                f"was not found."
+                f"MuJoCo object '{name}' was not found."
             )
-
         return object_id
-
-    # ========================================================
-    # RECORD SAMPLE
-    # ========================================================
 
     def record_sample(
         self,
@@ -470,101 +312,46 @@ class ContactWrenchDistanceEvaluator:
         mj_data,
         stance_side,
     ) -> None:
+        sample_time = float(time)
+        stance_side = str(stance_side).lower()
 
-        sample_time = float(
-            time
-        )
-
-        stance_side = str(
-            stance_side
-        ).lower()
-
-        if (
-            stance_side
-            not in
-            (
-                "left",
-                "right",
-            )
-        ):
-
+        if stance_side not in ("left", "right"):
             raise ValueError(
-                f"Invalid stance_side: "
-                f"{stance_side}"
+                f"Invalid stance_side: {stance_side}"
             )
-
-        if not np.isfinite(
-            sample_time
-        ):
-
+        if not np.isfinite(sample_time):
             raise ValueError(
                 "Sample time must be finite."
             )
-
-        if (
-            self.samples
-            and
-            sample_time
-            <=
-            self.samples[-1].time
-        ):
-
+        if self.samples and sample_time <= self.samples[-1].time:
             raise ValueError(
-                "Sample time must be "
-                "strictly increasing."
+                "Sample time must be strictly increasing."
             )
 
         qpos = np.asarray(
             mj_data.qpos,
             dtype=float,
         ).copy()
-
         qvel = np.asarray(
             mj_data.qvel,
             dtype=float,
         ).copy()
 
-        if (
-            qpos.shape
-            !=
-            (
-                self.mj_model.nq,
-            )
-        ):
-
+        if qpos.shape != (self.mj_model.nq,):
             raise RuntimeError(
                 "Unexpected qpos shape."
             )
-
-        if (
-            qvel.shape
-            !=
-            (
-                self.mj_model.nv,
-            )
-        ):
-
+        if qvel.shape != (self.mj_model.nv,):
             raise RuntimeError(
                 "Unexpected qvel shape."
             )
-
         if (
-            not np.all(
-                np.isfinite(
-                    qpos
-                )
-            )
+            not np.all(np.isfinite(qpos))
             or
-            not np.all(
-                np.isfinite(
-                    qvel
-                )
-            )
+            not np.all(np.isfinite(qvel))
         ):
-
             raise RuntimeError(
-                "Recorded qpos/qvel contains "
-                "NaN or Inf."
+                "Recorded qpos/qvel contains NaN or Inf."
             )
 
         self.samples.append(
@@ -576,21 +363,11 @@ class ContactWrenchDistanceEvaluator:
             )
         )
 
-    # ========================================================
-    # FULL MASS MATRIX
-    # ========================================================
-
     def _full_mass_matrix(
         self,
         *,
         mj_data,
     ) -> np.ndarray:
-
-        """
-        Return dense M(q), supporting both the
-        new and old MuJoCo Python APIs.
-        """
-
         mass_matrix = np.zeros(
             (
                 self.mj_model.nv,
@@ -600,24 +377,19 @@ class ContactWrenchDistanceEvaluator:
         )
 
         try:
-
             mujoco.mj_fullM(
                 self.mj_model,
                 mj_data,
                 mass_matrix,
             )
-
         except TypeError:
-
             if not hasattr(
                 mj_data,
                 "qM",
             ):
-
                 raise RuntimeError(
                     "Unsupported MuJoCo mj_fullM API: "
-                    "new API failed and mjData.qM "
-                    "is unavailable."
+                    "new API failed and mjData.qM is unavailable."
                 )
 
             mujoco.mj_fullM(
@@ -626,12 +398,7 @@ class ContactWrenchDistanceEvaluator:
                 mj_data.qM,
             )
 
-        if not np.all(
-            np.isfinite(
-                mass_matrix
-            )
-        ):
-
+        if not np.all(np.isfinite(mass_matrix)):
             raise RuntimeError(
                 "Mass matrix contains NaN/Inf."
             )
@@ -639,48 +406,30 @@ class ContactWrenchDistanceEvaluator:
         return mass_matrix
 
     # ========================================================
-    # MUJOCO COLLISION DETECTION
+    # COLLISION DETECTION
     # ========================================================
 
     @staticmethod
     def _contact_geom_ids(
         contact,
     ) -> tuple[int, int]:
-
         if hasattr(
             contact,
             "geom",
         ):
-
             geom = np.asarray(
                 contact.geom,
                 dtype=int,
-            ).reshape(
-                -1
-            )
-
-            if (
-                geom.size
-                >=
-                2
-            ):
-
+            ).reshape(-1)
+            if geom.size >= 2:
                 return (
-                    int(
-                        geom[0]
-                    ),
-                    int(
-                        geom[1]
-                    ),
+                    int(geom[0]),
+                    int(geom[1]),
                 )
 
         return (
-            int(
-                contact.geom1
-            ),
-            int(
-                contact.geom2
-            ),
+            int(contact.geom1),
+            int(contact.geom2),
         )
 
     def _foot_collision_detected(
@@ -689,35 +438,19 @@ class ContactWrenchDistanceEvaluator:
         mj_data,
         foot_geom_id,
     ) -> bool:
-
-        """
-        Return True if the specified foot geom has
-        an active MuJoCo contact pair with the floor.
-        """
-
         foot_geom_id = int(
             foot_geom_id
         )
 
         for contact_index in range(
-            int(
-                mj_data.ncon
-            )
+            int(mj_data.ncon)
         ):
+            contact = mj_data.contact[
+                contact_index
+            ]
 
-            contact = (
-                mj_data.contact[
-                    contact_index
-                ]
-            )
-
-            (
-                geom_0,
-                geom_1,
-            ) = (
-                self._contact_geom_ids(
-                    contact
-                )
+            geom_0, geom_1 = self._contact_geom_ids(
+                contact
             )
 
             pair = {
@@ -726,29 +459,17 @@ class ContactWrenchDistanceEvaluator:
             }
 
             if (
-                self.floor_geom_id
-                in
-                pair
+                self.floor_geom_id in pair
                 and
-                foot_geom_id
-                in
-                pair
+                foot_geom_id in pair
             ):
-
-                # Same criterion used previously
-                # for collision diagnostics.
                 if (
-                    float(
-                        contact.dist
-                    )
+                    float(contact.dist)
                     <=
-                    float(
-                        contact.includemargin
-                    )
+                    float(contact.includemargin)
                     +
                     1.0e-9
                 ):
-
                     return True
 
         return False
@@ -757,65 +478,28 @@ class ContactWrenchDistanceEvaluator:
         self,
         *,
         mj_data,
-    ) -> tuple[
-        bool,
-        bool,
-        str,
-    ]:
-
-        left_contact = (
-            self._foot_collision_detected(
-                mj_data=mj_data,
-                foot_geom_id=(
-                    self.left_foot_geom_id
-                ),
-            )
+    ) -> tuple[bool, bool, str]:
+        left_contact = self._foot_collision_detected(
+            mj_data=mj_data,
+            foot_geom_id=self.left_foot_geom_id,
+        )
+        right_contact = self._foot_collision_detected(
+            mj_data=mj_data,
+            foot_geom_id=self.right_foot_geom_id,
         )
 
-        right_contact = (
-            self._foot_collision_detected(
-                mj_data=mj_data,
-                foot_geom_id=(
-                    self.right_foot_geom_id
-                ),
-            )
-        )
-
-        if (
-            left_contact
-            and
-            right_contact
-        ):
-
-            contact_mode = (
-                "double_support"
-            )
-
+        if left_contact and right_contact:
+            contact_mode = "double_support"
         elif left_contact:
-
-            contact_mode = (
-                "left_single_support"
-            )
-
+            contact_mode = "left_single_support"
         elif right_contact:
-
-            contact_mode = (
-                "right_single_support"
-            )
-
+            contact_mode = "right_single_support"
         else:
-
-            contact_mode = (
-                "no_support"
-            )
+            contact_mode = "no_support"
 
         return (
-            bool(
-                left_contact
-            ),
-            bool(
-                right_contact
-            ),
+            bool(left_contact),
+            bool(right_contact),
             contact_mode,
         )
 
@@ -828,63 +512,22 @@ class ContactWrenchDistanceEvaluator:
         *,
         mj_data,
         side,
-    ):
-
-        """
-        Return the four predefined contact points
-        for one foot.
-
-        MuJoCo collision determines whether this
-        foot is active.
-
-        The actual collision locations are not used.
-        """
-
+    ) -> list[FixedContact]:
         side = str(
             side
         ).lower()
 
-        if (
-            side
-            ==
-            "left"
-        ):
-
-            site_id = (
-                self.left_foot_site_id
-            )
-
-            body_id = (
-                self.left_foot_body_id
-            )
-
-            mu = (
-                self.left_mu
-            )
-
-        elif (
-            side
-            ==
-            "right"
-        ):
-
-            site_id = (
-                self.right_foot_site_id
-            )
-
-            body_id = (
-                self.right_foot_body_id
-            )
-
-            mu = (
-                self.right_mu
-            )
-
+        if side == "left":
+            site_id = self.left_foot_site_id
+            body_id = self.left_foot_body_id
+            mu = self.left_mu
+        elif side == "right":
+            site_id = self.right_foot_site_id
+            body_id = self.right_foot_body_id
+            mu = self.right_mu
         else:
-
             raise ValueError(
-                f"Invalid foot side: "
-                f"{side}"
+                f"Invalid foot side: {side}"
             )
 
         site_position_world = np.asarray(
@@ -892,26 +535,20 @@ class ContactWrenchDistanceEvaluator:
                 site_id
             ],
             dtype=float,
-        ).reshape(
-            3
-        )
+        ).reshape(3)
 
         R_world_site = np.asarray(
             mj_data.site_xmat[
                 site_id
             ],
             dtype=float,
-        ).reshape(
-            3,
-            3,
-        )
+        ).reshape(3, 3)
 
         contacts = []
 
-        for point_local in (
+        for point_index, point_local in enumerate(
             FOOT_CONTACT_POINTS_LOCAL
         ):
-
             point_world = (
                 site_position_world
                 +
@@ -921,11 +558,19 @@ class ContactWrenchDistanceEvaluator:
             )
 
             contacts.append(
-                (
-                    point_world.copy(),
-                    body_id,
-                    float(
+                FixedContact(
+                    position_world=(
+                        point_world.copy()
+                    ),
+                    body_id=int(
+                        body_id
+                    ),
+                    mu=float(
                         mu
+                    ),
+                    side=side,
+                    point_index=int(
+                        point_index
                     ),
                 )
             )
@@ -938,12 +583,12 @@ class ContactWrenchDistanceEvaluator:
         mj_data,
         left_contact,
         right_contact,
-    ):
-
+    ) -> list[FixedContact]:
         contacts = []
 
+        # Deterministic ordering:
+        # left P1..P4, then right P1..P4.
         if left_contact:
-
             contacts.extend(
                 self._fixed_contacts_for_side(
                     mj_data=mj_data,
@@ -952,7 +597,6 @@ class ContactWrenchDistanceEvaluator:
             )
 
         if right_contact:
-
             contacts.extend(
                 self._fixed_contacts_for_side(
                     mj_data=mj_data,
@@ -963,7 +607,7 @@ class ContactWrenchDistanceEvaluator:
         return contacts
 
     # ========================================================
-    # POINT JACOBIAN
+    # POINT JACOBIAN / CONTACT WRENCH MAP
     # ========================================================
 
     def _point_translation_jacobian(
@@ -973,7 +617,6 @@ class ContactWrenchDistanceEvaluator:
         position_world,
         body_id,
     ) -> np.ndarray:
-
         jacobian = np.zeros(
             (
                 3,
@@ -991,26 +634,15 @@ class ContactWrenchDistanceEvaluator:
                 position_world,
                 dtype=float,
             ),
-            int(
-                body_id
-            ),
+            int(body_id),
         )
 
-        if not np.all(
-            np.isfinite(
-                jacobian
-            )
-        ):
-
+        if not np.all(np.isfinite(jacobian)):
             raise RuntimeError(
                 "Point Jacobian contains NaN/Inf."
             )
 
         return jacobian
-
-    # ========================================================
-    # CONTACT WRENCH MAPS
-    # ========================================================
 
     def _build_contact_wrench_maps(
         self,
@@ -1018,66 +650,38 @@ class ContactWrenchDistanceEvaluator:
         mj_data,
         contacts,
     ):
-
-        """
-        For every fixed contact point i:
-
-            w_i = G_i f_i
-
-            G_i = J_i^T[0:6, :]
-        """
-
         G_blocks = []
-
         friction_coefficients = []
 
-        for (
-            position_world,
-            body_id,
-            mu,
-        ) in contacts:
-
-            J_i = (
-                self._point_translation_jacobian(
-                    mj_data=mj_data,
-                    position_world=(
-                        position_world
-                    ),
-                    body_id=(
-                        body_id
-                    ),
-                )
+        for contact in contacts:
+            J_i = self._point_translation_jacobian(
+                mj_data=mj_data,
+                position_world=(
+                    contact.position_world
+                ),
+                body_id=(
+                    contact.body_id
+                ),
             )
 
-            G_i = (
-                J_i.T[
-                    0:BASE_DOF,
-                    :
-                ].copy()
-            )
+            G_i = J_i.T[
+                0:BASE_DOF,
+                :
+            ].copy()
 
-            if (
-                G_i.shape
-                !=
-                (
-                    BASE_DOF,
-                    3,
-                )
+            if G_i.shape != (
+                BASE_DOF,
+                3,
             ):
-
                 raise RuntimeError(
-                    "Unexpected G_i shape: "
-                    f"{G_i.shape}"
+                    f"Unexpected G_i shape: {G_i.shape}"
                 )
 
             G_blocks.append(
                 G_i
             )
-
             friction_coefficients.append(
-                float(
-                    mu
-                )
+                float(contact.mu)
             )
 
         return (
@@ -1088,57 +692,35 @@ class ContactWrenchDistanceEvaluator:
             ),
         )
 
-    # ========================================================
-    # MATRIX CONDITION NUMBER
-    # ========================================================
-
     @staticmethod
     def _matrix_condition_number(
         matrix,
     ) -> float:
-
-        singular_values = (
-            np.linalg.svd(
-                np.asarray(
-                    matrix,
-                    dtype=float,
-                ),
-                compute_uv=False,
-            )
+        singular_values = np.linalg.svd(
+            np.asarray(
+                matrix,
+                dtype=float,
+            ),
+            compute_uv=False,
         )
 
-        if (
-            singular_values.size
-            ==
-            0
-        ):
-
+        if singular_values.size == 0:
             return float(
                 "inf"
             )
 
         largest = float(
-            singular_values[
-                0
-            ]
+            singular_values[0]
         )
-
         smallest = float(
-            singular_values[
-                -1
-            ]
+            singular_values[-1]
         )
 
         if (
-            smallest
-            <=
-            0.0
+            smallest <= 0.0
             or
-            not np.isfinite(
-                smallest
-            )
+            not np.isfinite(smallest)
         ):
-
             return float(
                 "inf"
             )
@@ -1159,21 +741,18 @@ class ContactWrenchDistanceEvaluator:
         residual,
         G_blocks,
         friction_coefficients,
+        contacts,
     ):
-
         """
-        PCwF support mapping from Eq. (40)-(44).
+        PCwF support mapping, Eq. (40)-(44).
 
         Paper ordering:
-
             [normal, tangent1, tangent2]
 
-        Current world-force ordering:
-
+        Current force ordering:
             [Fx, Fy, Fz]
 
-        Therefore:
-
+        Flat ground:
             normal = Fz.
         """
 
@@ -1184,28 +763,23 @@ class ContactWrenchDistanceEvaluator:
             BASE_DOF
         )
 
-        best_support_value = (
-            -float(
-                "inf"
-            )
+        best_support_value = -float(
+            "inf"
         )
+        best_generator = None
 
-        best_primitive_wrench = (
-            None
-        )
-
-        for (
+        for contact_index, (
             G_i,
             mu_i,
-        ) in zip(
-            G_blocks,
-            friction_coefficients,
+            contact,
+        ) in enumerate(
+            zip(
+                G_blocks,
+                friction_coefficients,
+                contacts,
+            )
         ):
-
-            # -----------------------------------------------
-            # u_i = G_i^T r
-            # -----------------------------------------------
-
+            # u_i = G_i^T r.
             u_i = (
                 G_i.T
                 @
@@ -1213,23 +787,14 @@ class ContactWrenchDistanceEvaluator:
             )
 
             u_t1 = float(
-                u_i[
-                    0
-                ]
+                u_i[0]
             )
-
             u_t2 = float(
-                u_i[
-                    1
-                ]
+                u_i[1]
             )
-
             u_n = float(
-                u_i[
-                    2
-                ]
+                u_i[2]
             )
-
             mu_i = float(
                 mu_i
             )
@@ -1253,12 +818,8 @@ class ContactWrenchDistanceEvaluator:
                 h_t
             )
 
-            if (
-                h_t
-                !=
-                0.0
-            ):
-
+            if h_t != 0.0:
+                # Eq. (44), reordered to [Fx,Fy,Fz].
                 primitive_force = np.array(
                     [
                         (
@@ -1285,14 +846,8 @@ class ContactWrenchDistanceEvaluator:
                     ],
                     dtype=float,
                 )
-
             else:
-
-                # Paper:
-                #
-                # if h_Ti = 0,
-                # any point of U_i may be used.
-
+                # If h_Ti=0, paper allows any point of U_i.
                 primitive_force = np.array(
                     [
                         mu_i,
@@ -1313,28 +868,36 @@ class ContactWrenchDistanceEvaluator:
                 >
                 best_support_value
             ):
-
                 best_support_value = float(
                     support_value
                 )
 
-                best_primitive_wrench = (
-                    primitive_wrench.copy()
+                best_generator = PrimitiveGenerator(
+                    wrench=(
+                        primitive_wrench.copy()
+                    ),
+                    force=(
+                        primitive_force.copy()
+                    ),
+                    contact_index=int(
+                        contact_index
+                    ),
+                    side=(
+                        contact.side
+                    ),
+                    point_index=int(
+                        contact.point_index
+                    ),
                 )
 
-        if (
-            best_primitive_wrench
-            is
-            None
-        ):
-
+        if best_generator is None:
             raise RuntimeError(
                 "Support mapping failed."
             )
 
         return (
             best_support_value,
-            best_primitive_wrench,
+            best_generator,
         )
 
     # ========================================================
@@ -1347,15 +910,6 @@ class ContactWrenchDistanceEvaluator:
         required_wrench,
         generators,
     ):
-
-        """
-        c_A(b) = (A^T A)^(-1) A^T b
-
-        p_A(b) = A c_A(b)
-
-        r_A(b) = b - p_A(b)
-        """
-
         b = np.asarray(
             required_wrench,
             dtype=float,
@@ -1363,14 +917,7 @@ class ContactWrenchDistanceEvaluator:
             BASE_DOF
         )
 
-        if (
-            len(
-                generators
-            )
-            ==
-            0
-        ):
-
+        if len(generators) == 0:
             raise ValueError(
                 "Projection set must not be empty."
             )
@@ -1378,12 +925,12 @@ class ContactWrenchDistanceEvaluator:
         A = np.column_stack(
             [
                 np.asarray(
-                    a,
+                    generator,
                     dtype=float,
                 ).reshape(
                     BASE_DOF
                 )
-                for a
+                for generator
                 in generators
             ]
         )
@@ -1393,7 +940,6 @@ class ContactWrenchDistanceEvaluator:
             @
             A
         )
-
         rhs = (
             A.T
             @
@@ -1401,16 +947,11 @@ class ContactWrenchDistanceEvaluator:
         )
 
         try:
-
-            coefficients = (
-                np.linalg.solve(
-                    gram,
-                    rhs,
-                )
+            coefficients = np.linalg.solve(
+                gram,
+                rhs,
             )
-
         except np.linalg.LinAlgError as exc:
-
             raise RuntimeError(
                 "The current generator set is not "
                 "numerically linearly independent, "
@@ -1422,7 +963,6 @@ class ContactWrenchDistanceEvaluator:
             @
             coefficients
         )
-
         residual = (
             b
             -
@@ -1435,28 +975,19 @@ class ContactWrenchDistanceEvaluator:
             residual,
         )
 
-    # ========================================================
-    # COEFFICIENT SETS
-    # ========================================================
-
     @staticmethod
     def _coefficient_sets(
         coefficients,
     ):
-
         c = np.asarray(
             coefficients,
             dtype=float,
-        ).reshape(
-            -1
-        )
+        ).reshape(-1)
 
         negative = [
             i
             for i, value
-            in enumerate(
-                c
-            )
+            in enumerate(c)
             if (
                 value
                 <
@@ -1467,13 +998,9 @@ class ContactWrenchDistanceEvaluator:
         zero = [
             i
             for i, value
-            in enumerate(
-                c
-            )
+            in enumerate(c)
             if (
-                abs(
-                    value
-                )
+                abs(value)
                 <=
                 COEFFICIENT_TOLERANCE
             )
@@ -1482,9 +1009,7 @@ class ContactWrenchDistanceEvaluator:
         positive = [
             i
             for i, value
-            in enumerate(
-                c
-            )
+            in enumerate(c)
             if (
                 value
                 >
@@ -1509,12 +1034,10 @@ class ContactWrenchDistanceEvaluator:
         A_k_plus_1,
         new_generator,
     ):
-
         """
-        Paper subalgorithm Steps 1-5.
-
-        combinations() is used only for the
-        candidate-subset search prescribed by the paper.
+        Same paper subalgorithm as before. PrimitiveGenerator
+        only carries additional metadata; all geometric tests
+        use generator.wrench.
         """
 
         b = np.asarray(
@@ -1524,32 +1047,15 @@ class ContactWrenchDistanceEvaluator:
             BASE_DOF
         )
 
-        new_generator = np.asarray(
-            new_generator,
-            dtype=float,
-        ).reshape(
-            BASE_DOF
-        )
-
         working = []
 
-        for (
-            index,
-            generator,
-        ) in enumerate(
+        for index, generator in enumerate(
             A_k_plus_1
         ):
-
             working.append(
                 {
                     "generator":
-                        np.asarray(
-                            generator,
-                            dtype=float,
-                        ).reshape(
-                            BASE_DOF
-                        ).copy(),
-
+                        generator,
                     "is_new":
                         (
                             index
@@ -1564,39 +1070,31 @@ class ContactWrenchDistanceEvaluator:
             )
 
         if not working:
-
             raise ValueError(
                 "A_{k+1} must not be empty."
             )
 
         if not np.allclose(
-            working[
-                -1
-            ][
+            working[-1][
                 "generator"
-            ],
-            new_generator,
+            ].wrench,
+            new_generator.wrench,
             rtol=0.0,
             atol=(
                 COEFFICIENT_TOLERANCE
             ),
         ):
-
             raise RuntimeError(
                 "The last generator of "
                 "A_{k+1} must be s_A(r_k)."
             )
 
-        # ----------------------------------------------------
-        # Step 1 / Step 2
-        # ----------------------------------------------------
-
+        # Step 1 / Step 2.
         while True:
-
-            generators = [
+            wrenches = [
                 item[
                     "generator"
-                ]
+                ].wrench
                 for item
                 in working
             ]
@@ -1609,7 +1107,7 @@ class ContactWrenchDistanceEvaluator:
                 self._projection_quantities(
                     required_wrench=b,
                     generators=(
-                        generators
+                        wrenches
                     ),
                 )
             )
@@ -1624,26 +1122,11 @@ class ContactWrenchDistanceEvaluator:
                 )
             )
 
-            # ------------------------------------------------
-            # Step 1:
-            #
-            # A- is empty.
-            # ------------------------------------------------
-
-            if (
-                len(
-                    negative
-                )
-                ==
-                0
-            ):
-
+            if len(negative) == 0:
                 A_hat = [
-                    working[
-                        i
-                    ][
+                    working[i][
                         "generator"
-                    ].copy()
+                    ]
                     for i
                     in positive
                 ]
@@ -1653,34 +1136,16 @@ class ContactWrenchDistanceEvaluator:
                     A_hat,
                 )
 
-            # ------------------------------------------------
-            # Step 2:
-            #
-            # A- contains one point.
-            # ------------------------------------------------
-
-            if (
-                len(
-                    negative
-                )
-                ==
-                1
-            ):
-
+            if len(negative) == 1:
                 remove_index = (
-                    negative[
-                        0
-                    ]
+                    negative[0]
                 )
 
-                if (
-                    working[
-                        remove_index
-                    ][
-                        "is_new"
-                    ]
-                ):
-
+                if working[
+                    remove_index
+                ][
+                    "is_new"
+                ]:
                     raise RuntimeError(
                         "Numerical inconsistency in "
                         "the paper subalgorithm: "
@@ -1691,19 +1156,15 @@ class ContactWrenchDistanceEvaluator:
                 del working[
                     remove_index
                 ]
-
                 continue
 
             break
 
-        # ----------------------------------------------------
-        # Current A- after singleton removals
-        # ----------------------------------------------------
-
-        generators = [
+        # Current A- after singleton removals.
+        wrenches = [
             item[
                 "generator"
-            ]
+            ].wrench
             for item
             in working
         ]
@@ -1716,7 +1177,7 @@ class ContactWrenchDistanceEvaluator:
             self._projection_quantities(
                 required_wrench=b,
                 generators=(
-                    generators
+                    wrenches
                 ),
             )
         )
@@ -1741,79 +1202,48 @@ class ContactWrenchDistanceEvaluator:
             in enumerate(
                 working
             )
-            if (
-                item[
-                    "is_new"
-                ]
-            )
+            if item[
+                "is_new"
+            ]
         ]
 
-        if (
-            len(
-                new_indices
-            )
-            !=
-            1
-        ):
-
+        if len(new_indices) != 1:
             raise RuntimeError(
                 "Could not uniquely identify "
                 "s_A(r_k)."
             )
 
         new_index = (
-            new_indices[
-                0
-            ]
+            new_indices[0]
         )
-
         number_points = len(
             working
         )
 
-        # ----------------------------------------------------
-        # Steps 3-5
-        # ----------------------------------------------------
-
+        # Steps 3-5.
         for candidate_size in range(
             number_points - 1,
             0,
             -1,
         ):
-
             for subset_tuple in combinations(
                 range(
                     number_points
                 ),
                 candidate_size,
             ):
-
                 subset = set(
                     subset_tuple
                 )
 
-                # --------------------------------------------
-                # Theorem 5(1)
-                # --------------------------------------------
-
-                if (
-                    new_index
-                    not in
-                    subset
-                ):
-
+                # Theorem 5(1).
+                if new_index not in subset:
                     continue
 
-                # --------------------------------------------
-                # Theorem 5(2)
-                # --------------------------------------------
-
-                if (
-                    negative_set.issubset(
-                        subset
-                    )
+                # Theorem 5(2).
+                if negative_set.issubset(
+                    subset
                 ):
-
                     continue
 
                 candidate_indices = sorted(
@@ -1821,13 +1251,17 @@ class ContactWrenchDistanceEvaluator:
                 )
 
                 candidate_generators = [
-                    working[
-                        i
-                    ][
+                    working[i][
                         "generator"
                     ]
                     for i
                     in candidate_indices
+                ]
+
+                candidate_wrenches = [
+                    generator.wrench
+                    for generator
+                    in candidate_generators
                 ]
 
                 (
@@ -1838,50 +1272,32 @@ class ContactWrenchDistanceEvaluator:
                     self._projection_quantities(
                         required_wrench=b,
                         generators=(
-                            candidate_generators
+                            candidate_wrenches
                         ),
                     )
                 )
 
-                # --------------------------------------------
-                # Theorem 4 condition 1
-                # --------------------------------------------
-
+                # Theorem 4 condition 1.
                 if not np.all(
                     candidate_coefficients
                     >
                     COEFFICIENT_TOLERANCE
                 ):
-
                     continue
 
-                # --------------------------------------------
-                # Theorem 4 condition 2
-                # --------------------------------------------
+                # Theorem 4 condition 2.
+                condition_2_satisfied = True
 
-                condition_2_satisfied = (
-                    True
-                )
-
-                for (
-                    index,
-                    item,
-                ) in enumerate(
+                for index, item in enumerate(
                     working
                 ):
-
-                    if (
-                        index
-                        in
-                        subset
-                    ):
-
+                    if index in subset:
                         continue
 
                     value = float(
                         item[
                             "generator"
-                        ]
+                        ].wrench
                         @
                         candidate_residual
                     )
@@ -1891,26 +1307,15 @@ class ContactWrenchDistanceEvaluator:
                         >
                         SUPPORT_PLANE_TOLERANCE
                     ):
-
-                        condition_2_satisfied = (
-                            False
-                        )
-
+                        condition_2_satisfied = False
                         break
 
                 if not condition_2_satisfied:
-
                     continue
-
-                A_hat = [
-                    a.copy()
-                    for a
-                    in candidate_generators
-                ]
 
                 return (
                     candidate_projection,
-                    A_hat,
+                    candidate_generators,
                 )
 
         raise RuntimeError(
@@ -1930,37 +1335,8 @@ class ContactWrenchDistanceEvaluator:
         required_wrench,
         G_blocks,
         friction_coefficients,
+        contacts,
     ):
-
-        """
-        Paper Steps 1-5:
-
-        Step 1:
-            v0 = 0
-            r0 = b
-            A0 = empty
-            Ahat0 = empty
-            k = 0
-
-        Step 2:
-            if h_W(r_k) < epsilon:
-                stop
-
-        Step 3:
-            A_{k+1}
-            =
-            Ahat_k union {s_W(r_k)}
-
-        Step 4:
-            obtain v_{k+1}
-            and Ahat_{k+1}
-
-        Step 5:
-            r_{k+1}
-            =
-            b - v_{k+1}
-        """
-
         b = np.asarray(
             required_wrench,
             dtype=float,
@@ -1969,60 +1345,37 @@ class ContactWrenchDistanceEvaluator:
         )
 
         if not np.all(
-            np.isfinite(
-                b
-            )
+            np.isfinite(b)
         ):
-
             raise RuntimeError(
-                "Required wrench contains "
-                "NaN/Inf."
+                "Required wrench contains NaN/Inf."
             )
 
-        if (
-            len(
-                G_blocks
-            )
-            ==
-            0
-        ):
-
+        if len(G_blocks) == 0:
             raise ValueError(
-                "Distance algorithm requires "
-                "at least one active contact point."
+                "Distance algorithm requires at least "
+                "one active contact point."
             )
 
-        # ----------------------------------------------------
-        # Step 1
-        # ----------------------------------------------------
-
+        # Step 1.
         v_k = np.zeros(
             BASE_DOF,
             dtype=float,
         )
-
         r_k = (
             b.copy()
         )
-
         A_hat_k = []
-
         k = 0
-
         final_support_value = float(
             "nan"
         )
-
-        # ----------------------------------------------------
-        # Main loop
-        # ----------------------------------------------------
 
         while (
             k
             <
             MAX_DISTANCE_ITERATIONS
         ):
-
             (
                 support_value,
                 support_generator,
@@ -2035,6 +1388,9 @@ class ContactWrenchDistanceEvaluator:
                     friction_coefficients=(
                         friction_coefficients
                     ),
+                    contacts=(
+                        contacts
+                    ),
                 )
             )
 
@@ -2042,16 +1398,12 @@ class ContactWrenchDistanceEvaluator:
                 support_value
             )
 
-            # ------------------------------------------------
-            # Step 2
-            # ------------------------------------------------
-
+            # Step 2.
             if (
                 support_value
                 <
                 SUPPORT_TOLERANCE
             ):
-
                 distance = float(
                     np.linalg.norm(
                         r_k
@@ -2065,29 +1417,18 @@ class ContactWrenchDistanceEvaluator:
                     True,
                     k,
                     final_support_value,
-                    len(
-                        A_hat_k
-                    ),
+                    A_hat_k,
                 )
 
-            # ------------------------------------------------
-            # Step 3
-            # ------------------------------------------------
-
-            A_k_plus_1 = [
-                a.copy()
-                for a
-                in A_hat_k
-            ]
-
+            # Step 3.
+            A_k_plus_1 = list(
+                A_hat_k
+            )
             A_k_plus_1.append(
-                support_generator.copy()
+                support_generator
             )
 
-            # ------------------------------------------------
-            # Step 4
-            # ------------------------------------------------
-
+            # Step 4.
             (
                 v_k_plus_1,
                 A_hat_k_plus_1,
@@ -2103,10 +1444,7 @@ class ContactWrenchDistanceEvaluator:
                 )
             )
 
-            # ------------------------------------------------
-            # Step 5
-            # ------------------------------------------------
-
+            # Step 5.
             r_k_plus_1 = (
                 b
                 -
@@ -2116,21 +1454,15 @@ class ContactWrenchDistanceEvaluator:
             v_k = (
                 v_k_plus_1
             )
-
             r_k = (
                 r_k_plus_1
             )
-
             A_hat_k = (
                 A_hat_k_plus_1
             )
-
             k += 1
 
-        # ----------------------------------------------------
         # Software guard only.
-        # ----------------------------------------------------
-
         distance = float(
             np.linalg.norm(
                 r_k
@@ -2144,9 +1476,247 @@ class ContactWrenchDistanceEvaluator:
             False,
             k,
             final_support_value,
-            len(
-                A_hat_k
+            A_hat_k,
+        )
+
+    # ========================================================
+    # FORCE DISTRIBUTION, EQ. (50)-(51)
+    # ========================================================
+
+    def _distribute_contact_forces(
+        self,
+        *,
+        required_wrench,
+        closest_wrench,
+        active_generators,
+        contacts,
+        G_blocks,
+    ):
+        """
+        Recover contact forces from the final active primitive set.
+
+            closest_wrench
+                = sum_j c_j w_j
+                = sum_j c_j G_{I(j)} s_j
+
+            f_i
+                = sum_{j : I(j)=i} c_j s_j
+
+        For a feasible sample:
+            closest_wrench ~= required_wrench.
+        """
+
+        left_contact_forces = np.zeros(
+            (
+                NUMBER_CONTACT_POINTS_PER_FOOT,
+                3,
             ),
+            dtype=float,
+        )
+
+        right_contact_forces = np.zeros(
+            (
+                NUMBER_CONTACT_POINTS_PER_FOOT,
+                3,
+            ),
+            dtype=float,
+        )
+
+        reconstructed_contact_wrench = np.zeros(
+            BASE_DOF,
+            dtype=float,
+        )
+
+        if len(active_generators) == 0:
+            left_total_force = np.zeros(
+                3,
+                dtype=float,
+            )
+            right_total_force = np.zeros(
+                3,
+                dtype=float,
+            )
+
+            force_reconstruction_error = float(
+                np.linalg.norm(
+                    closest_wrench
+                )
+            )
+            force_balance_error = float(
+                np.linalg.norm(
+                    required_wrench
+                )
+            )
+
+            return (
+                left_contact_forces,
+                right_contact_forces,
+                left_total_force,
+                right_total_force,
+                reconstructed_contact_wrench,
+                force_reconstruction_error,
+                force_balance_error,
+            )
+
+        active_wrenches = [
+            generator.wrench
+            for generator
+            in active_generators
+        ]
+
+        (
+            coefficients,
+            projection,
+            _,
+        ) = (
+            self._projection_quantities(
+                required_wrench=(
+                    required_wrench
+                ),
+                generators=(
+                    active_wrenches
+                ),
+            )
+        )
+
+        if np.any(
+            coefficients
+            <
+            -COEFFICIENT_TOLERANCE
+        ):
+            raise RuntimeError(
+                "Negative coefficient encountered while "
+                "recovering contact forces from A_hat."
+            )
+
+        for coefficient, generator in zip(
+            coefficients,
+            active_generators,
+        ):
+            force_contribution = (
+                float(
+                    coefficient
+                )
+                *
+                generator.force
+            )
+
+            if generator.side == "left":
+                left_contact_forces[
+                    generator.point_index
+                ] += (
+                    force_contribution
+                )
+            elif generator.side == "right":
+                right_contact_forces[
+                    generator.point_index
+                ] += (
+                    force_contribution
+                )
+            else:
+                raise RuntimeError(
+                    "Invalid generator foot side: "
+                    f"{generator.side}"
+                )
+
+        # Reconstruct the generalized contact wrench after
+        # grouping the primitive contributions by contact point.
+        for contact_index, contact in enumerate(
+            contacts
+        ):
+            if contact.side == "left":
+                contact_force = (
+                    left_contact_forces[
+                        contact.point_index
+                    ]
+                )
+            elif contact.side == "right":
+                contact_force = (
+                    right_contact_forces[
+                        contact.point_index
+                    ]
+                )
+            else:
+                raise RuntimeError(
+                    "Invalid contact foot side: "
+                    f"{contact.side}"
+                )
+
+            reconstructed_contact_wrench += (
+                G_blocks[
+                    contact_index
+                ]
+                @
+                contact_force
+            )
+
+        left_total_force = np.sum(
+            left_contact_forces,
+            axis=0,
+        )
+        right_total_force = np.sum(
+            right_contact_forces,
+            axis=0,
+        )
+
+        force_reconstruction_error = float(
+            np.linalg.norm(
+                np.asarray(
+                    closest_wrench,
+                    dtype=float,
+                ).reshape(
+                    BASE_DOF
+                )
+                -
+                reconstructed_contact_wrench
+            )
+        )
+
+        force_balance_error = float(
+            np.linalg.norm(
+                np.asarray(
+                    required_wrench,
+                    dtype=float,
+                ).reshape(
+                    BASE_DOF
+                )
+                -
+                reconstructed_contact_wrench
+            )
+        )
+
+        projection_mismatch = float(
+            np.linalg.norm(
+                projection
+                -
+                np.asarray(
+                    closest_wrench,
+                    dtype=float,
+                ).reshape(
+                    BASE_DOF
+                )
+            )
+        )
+
+        if (
+            projection_mismatch
+            >
+            1.0e-7
+        ):
+            raise RuntimeError(
+                "Force-distribution projection is inconsistent "
+                "with the closest wrench: "
+                f"{projection_mismatch:.6e}"
+            )
+
+        return (
+            left_contact_forces,
+            right_contact_forces,
+            left_total_force,
+            right_total_force,
+            reconstructed_contact_wrench,
+            force_reconstruction_error,
+            force_balance_error,
         )
 
     # ========================================================
@@ -2158,19 +1728,6 @@ class ContactWrenchDistanceEvaluator:
         *,
         required_wrench,
     ):
-
-        """
-        If neither foot is active:
-
-            V = {0}
-
-        therefore:
-
-            v* = 0
-
-            d = ||b||
-        """
-
         b = np.asarray(
             required_wrench,
             dtype=float,
@@ -2182,11 +1739,9 @@ class ContactWrenchDistanceEvaluator:
             BASE_DOF,
             dtype=float,
         )
-
         residual_wrench = (
             b.copy()
         )
-
         distance = float(
             np.linalg.norm(
                 residual_wrench
@@ -2199,10 +1754,8 @@ class ContactWrenchDistanceEvaluator:
             residual_wrench,
             True,
             0,
-            float(
-                "nan"
-            ),
-            0,
+            float("nan"),
+            [],
         )
 
     # ========================================================
@@ -2216,7 +1769,6 @@ class ContactWrenchDistanceEvaluator:
         qacc,
         scratch_data,
     ) -> WrenchDistanceResult:
-
         qacc = np.asarray(
             qacc,
             dtype=float,
@@ -2225,83 +1777,44 @@ class ContactWrenchDistanceEvaluator:
         )
 
         if not np.all(
-            np.isfinite(
-                qacc
-            )
+            np.isfinite(qacc)
         ):
-
             raise RuntimeError(
                 "qacc contains NaN/Inf."
             )
 
-        # ----------------------------------------------------
-        # Restore trajectory state
-        # ----------------------------------------------------
-
         scratch_data.qpos[:] = (
             sample.qpos
         )
-
         scratch_data.qvel[:] = (
             sample.qvel
         )
-
         scratch_data.time = float(
             sample.time
         )
-
-        scratch_data.qfrc_applied[:] = (
-            0.0
-        )
-
-        scratch_data.xfrc_applied[:] = (
-            0.0
-        )
-
-        # ----------------------------------------------------
-        # Recompute MuJoCo state, dynamics and contacts
-        # ----------------------------------------------------
+        scratch_data.qfrc_applied[:] = 0.0
+        scratch_data.xfrc_applied[:] = 0.0
 
         mujoco.mj_forward(
             self.mj_model,
             scratch_data,
         )
 
-        # ----------------------------------------------------
-        # Required generalized force
-        #
         # M qdd + qfrc_bias
-        # =
-        # qfrc_passive
-        # + S^T tau
-        # + J_c^T f_c
-        #
-        # required
-        # =
-        # M qdd
-        # + qfrc_bias
-        # - qfrc_passive
-        # ----------------------------------------------------
-
-        mass_matrix = (
-            self._full_mass_matrix(
-                mj_data=(
-                    scratch_data
-                )
-            )
+        # = qfrc_passive + S^T tau + J_c^T f_c
+        mass_matrix = self._full_mass_matrix(
+            mj_data=scratch_data
         )
 
         required_generalized_force = (
             mass_matrix
             @
             qacc
-
             +
             np.asarray(
                 scratch_data.qfrc_bias,
                 dtype=float,
             )
-
             -
             np.asarray(
                 scratch_data.qfrc_passive,
@@ -2315,20 +1828,12 @@ class ContactWrenchDistanceEvaluator:
             ].copy()
         )
 
-        # ----------------------------------------------------
-        # ACTUAL SUPPORT MODE FROM MUJOCO
-        # ----------------------------------------------------
-
         (
             left_collision_detected,
             right_collision_detected,
             contact_mode,
-        ) = (
-            self._detect_contact_mode(
-                mj_data=(
-                    scratch_data
-                )
-            )
+        ) = self._detect_contact_mode(
+            mj_data=scratch_data
         )
 
         collision_detected = bool(
@@ -2337,62 +1842,34 @@ class ContactWrenchDistanceEvaluator:
             right_collision_detected
         )
 
-        # ----------------------------------------------------
-        # BUILD ACTIVE FIXED CONTACT SET
-        #
-        # Left SS  -> 4 points
-        # Right SS -> 4 points
-        # DS       -> 8 points
-        # ----------------------------------------------------
-
-        contacts = (
-            self._active_fixed_contacts(
-                mj_data=(
-                    scratch_data
-                ),
-                left_contact=(
-                    left_collision_detected
-                ),
-                right_contact=(
-                    right_collision_detected
-                ),
-            )
+        contacts = self._active_fixed_contacts(
+            mj_data=scratch_data,
+            left_contact=(
+                left_collision_detected
+            ),
+            right_contact=(
+                right_collision_detected
+            ),
         )
 
         number_contacts = len(
             contacts
         )
 
-        if (
-            number_contacts
-            not in
-            (
-                0,
-                NUMBER_CONTACT_POINTS_PER_FOOT,
-                2
-                *
-                NUMBER_CONTACT_POINTS_PER_FOOT,
-            )
+        if number_contacts not in (
+            0,
+            NUMBER_CONTACT_POINTS_PER_FOOT,
+            2 * NUMBER_CONTACT_POINTS_PER_FOOT,
         ):
-
             raise RuntimeError(
-                "Unexpected number of "
-                "fixed contact points: "
+                "Unexpected number of fixed contact points: "
                 f"{number_contacts}"
             )
 
-        # ----------------------------------------------------
-        # NO SUPPORT
-        # ----------------------------------------------------
+        G_blocks = []
 
-        if (
-            number_contacts
-            ==
-            0
-        ):
-
+        if number_contacts == 0:
             dynamics_rank = 0
-
             dynamics_condition_number = float(
                 "inf"
             )
@@ -2404,33 +1881,20 @@ class ContactWrenchDistanceEvaluator:
                 converged,
                 iterations,
                 final_support_value,
-                active_generator_count,
-            ) = (
-                self._distance_without_support(
-                    required_wrench=(
-                        required_wrench
-                    )
+                active_generators,
+            ) = self._distance_without_support(
+                required_wrench=(
+                    required_wrench
                 )
             )
 
-        # ----------------------------------------------------
-        # SS OR DS
-        # ----------------------------------------------------
-
         else:
-
             (
                 G_blocks,
                 friction_coefficients,
-            ) = (
-                self._build_contact_wrench_maps(
-                    mj_data=(
-                        scratch_data
-                    ),
-                    contacts=(
-                        contacts
-                    ),
-                )
+            ) = self._build_contact_wrench_maps(
+                mj_data=scratch_data,
+                contacts=contacts,
             )
 
             G_total = np.hstack(
@@ -2442,7 +1906,6 @@ class ContactWrenchDistanceEvaluator:
                     G_total
                 )
             )
-
             dynamics_condition_number = (
                 self._matrix_condition_number(
                     G_total
@@ -2456,24 +1919,25 @@ class ContactWrenchDistanceEvaluator:
                 converged,
                 iterations,
                 final_support_value,
-                active_generator_count,
-            ) = (
-                self._distance_to_feasible_wrench_cone(
-                    required_wrench=(
-                        required_wrench
-                    ),
-                    G_blocks=(
-                        G_blocks
-                    ),
-                    friction_coefficients=(
-                        friction_coefficients
-                    ),
-                )
+                active_generators,
+            ) = self._distance_to_feasible_wrench_cone(
+                required_wrench=(
+                    required_wrench
+                ),
+                G_blocks=(
+                    G_blocks
+                ),
+                friction_coefficients=(
+                    friction_coefficients
+                ),
+                contacts=(
+                    contacts
+                ),
             )
 
-        # ----------------------------------------------------
-        # FEASIBILITY DECISION
-        # ----------------------------------------------------
+        active_generator_count = len(
+            active_generators
+        )
 
         feasible = bool(
             converged
@@ -2483,90 +1947,157 @@ class ContactWrenchDistanceEvaluator:
             DISTANCE_TOLERANCE
         )
 
-        return (
-            WrenchDistanceResult(
-                time=float(
-                    sample.time
+        if number_contacts == 0:
+            left_contact_forces = np.zeros(
+                (
+                    NUMBER_CONTACT_POINTS_PER_FOOT,
+                    3,
                 ),
-
-                stance_side=(
-                    sample.stance_side
+                dtype=float,
+            )
+            right_contact_forces = np.zeros(
+                (
+                    NUMBER_CONTACT_POINTS_PER_FOOT,
+                    3,
                 ),
+                dtype=float,
+            )
+            left_total_force = np.zeros(
+                3,
+                dtype=float,
+            )
+            right_total_force = np.zeros(
+                3,
+                dtype=float,
+            )
+            reconstructed_contact_wrench = np.zeros(
+                BASE_DOF,
+                dtype=float,
+            )
+            force_reconstruction_error = float(
+                np.linalg.norm(
+                    closest_wrench
+                )
+            )
+            force_balance_error = float(
+                np.linalg.norm(
+                    required_wrench
+                )
+            )
 
-                contact_mode=(
-                    contact_mode
-                ),
-
-                left_collision_detected=bool(
-                    left_collision_detected
-                ),
-
-                right_collision_detected=bool(
-                    right_collision_detected
-                ),
-
-                collision_detected=bool(
-                    collision_detected
-                ),
-
-                number_contacts=int(
-                    number_contacts
-                ),
-
-                dynamics_rank=int(
-                    dynamics_rank
-                ),
-
-                dynamics_condition_number=float(
-                    dynamics_condition_number
-                ),
-
-                qacc=(
-                    qacc.copy()
-                ),
-
+        else:
+            (
+                left_contact_forces,
+                right_contact_forces,
+                left_total_force,
+                right_total_force,
+                reconstructed_contact_wrench,
+                force_reconstruction_error,
+                force_balance_error,
+            ) = self._distribute_contact_forces(
                 required_wrench=(
-                    required_wrench.copy()
+                    required_wrench
                 ),
-
                 closest_wrench=(
-                    np.asarray(
-                        closest_wrench,
-                        dtype=float,
-                    ).copy()
+                    closest_wrench
                 ),
-
-                residual_wrench=(
-                    np.asarray(
-                        residual_wrench,
-                        dtype=float,
-                    ).copy()
+                active_generators=(
+                    active_generators
                 ),
-
-                distance=float(
-                    distance
+                contacts=(
+                    contacts
                 ),
-
-                feasible=bool(
-                    feasible
-                ),
-
-                converged=bool(
-                    converged
-                ),
-
-                iterations=int(
-                    iterations
-                ),
-
-                final_support_value=float(
-                    final_support_value
-                ),
-
-                active_generator_count=int(
-                    active_generator_count
+                G_blocks=(
+                    G_blocks
                 ),
             )
+
+        return WrenchDistanceResult(
+            time=float(
+                sample.time
+            ),
+            stance_side=(
+                sample.stance_side
+            ),
+            contact_mode=(
+                contact_mode
+            ),
+            left_collision_detected=bool(
+                left_collision_detected
+            ),
+            right_collision_detected=bool(
+                right_collision_detected
+            ),
+            collision_detected=bool(
+                collision_detected
+            ),
+            number_contacts=int(
+                number_contacts
+            ),
+            dynamics_rank=int(
+                dynamics_rank
+            ),
+            dynamics_condition_number=float(
+                dynamics_condition_number
+            ),
+            qacc=(
+                qacc.copy()
+            ),
+            required_wrench=(
+                required_wrench.copy()
+            ),
+            closest_wrench=np.asarray(
+                closest_wrench,
+                dtype=float,
+            ).copy(),
+            residual_wrench=np.asarray(
+                residual_wrench,
+                dtype=float,
+            ).copy(),
+            distance=float(
+                distance
+            ),
+            feasible=bool(
+                feasible
+            ),
+            converged=bool(
+                converged
+            ),
+            iterations=int(
+                iterations
+            ),
+            final_support_value=float(
+                final_support_value
+            ),
+            active_generator_count=int(
+                active_generator_count
+            ),
+            left_contact_forces=np.asarray(
+                left_contact_forces,
+                dtype=float,
+            ).copy(),
+            right_contact_forces=np.asarray(
+                right_contact_forces,
+                dtype=float,
+            ).copy(),
+            left_total_force=np.asarray(
+                left_total_force,
+                dtype=float,
+            ).copy(),
+            right_total_force=np.asarray(
+                right_total_force,
+                dtype=float,
+            ).copy(),
+            reconstructed_contact_wrench=np.asarray(
+                reconstructed_contact_wrench,
+                dtype=float,
+            ).copy(),
+            force_reconstruction_error=float(
+                force_reconstruction_error
+            ),
+            force_balance_error=float(
+                force_balance_error
+            ),
         )
 
     # ========================================================
@@ -2575,23 +2106,14 @@ class ContactWrenchDistanceEvaluator:
 
     def solve_all(
         self,
-    ) -> list[
-        WrenchDistanceResult
-    ]:
-
+    ) -> list[WrenchDistanceResult]:
         number_samples = len(
             self.samples
         )
 
-        if (
-            number_samples
-            <
-            3
-        ):
-
+        if number_samples < 3:
             raise RuntimeError(
-                "At least three trajectory samples "
-                "are required."
+                "At least three trajectory samples are required."
             )
 
         time = np.asarray(
@@ -2604,21 +2126,13 @@ class ContactWrenchDistanceEvaluator:
         )
 
         if not np.all(
-            np.diff(
-                time
-            )
+            np.diff(time)
             >
             0.0
         ):
-
             raise RuntimeError(
-                "Sample time must be "
-                "strictly increasing."
+                "Sample time must be strictly increasing."
             )
-
-        # ----------------------------------------------------
-        # Reconstruct qdd from qdot
-        # ----------------------------------------------------
 
         qvel = np.vstack(
             [
@@ -2635,36 +2149,24 @@ class ContactWrenchDistanceEvaluator:
             edge_order=2,
         )
 
-        # ----------------------------------------------------
-        # Offline evaluation
-        # ----------------------------------------------------
-
         scratch_data = mujoco.MjData(
             self.mj_model
         )
 
         results = []
 
-        for (
-            sample_index,
-            sample,
-        ) in enumerate(
+        for sample_index, sample in enumerate(
             self.samples
         ):
-
             results.append(
                 self._solve_one(
-                    sample=(
-                        sample
-                    ),
+                    sample=sample,
                     qacc=(
                         qacc[
                             sample_index
                         ]
                     ),
-                    scratch_data=(
-                        scratch_data
-                    ),
+                    scratch_data=scratch_data,
                 )
             )
 
@@ -2678,17 +2180,14 @@ class ContactWrenchDistanceEvaluator:
     def print_summary(
         results,
     ) -> None:
-
         results = list(
             results
         )
 
         if not results:
-
             print(
                 "No wrench-distance results."
             )
-
             return
 
         distances = np.asarray(
@@ -2699,7 +2198,6 @@ class ContactWrenchDistanceEvaluator:
             ],
             dtype=float,
         )
-
         feasible = np.asarray(
             [
                 result.feasible
@@ -2708,7 +2206,6 @@ class ContactWrenchDistanceEvaluator:
             ],
             dtype=bool,
         )
-
         converged = np.asarray(
             [
                 result.converged
@@ -2717,7 +2214,6 @@ class ContactWrenchDistanceEvaluator:
             ],
             dtype=bool,
         )
-
         collision = np.asarray(
             [
                 result.collision_detected
@@ -2726,7 +2222,6 @@ class ContactWrenchDistanceEvaluator:
             ],
             dtype=bool,
         )
-
         iterations = np.asarray(
             [
                 result.iterations
@@ -2735,7 +2230,6 @@ class ContactWrenchDistanceEvaluator:
             ],
             dtype=int,
         )
-
         generator_count = np.asarray(
             [
                 result.active_generator_count
@@ -2744,7 +2238,6 @@ class ContactWrenchDistanceEvaluator:
             ],
             dtype=int,
         )
-
         ranks = np.asarray(
             [
                 result.dynamics_rank
@@ -2753,6 +2246,22 @@ class ContactWrenchDistanceEvaluator:
             ],
             dtype=int,
         )
+        force_reconstruction_error = np.asarray(
+            [
+                result.force_reconstruction_error
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+        force_balance_error = np.asarray(
+            [
+                result.force_balance_error
+                for result
+                in results
+            ],
+            dtype=float,
+        )
 
         contact_modes = [
             result.contact_mode
@@ -2760,160 +2269,101 @@ class ContactWrenchDistanceEvaluator:
             in results
         ]
 
-        left_single_support_count = (
-            contact_modes.count(
-                "left_single_support"
-            )
+        left_single_support_count = contact_modes.count(
+            "left_single_support"
         )
-
-        right_single_support_count = (
-            contact_modes.count(
-                "right_single_support"
-            )
+        right_single_support_count = contact_modes.count(
+            "right_single_support"
         )
-
-        double_support_count = (
-            contact_modes.count(
-                "double_support"
-            )
+        double_support_count = contact_modes.count(
+            "double_support"
         )
-
-        no_support_count = (
-            contact_modes.count(
-                "no_support"
-            )
+        no_support_count = contact_modes.count(
+            "no_support"
         )
-
-        # ----------------------------------------------------
-        # Compare planner stance with actual contact
-        # ----------------------------------------------------
 
         gait_stance_contact_count = 0
 
         for result in results:
-
             if (
-                result.stance_side
-                ==
-                "left"
+                result.stance_side == "left"
                 and
                 result.left_collision_detected
             ):
-
                 gait_stance_contact_count += 1
-
             elif (
-                result.stance_side
-                ==
-                "right"
+                result.stance_side == "right"
                 and
                 result.right_collision_detected
             ):
-
                 gait_stance_contact_count += 1
 
-        # ----------------------------------------------------
-        # Print
-        # ----------------------------------------------------
-
         print()
-
-        print(
-            "================================================"
-        )
-
-        print(
-            "CONTACT WRENCH DISTANCE SUMMARY"
-        )
-
-        print(
-            "================================================"
-        )
-
-        print(
-            "Samples                : "
-            f"{len(results)}"
-        )
-
+        print("================================================")
+        print("CONTACT WRENCH DISTANCE SUMMARY")
+        print("================================================")
+        print(f"Samples                : {len(results)}")
         print(
             "Converged              : "
-            f"{np.count_nonzero(converged)}"
-            f"/"
-            f"{len(results)}"
+            f"{np.count_nonzero(converged)}/{len(results)}"
         )
-
         print(
             "Distance-zero feasible : "
-            f"{np.count_nonzero(feasible)}"
-            f"/"
-            f"{len(results)}"
+            f"{np.count_nonzero(feasible)}/{len(results)}"
         )
-
         print(
             "Any foot collision     : "
-            f"{np.count_nonzero(collision)}"
-            f"/"
-            f"{len(results)}"
+            f"{np.count_nonzero(collision)}/{len(results)}"
         )
-
         print(
             "Left single support    : "
             f"{left_single_support_count}"
         )
-
         print(
             "Right single support   : "
             f"{right_single_support_count}"
         )
-
         print(
             "Double support         : "
             f"{double_support_count}"
         )
-
         print(
             "No support             : "
             f"{no_support_count}"
         )
-
         print(
             "Gait stance in contact : "
-            f"{gait_stance_contact_count}"
-            f"/"
-            f"{len(results)}"
+            f"{gait_stance_contact_count}/{len(results)}"
         )
-
         print(
             "Min / max rank(G)      : "
-            f"{np.min(ranks)}"
-            f" / "
-            f"{np.max(ranks)}"
+            f"{np.min(ranks)} / {np.max(ranks)}"
         )
-
         print(
             "Mean distance          : "
             f"{np.mean(distances):.6e}"
         )
-
         print(
             "Max distance           : "
             f"{np.max(distances):.6e}"
         )
-
         print(
             "Max iterations         : "
             f"{np.max(iterations)}"
         )
-
         print(
             "Max active generators  : "
             f"{np.max(generator_count)}"
         )
-
         print(
-            "================================================"
+            "Max force recon error  : "
+            f"{np.max(force_reconstruction_error):.6e}"
         )
-
+        print(
+            "Max force balance error: "
+            f"{np.max(force_balance_error):.6e}"
+        )
+        print("================================================")
         print()
 
 
@@ -2926,7 +2376,6 @@ def plot_wrench_distance_results(
     *,
     show=False,
 ):
-
     import matplotlib.pyplot as plt
 
     results = list(
@@ -2934,7 +2383,6 @@ def plot_wrench_distance_results(
     )
 
     if not results:
-
         return None
 
     time = np.asarray(
@@ -2945,7 +2393,6 @@ def plot_wrench_distance_results(
         ],
         dtype=float,
     )
-
     distance = np.asarray(
         [
             result.distance
@@ -2954,7 +2401,6 @@ def plot_wrench_distance_results(
         ],
         dtype=float,
     )
-
     converged = np.asarray(
         [
             result.converged
@@ -2963,7 +2409,6 @@ def plot_wrench_distance_results(
         ],
         dtype=bool,
     )
-
     contact_mode = np.asarray(
         [
             result.contact_mode
@@ -2973,13 +2418,7 @@ def plot_wrench_distance_results(
         dtype=object,
     )
 
-    # --------------------------------------------------------
-    # Main distance curve
-    # --------------------------------------------------------
-
-    figure, axis = (
-        plt.subplots()
-    )
+    figure, axis = plt.subplots()
 
     axis.plot(
         time,
@@ -2995,20 +2434,13 @@ def plot_wrench_distance_results(
         label="Distance tolerance",
     )
 
-    # --------------------------------------------------------
-    # Non-converged samples
-    # --------------------------------------------------------
-
-    not_converged = (
-        np.logical_not(
-            converged
-        )
+    not_converged = np.logical_not(
+        converged
     )
 
     if np.any(
         not_converged
     ):
-
         axis.plot(
             time[
                 not_converged
@@ -3021,10 +2453,6 @@ def plot_wrench_distance_results(
             label="Not converged",
         )
 
-    # --------------------------------------------------------
-    # Mark DS samples
-    # --------------------------------------------------------
-
     double_support_mask = (
         contact_mode
         ==
@@ -3034,7 +2462,6 @@ def plot_wrench_distance_results(
     if np.any(
         double_support_mask
     ):
-
         axis.plot(
             time[
                 double_support_mask
@@ -3047,32 +2474,23 @@ def plot_wrench_distance_results(
             label="Double support",
         )
 
-    # --------------------------------------------------------
-    # Figure settings
-    # --------------------------------------------------------
-
     axis.set_xlabel(
         "Time [s]"
     )
-
     axis.set_ylabel(
         "Euclidean wrench distance"
     )
-
     axis.set_title(
         "Distance to feasible contact-wrench cone"
     )
-
     axis.grid(
         True
     )
-
     axis.legend()
 
     figure.tight_layout()
 
     if show:
-
         plt.show()
 
     return (

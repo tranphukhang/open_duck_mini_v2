@@ -692,6 +692,26 @@ class ExperimentCSVDataLogger:
                 )
             )
 
+            saved_files[
+                "left_contact_force"
+            ] = (
+                self._save_left_contact_force(
+                    wrench_distance_results=(
+                        wrench_distance_results
+                    )
+                )
+            )
+
+            saved_files[
+                "right_contact_force"
+            ] = (
+                self._save_right_contact_force(
+                    wrench_distance_results=(
+                        wrench_distance_results
+                    )
+                )
+            )
+
         # ----------------------------------------------------
         # Desired / actual velocity
         # ----------------------------------------------------
@@ -953,6 +973,156 @@ class ExperimentCSVDataLogger:
                     residual[:, 5],
             },
         )
+
+    # ========================================================
+    # LEFT FOOT TOTAL CONTACT FORCE
+    # ========================================================
+
+    def _save_left_contact_force(
+        self,
+        *,
+        wrench_distance_results,
+    ) -> Path:
+
+        if wrench_distance_results is None:
+
+            raise RuntimeError(
+                "Wrench-distance results are unavailable."
+            )
+
+        results = list(
+            wrench_distance_results
+        )
+
+        if len(
+            results
+        ) == 0:
+
+            raise RuntimeError(
+                "Wrench-distance result list is empty."
+            )
+
+        time = np.asarray(
+            [
+                result.time
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+
+        force = np.vstack(
+            [
+                result.left_total_force
+                for result
+                in results
+            ]
+        )
+
+        if (
+            force.ndim != 2
+            or
+            force.shape[1] != 3
+        ):
+
+            raise RuntimeError(
+                "left_total_force must have shape (N, 3)."
+            )
+
+        return self._write_columns(
+            filename=(
+                "left_contact_force.csv"
+            ),
+            columns={
+                "time_s":
+                    time,
+
+                "force_x_N":
+                    force[:, 0],
+
+                "force_y_N":
+                    force[:, 1],
+
+                "force_z_N":
+                    force[:, 2],
+            },
+        )
+
+
+    # ========================================================
+    # RIGHT FOOT TOTAL CONTACT FORCE
+    # ========================================================
+
+    def _save_right_contact_force(
+        self,
+        *,
+        wrench_distance_results,
+    ) -> Path:
+
+        if wrench_distance_results is None:
+
+            raise RuntimeError(
+                "Wrench-distance results are unavailable."
+            )
+
+        results = list(
+            wrench_distance_results
+        )
+
+        if len(
+            results
+        ) == 0:
+
+            raise RuntimeError(
+                "Wrench-distance result list is empty."
+            )
+
+        time = np.asarray(
+            [
+                result.time
+                for result
+                in results
+            ],
+            dtype=float,
+        )
+
+        force = np.vstack(
+            [
+                result.right_total_force
+                for result
+                in results
+            ]
+        )
+
+        if (
+            force.ndim != 2
+            or
+            force.shape[1] != 3
+        ):
+
+            raise RuntimeError(
+                "right_total_force must have shape (N, 3)."
+            )
+
+        return self._write_columns(
+            filename=(
+                "right_contact_force.csv"
+            ),
+            columns={
+                "time_s":
+                    time,
+
+                "force_x_N":
+                    force[:, 0],
+
+                "force_y_N":
+                    force[:, 1],
+
+                "force_z_N":
+                    force[:, 2],
+            },
+        )
+
 
     # ========================================================
     # GENERALIZED ACCELERATION NORM

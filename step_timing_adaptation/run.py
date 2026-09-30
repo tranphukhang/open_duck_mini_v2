@@ -97,6 +97,12 @@ if __package__:
     from .contact_wrench_distance import (
         ContactWrenchDistanceEvaluator,
         plot_wrench_distance_results,
+        FOOT_CONTACT_POINTS_LOCAL,
+        FLOOR_GEOM_NAME,
+        LEFT_FOOT_GEOM_NAME,
+        RIGHT_FOOT_GEOM_NAME,
+        LEFT_FOOT_SITE_NAME,
+        RIGHT_FOOT_SITE_NAME,
     )
 
 else:
@@ -128,6 +134,12 @@ else:
     from contact_wrench_distance import (
         ContactWrenchDistanceEvaluator,
         plot_wrench_distance_results,
+        FOOT_CONTACT_POINTS_LOCAL,
+        FLOOR_GEOM_NAME,
+        LEFT_FOOT_GEOM_NAME,
+        RIGHT_FOOT_GEOM_NAME,
+        LEFT_FOOT_SITE_NAME,
+        RIGHT_FOOT_SITE_NAME,
     )
 
 
@@ -232,6 +244,43 @@ TIME_TOLERANCE = 1.0e-10
 # ============================================================
 
 ENABLE_CONTACT_WRENCH_DISTANCE = True
+
+
+# ============================================================
+# SUPPORT POLYGON VISUALIZATION
+# ============================================================
+#
+# GUI visualization uses the same fixed contact model as
+# contact_wrench_distance.py:
+#
+#   - MuJoCo collision decides which foot is active.
+#   - each active foot contributes four predefined points.
+#   - SS -> convex hull of 4 points.
+#   - DS -> convex hull of 8 points.
+#
+# Visualization only; dynamics and feasibility are unchanged.
+# ============================================================
+
+ENABLE_SUPPORT_POLYGON_VISUALIZATION = True
+
+SUPPORT_POLYGON_LINE_WIDTH = 4.0
+SUPPORT_CONTACT_POINT_RADIUS = 0.0035
+SUPPORT_POLYGON_Z_OFFSET = 0.002
+
+SUPPORT_POLYGON_RGBA_SS = np.array(
+    [0.0, 1.0, 0.2, 1.0],
+    dtype=np.float32,
+)
+
+SUPPORT_POLYGON_RGBA_DS = np.array(
+    [1.0, 0.55, 0.0, 1.0],
+    dtype=np.float32,
+)
+
+SUPPORT_CONTACT_POINT_RGBA = np.array(
+    [1.0, 0.0, 0.0, 1.0],
+    dtype=np.float32,
+)
 
 
 # ============================================================
@@ -409,6 +458,527 @@ def get_contact_position(
     raise ValueError(
         f"Invalid side: {side}"
     )
+
+
+# ============================================================
+# SUPPORT POLYGON VISUALIZATION HELPERS
+# ============================================================
+
+def _require_mujoco_id(
+    mj_model,
+    object_type,
+    name,
+):
+
+    object_id = int(
+        mujoco.mj_name2id(
+            mj_model,
+            object_type,
+            name,
+        )
+    )
+
+    if object_id < 0:
+        raise RuntimeError(
+            f"MuJoCo object '{name}' was not found."
+        )
+
+    return object_id
+
+
+def _viewer_contact_geom_ids(
+    contact,
+):
+
+    if hasattr(contact, "geom"):
+
+        geom = np.asarray(
+            contact.geom,
+            dtype=int,
+        ).reshape(-1)
+
+        if geom.size >= 2:
+            return int(geom[0]), int(geom[1])
+
+    return int(contact.geom1), int(contact.geom2)
+
+
+def _viewer_foot_collision_detected(
+    *,
+    mj_data,
+    floor_geom_id,
+    foot_geom_id,
+):
+
+    for contact_index in range(int(mj_data.ncon)):
+
+        contact = mj_data.contact[contact_index]
+
+        geom_0, geom_1 = _viewer_contact_geom_ids(
+            contact
+        )
+
+        pair = {
+            geom_0,
+            geom_1,
+        }
+
+        if (
+            floor_geom_id in pair
+            and
+            foot_geom_id in pair
+        ):
+
+            if (
+                float(contact.dist)
+                <=
+                float(contact.includemargin)
+                +
+                1.0e-9
+            ):
+                return True
+
+    return False
+
+
+def _viewer_fixed_points_for_side(
+    *,
+    mj_data,
+    site_id,
+):
+
+    site_position_world = np.asarray(
+        mj_data.site_xpos[site_id],
+        dtype=float,
+    ).reshape(3)
+
+    R_world_site = np.asarray(
+        mj_data.site_xmat[site_id],
+        dtype=float,
+    ).reshape(3, 3)
+
+    points_world = []
+
+    for point_local in FOOT_CONTACT_POINTS_LOCAL:
+
+        point_world = (
+            site_position_world
+            +
+            R_world_site
+            @
+            point_local
+        )
+
+        points_world.append(
+            point_world.copy()
+        )
+
+    return np.asarray(
+        points_world,
+        dtype=float,
+    )
+
+
+def _convex_hull_xy(
+    points_xy,
+):
+
+    points_xy = np.asarray(
+        points_xy,
+        dtype=float,
+    ).reshape(-1, 2)
+
+    unique_points = sorted(
+        {
+            (
+                float(point[0]),
+                float(point[1]),
+            )
+            for point in points_xy
+        }
+    )
+
+    if len(unique_points) <= 1:
+
+        return np.asarray(
+            unique_points,
+            dtype=float,
+        ).reshape(-1, 2)
+
+    def cross(origin, point_a, point_b):
+
+        return (
+            (point_a[0] - origin[0])
+            *
+            (point_b[1] - origin[1])
+            -
+            (point_a[1] - origin[1])
+            *
+            (point_b[0] - origin[0])
+        )
+
+    lower = []
+
+    for point in unique_points:
+
+        while (
+            len(lower) >= 2
+            and
+            cross(
+                lower[-2],
+                lower[-1],
+                point,
+            )
+            <=
+            0.0
+        ):
+            lower.pop()
+
+        lower.append(point)
+
+    upper = []
+
+    for point in reversed(unique_points):
+
+        while (
+            len(upper) >= 2
+            and
+            cross(
+                upper[-2],
+                upper[-1],
+                point,
+            )
+            <=
+            0.0
+        ):
+            upper.pop()
+
+        upper.append(point)
+
+    hull = lower[:-1] + upper[:-1]
+
+    return np.asarray(
+        hull,
+        dtype=float,
+    ).reshape(-1, 2)
+
+
+def _reserve_user_geom(
+    viewer,
+):
+
+    scene = viewer.user_scn
+
+    if scene is None:
+        return None
+
+    if scene.ngeom >= scene.maxgeom:
+        return None
+
+    geom = scene.geoms[scene.ngeom]
+    scene.ngeom += 1
+
+    return geom
+
+
+def _add_user_sphere(
+    *,
+    viewer,
+    position,
+    radius,
+    rgba,
+):
+
+    geom = _reserve_user_geom(
+        viewer
+    )
+
+    if geom is None:
+        return
+
+    mujoco.mjv_initGeom(
+        geom,
+        type=int(
+            mujoco.mjtGeom.mjGEOM_SPHERE
+        ),
+        size=np.array(
+            [
+                float(radius),
+                0.0,
+                0.0,
+            ],
+            dtype=float,
+        ),
+        pos=np.asarray(
+            position,
+            dtype=float,
+        ),
+        mat=np.eye(
+            3,
+            dtype=float,
+        ).reshape(-1),
+        rgba=np.asarray(
+            rgba,
+            dtype=np.float32,
+        ),
+    )
+
+    geom.category = int(
+        mujoco.mjtCatBit.mjCAT_DECOR
+    )
+
+
+def _add_user_line(
+    *,
+    viewer,
+    point_from,
+    point_to,
+    width,
+    rgba,
+):
+
+    geom = _reserve_user_geom(
+        viewer
+    )
+
+    if geom is None:
+        return
+
+    line_type = int(
+        mujoco.mjtGeom.mjGEOM_LINE
+    )
+
+    mujoco.mjv_initGeom(
+        geom,
+        type=line_type,
+        size=np.zeros(
+            3,
+            dtype=float,
+        ),
+        pos=np.zeros(
+            3,
+            dtype=float,
+        ),
+        mat=np.eye(
+            3,
+            dtype=float,
+        ).reshape(-1),
+        rgba=np.asarray(
+            rgba,
+            dtype=np.float32,
+        ),
+    )
+
+    mujoco.mjv_connector(
+        geom,
+        type=line_type,
+        width=float(width),
+        from_=np.asarray(
+            point_from,
+            dtype=float,
+        ),
+        to=np.asarray(
+            point_to,
+            dtype=float,
+        ),
+    )
+
+    geom.category = int(
+        mujoco.mjtCatBit.mjCAT_DECOR
+    )
+
+
+def update_support_polygon_visualization(
+    *,
+    viewer,
+    mj_model,
+    mj_data,
+):
+
+    if viewer is None:
+        return
+
+    # Recompute kinematics and MuJoCo contact pairs at the
+    # current state without integrating the model.
+    mujoco.mj_forward(
+        mj_model,
+        mj_data,
+    )
+
+    floor_geom_id = _require_mujoco_id(
+        mj_model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        FLOOR_GEOM_NAME,
+    )
+
+    left_foot_geom_id = _require_mujoco_id(
+        mj_model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        LEFT_FOOT_GEOM_NAME,
+    )
+
+    right_foot_geom_id = _require_mujoco_id(
+        mj_model,
+        mujoco.mjtObj.mjOBJ_GEOM,
+        RIGHT_FOOT_GEOM_NAME,
+    )
+
+    left_foot_site_id = _require_mujoco_id(
+        mj_model,
+        mujoco.mjtObj.mjOBJ_SITE,
+        LEFT_FOOT_SITE_NAME,
+    )
+
+    right_foot_site_id = _require_mujoco_id(
+        mj_model,
+        mujoco.mjtObj.mjOBJ_SITE,
+        RIGHT_FOOT_SITE_NAME,
+    )
+
+    left_contact = _viewer_foot_collision_detected(
+        mj_data=mj_data,
+        floor_geom_id=floor_geom_id,
+        foot_geom_id=left_foot_geom_id,
+    )
+
+    right_contact = _viewer_foot_collision_detected(
+        mj_data=mj_data,
+        floor_geom_id=floor_geom_id,
+        foot_geom_id=right_foot_geom_id,
+    )
+
+    active_points_world = []
+
+    if left_contact:
+
+        active_points_world.extend(
+            _viewer_fixed_points_for_side(
+                mj_data=mj_data,
+                site_id=left_foot_site_id,
+            )
+        )
+
+    if right_contact:
+
+        active_points_world.extend(
+            _viewer_fixed_points_for_side(
+                mj_data=mj_data,
+                site_id=right_foot_site_id,
+            )
+        )
+
+    with viewer.lock():
+
+        scene = viewer.user_scn
+
+        if scene is None:
+            return
+
+        # run.py currently has no other user_scn graphics.
+        scene.ngeom = 0
+
+        if not ENABLE_SUPPORT_POLYGON_VISUALIZATION:
+            return
+
+        if len(active_points_world) == 0:
+            return
+
+        active_points_world = np.asarray(
+            active_points_world,
+            dtype=float,
+        ).reshape(-1, 3)
+
+        # scene_flat_terrain is horizontal. For visualization,
+        # project the active points to world XY and lift the
+        # drawing slightly above the floor.
+        floor_z = float(
+            mj_data.geom_xpos[
+                floor_geom_id,
+                2,
+            ]
+        )
+
+        draw_z = (
+            floor_z
+            +
+            SUPPORT_POLYGON_Z_OFFSET
+        )
+
+        projected_points = (
+            active_points_world.copy()
+        )
+
+        projected_points[:, 2] = draw_z
+
+        # Display every active fixed contact point.
+        for point in projected_points:
+
+            _add_user_sphere(
+                viewer=viewer,
+                position=point,
+                radius=(
+                    SUPPORT_CONTACT_POINT_RADIUS
+                ),
+                rgba=(
+                    SUPPORT_CONTACT_POINT_RGBA
+                ),
+            )
+
+        hull_xy = _convex_hull_xy(
+            projected_points[:, 0:2]
+        )
+
+        if hull_xy.shape[0] < 2:
+            return
+
+        if left_contact and right_contact:
+
+            polygon_rgba = (
+                SUPPORT_POLYGON_RGBA_DS
+            )
+
+        else:
+
+            polygon_rgba = (
+                SUPPORT_POLYGON_RGBA_SS
+            )
+
+        hull_world = np.column_stack(
+            (
+                hull_xy,
+                np.full(
+                    hull_xy.shape[0],
+                    draw_z,
+                    dtype=float,
+                ),
+            )
+        )
+
+        for index in range(
+            hull_world.shape[0]
+        ):
+
+            next_index = (
+                index
+                +
+                1
+            ) % hull_world.shape[0]
+
+            _add_user_line(
+                viewer=viewer,
+                point_from=(
+                    hull_world[index]
+                ),
+                point_to=(
+                    hull_world[next_index]
+                ),
+                width=(
+                    SUPPORT_POLYGON_LINE_WIDTH
+                ),
+                rgba=(
+                    polygon_rgba
+                ),
+            )
 
 
 # ============================================================
@@ -2867,6 +3437,18 @@ def run_walk(
             -
             TIME_TOLERANCE
         ):
+
+            update_support_polygon_visualization(
+                viewer=(
+                    viewer
+                ),
+                mj_model=(
+                    mj_model
+                ),
+                mj_data=(
+                    mj_data
+                ),
+            )
 
             viewer.sync()
 
