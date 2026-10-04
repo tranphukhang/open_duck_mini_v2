@@ -35,10 +35,13 @@ Fz_right = right_data.force_z_N;
 Ft_right = sqrt(Fx_right.^2 + Fy_right.^2);
 muFz_right = mu .* Fz_right;
 
-%% LEFT FOOT - Fx
+%% =========================================================
+% LEFT FOOT - Fx
+% ==========================================================
 figure('Color', 'w');
 
-plot(t_left, Fx_left, 'r-', 'LineWidth', 1.5);
+plot(t_left, Fx_left, 'r-', ...
+    'LineWidth', 1.5);
 
 xlabel('Time (s)', 'FontSize', 12);
 ylabel('Amplitude (N)', 'FontSize', 12);
@@ -48,7 +51,9 @@ title('Lực tiếp xúc chân trái theo trục x', ...
     'FontName', 'Times New Roman', ...
     'FontWeight', 'normal');
 
-legend('F_x', 'Location', 'best', 'FontSize', 11);
+legend('F_x', ...
+    'Location', 'best', ...
+    'FontSize', 11);
 
 grid on;
 box on;
@@ -59,11 +64,15 @@ set(gca, ...
     'FontName', 'Times New Roman');
 
 xlim([t_left(1) t_left(end)]);
+ylim([-5 5]);
 
-%% LEFT FOOT - Fy
+%% =========================================================
+% LEFT FOOT - Fy
+% ==========================================================
 figure('Color', 'w');
 
-plot(t_left, Fy_left, 'r-', 'LineWidth', 1.5);
+plot(t_left, Fy_left, 'r-', ...
+    'LineWidth', 1.5);
 
 xlabel('Time (s)', 'FontSize', 12);
 ylabel('Amplitude (N)', 'FontSize', 12);
@@ -73,7 +82,9 @@ title('Lực tiếp xúc chân trái theo trục y', ...
     'FontName', 'Times New Roman', ...
     'FontWeight', 'normal');
 
-legend('F_y', 'Location', 'best', 'FontSize', 11);
+legend('F_y', ...
+    'Location', 'best', ...
+    'FontSize', 11);
 
 grid on;
 box on;
@@ -84,11 +95,15 @@ set(gca, ...
     'FontName', 'Times New Roman');
 
 xlim([t_left(1) t_left(end)]);
+ylim([-6 6]);
 
-%% LEFT FOOT - Fz
+%% =========================================================
+% LEFT FOOT - Fz
+% ==========================================================
 figure('Color', 'w');
 
-plot(t_left, Fz_left, 'r-', 'LineWidth', 1.5);
+plot(t_left, Fz_left, 'r-', ...
+    'LineWidth', 1.5);
 
 xlabel('Time (s)', 'FontSize', 12);
 ylabel('Amplitude (N)', 'FontSize', 12);
@@ -98,7 +113,9 @@ title('Lực tiếp xúc chân trái theo trục z', ...
     'FontName', 'Times New Roman', ...
     'FontWeight', 'normal');
 
-legend('F_z', 'Location', 'best', 'FontSize', 11);
+legend('F_z', ...
+    'Location', 'best', ...
+    'FontSize', 11);
 
 grid on;
 box on;
@@ -109,11 +126,15 @@ set(gca, ...
     'FontName', 'Times New Roman');
 
 xlim([t_left(1) t_left(end)]);
+ylim([-2 25]);
 
-%% RIGHT FOOT - Fx
+%% =========================================================
+% RIGHT FOOT - Fx
+% ==========================================================
 figure('Color', 'w');
 
-plot(t_right, Fx_right, 'r-', 'LineWidth', 1.5);
+plot(t_right, Fx_right, 'r-', ...
+    'LineWidth', 1.5);
 
 xlabel('Time (s)', 'FontSize', 12);
 ylabel('Amplitude (N)', 'FontSize', 12);
@@ -123,7 +144,9 @@ title('Lực tiếp xúc chân phải theo trục x', ...
     'FontName', 'Times New Roman', ...
     'FontWeight', 'normal');
 
-legend('F_x', 'Location', 'best', 'FontSize', 11);
+legend('F_x', ...
+    'Location', 'best', ...
+    'FontSize', 11);
 
 grid on;
 box on;
@@ -134,11 +157,15 @@ set(gca, ...
     'FontName', 'Times New Roman');
 
 xlim([t_right(1) t_right(end)]);
+ylim([-5 5]);
 
-%% RIGHT FOOT - Fy
+%% =========================================================
+% RIGHT FOOT - Fy
+% ==========================================================
 figure('Color', 'w');
 
-plot(t_right, Fy_right, 'r-', 'LineWidth', 1.5);
+plot(t_right, Fy_right, 'r-', ...
+    'LineWidth', 1.5);
 
 xlabel('Time (s)', 'FontSize', 12);
 ylabel('Amplitude (N)', 'FontSize', 12);
@@ -148,7 +175,9 @@ title('Lực tiếp xúc chân phải theo trục y', ...
     'FontName', 'Times New Roman', ...
     'FontWeight', 'normal');
 
-legend('F_y', 'Location', 'best', 'FontSize', 11);
+legend('F_y', ...
+    'Location', 'best', ...
+    'FontSize', 11);
 
 grid on;
 box on;
@@ -159,11 +188,15 @@ set(gca, ...
     'FontName', 'Times New Roman');
 
 xlim([t_right(1) t_right(end)]);
+ylim([-6 6]);
 
-%% RIGHT FOOT - Fz
+%% =========================================================
+% RIGHT FOOT - Fz
+% ==========================================================
 figure('Color', 'w');
 
-plot(t_right, Fz_right, 'r-', 'LineWidth', 1.5);
+plot(t_right, Fz_right, 'r-', ...
+    'LineWidth', 1.5);
 
 xlabel('Time (s)', 'FontSize', 12);
 ylabel('Amplitude (N)', 'FontSize', 12);
@@ -173,7 +206,9 @@ title('Lực tiếp xúc chân phải theo trục z', ...
     'FontName', 'Times New Roman', ...
     'FontWeight', 'normal');
 
-legend('F_z', 'Location', 'best', 'FontSize', 11);
+legend('F_z', ...
+    'Location', 'best', ...
+    'FontSize', 11);
 
 grid on;
 box on;
@@ -184,19 +219,20 @@ set(gca, ...
     'FontName', 'Times New Roman');
 
 xlim([t_right(1) t_right(end)]);
+ylim([-2 25]);
 
-%% LEFT FOOT - FRICTION CONE
+%% =========================================================
+% LEFT FOOT - FRICTION CONE
+% ==========================================================
 figure('Color', 'w');
 
-plot(t_left, Ft_left, 'r-', ...
-    'LineWidth', 1.5, ...
-    'DisplayName', 'F_t');
+hLimitLeft = plot(t_left, muFz_left, 'k-', ...
+    'LineWidth', 1.5);
 
 hold on;
 
-plot(t_left, muFz_left, 'k--', ...
-    'LineWidth', 1.5, ...
-    'DisplayName', '\muF_z');
+hFtLeft = plot(t_left, Ft_left, 'r--', ...
+    'LineWidth', 1.8);
 
 xlabel('Time (s)', 'FontSize', 12);
 ylabel('Amplitude (N)', 'FontSize', 12);
@@ -206,7 +242,10 @@ title('Điều kiện nón ma sát chân trái', ...
     'FontName', 'Times New Roman', ...
     'FontWeight', 'normal');
 
-legend('Location', 'best', 'FontSize', 11);
+legend([hFtLeft hLimitLeft], ...
+    {'F_t', '\muF_z'}, ...
+    'Location', 'best', ...
+    'FontSize', 11);
 
 grid on;
 box on;
@@ -217,19 +256,20 @@ set(gca, ...
     'FontName', 'Times New Roman');
 
 xlim([t_left(1) t_left(end)]);
+ylim([0 15]);
 
-%% RIGHT FOOT - FRICTION CONE
+%% =========================================================
+% RIGHT FOOT - FRICTION CONE
+% ==========================================================
 figure('Color', 'w');
 
-plot(t_right, Ft_right, 'r-', ...
-    'LineWidth', 1.5, ...
-    'DisplayName', 'F_t');
+hLimitRight = plot(t_right, muFz_right, 'k-', ...
+    'LineWidth', 1.5);
 
 hold on;
 
-plot(t_right, muFz_right, 'k--', ...
-    'LineWidth', 1.5, ...
-    'DisplayName', '\muF_z');
+hFtRight = plot(t_right, Ft_right, 'r--', ...
+    'LineWidth', 1.8);
 
 xlabel('Time (s)', 'FontSize', 12);
 ylabel('Amplitude (N)', 'FontSize', 12);
@@ -239,7 +279,10 @@ title('Điều kiện nón ma sát chân phải', ...
     'FontName', 'Times New Roman', ...
     'FontWeight', 'normal');
 
-legend('Location', 'best', 'FontSize', 11);
+legend([hFtRight hLimitRight], ...
+    {'F_t', '\muF_z'}, ...
+    'Location', 'best', ...
+    'FontSize', 11);
 
 grid on;
 box on;
@@ -250,3 +293,4 @@ set(gca, ...
     'FontName', 'Times New Roman');
 
 xlim([t_right(1) t_right(end)]);
+ylim([0 15]);
