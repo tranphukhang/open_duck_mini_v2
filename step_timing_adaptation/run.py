@@ -321,10 +321,10 @@ ENABLE_AUTOMATIC_PUSH = False
 
 PUSH_TIME = 5.0
 
-PUSH_FORCE_X = 5.0
-PUSH_FORCE_Y = 0.0
+PUSH_FORCE_X = 0.0
+PUSH_FORCE_Y = 5.0
 
-PUSH_DURATION = 0.03
+PUSH_DURATION = 0.01
 
 
 # ============================================================
@@ -345,7 +345,7 @@ STEP_TIME_MAX = 0.5
 # DEFAULT FOOT SPACING
 # ============================================================
 
-DEFAULT_STEP_WIDTH = 0.1
+DEFAULT_STEP_WIDTH = 0.135
 
 
 # ============================================================
@@ -362,7 +362,7 @@ STEP_QP_ALPHA_VIABILITY = 1.0e6
 # ONLINE TIMING CAUSALITY
 # ============================================================
 
-STEP_TIMING_GAP = 0.05
+STEP_TIMING_GAP = 0.01
 
 
 # ============================================================
