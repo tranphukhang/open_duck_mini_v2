@@ -2,10 +2,11 @@
 #
 # Current experiment:
 #   - initial gait preparation at vx = vy = 0
-#   - one transition step at desired walking velocity
+#   - one transition step at the first desired walking velocity
 #   - then record 9 s of experiment data
-#   - recorded vx = +0.030 m/s
-#   - recorded vy = +0.030 m/s
+#   - recorded velocity profile:
+#       0.0 <= data_t < 4.0 s : vx = +0.010 m/s, vy = +0.000 m/s
+#       4.0 <= data_t <= 9.0 s: vx = +0.030 m/s, vy = +0.000 m/s
 #   - COM_HEIGHT = 0.215 m
 #   - SWING_HEIGHT = 0.020 m
 #   - external push disabled
@@ -220,8 +221,19 @@ SIMULATION_DURATION = 9.0
 INITIAL_SPACING_TOLERANCE = 0.005
 MAX_PREPARATION_TIME = 5.0
 
-DESIRED_VELOCITY_X = 0.03
-DESIRED_VELOCITY_Y = 0.0
+# Desired walking-velocity schedule during RECORDED data time.
+#
+# Each tuple is:
+#
+#     (start_time [s], vx [m/s], vy [m/s])
+#
+# The latest entry whose start_time <= data_time is used.
+# Additional command changes can be added here without changing
+# automatic_velocity_profile().
+VELOCITY_PROFILE = (
+    (0.0, 0.01, 0.0),
+    (4.0, 0.03, 0.0),
+)
 
 FIRST_STANCE_SIDE = "left"
 
@@ -295,13 +307,109 @@ def automatic_velocity_profile(
     current_time: float,
 ) -> tuple[float, float]:
 
-    _ = float(
+    current_time = float(
         current_time
     )
 
+    if not np.isfinite(
+        current_time
+    ):
+
+        raise ValueError(
+            "current_time must be finite."
+        )
+
+    if len(
+        VELOCITY_PROFILE
+    ) == 0:
+
+        raise RuntimeError(
+            "VELOCITY_PROFILE must contain at least one command."
+        )
+
+    first_start_time = float(
+        VELOCITY_PROFILE[0][0]
+    )
+
+    if (
+        first_start_time
+        >
+        TIME_TOLERANCE
+    ):
+
+        raise RuntimeError(
+            "The first VELOCITY_PROFILE entry must start at t=0."
+        )
+
+    desired_vx = float(
+        VELOCITY_PROFILE[0][1]
+    )
+
+    desired_vy = float(
+        VELOCITY_PROFILE[0][2]
+    )
+
+    previous_start_time = (
+        first_start_time
+    )
+
+    for (
+        start_time,
+        velocity_x,
+        velocity_y,
+    ) in VELOCITY_PROFILE:
+
+        start_time = float(
+            start_time
+        )
+
+        velocity_x = float(
+            velocity_x
+        )
+
+        velocity_y = float(
+            velocity_y
+        )
+
+        if (
+            start_time
+            <
+            previous_start_time
+            -
+            TIME_TOLERANCE
+        ):
+
+            raise RuntimeError(
+                "VELOCITY_PROFILE start times must be sorted."
+            )
+
+        previous_start_time = (
+            start_time
+        )
+
+        if (
+            current_time
+            >=
+            start_time
+            -
+            TIME_TOLERANCE
+        ):
+
+            desired_vx = (
+                velocity_x
+            )
+
+            desired_vy = (
+                velocity_y
+            )
+
+        else:
+
+            break
+
     return (
-        DESIRED_VELOCITY_X,
-        DESIRED_VELOCITY_Y,
+        desired_vx,
+        desired_vy,
     )
 
 
@@ -2588,13 +2696,49 @@ def run_walk(
     )
 
     print(
-        "Recorded experiment command:"
+        "Recorded experiment velocity profile:"
     )
 
-    print(
-        f"  vx={DESIRED_VELOCITY_X:+.3f} m/s, "
-        f"vy={DESIRED_VELOCITY_Y:+.3f} m/s"
-    )
+    for profile_index, (
+        profile_start_time,
+        profile_vx,
+        profile_vy,
+    ) in enumerate(
+        VELOCITY_PROFILE
+    ):
+
+        if (
+            profile_index
+            + 1
+            <
+            len(
+                VELOCITY_PROFILE
+            )
+        ):
+
+            profile_end_time = float(
+                VELOCITY_PROFILE[
+                    profile_index + 1
+                ][0]
+            )
+
+            interval_text = (
+                f"[{float(profile_start_time):.3f}, "
+                f"{profile_end_time:.3f}) s"
+            )
+
+        else:
+
+            interval_text = (
+                f"[{float(profile_start_time):.3f}, "
+                f"{SIMULATION_DURATION:.3f}] s"
+            )
+
+        print(
+            f"  {interval_text}"
+            f" | vx={float(profile_vx):+.3f} m/s"
+            f" | vy={float(profile_vy):+.3f} m/s"
+        )
 
     print(
         f"COM height: {COM_HEIGHT:.3f} m"
@@ -2672,6 +2816,82 @@ def run_walk(
                 "Initial gait preparation did not finish "
                 f"within {MAX_PREPARATION_TIME:.2f} s."
             )
+
+        # ====================================================
+        # UPDATE VELOCITY COMMAND
+        # ====================================================
+        #
+        # The command profile is indexed by recorded experiment
+        # time (data_time), not by preparation/kinematic time.
+        #
+        # When the command changes, update the nominal left/right
+        # step parameters immediately. The step currently in
+        # progress keeps its current_nominal_step; therefore the
+        # new command is applied to step planning from the next
+        # touchdown. This avoids changing the nominal step in the
+        # middle of a swing phase.
+        # ====================================================
+
+        if data_collection_started:
+
+            (
+                desired_vx,
+                desired_vy,
+            ) = (
+                automatic_velocity_profile(
+                    data_time
+                )
+            )
+
+            command_changed = (
+                not np.isclose(
+                    desired_vx,
+                    command.x,
+                    rtol=0.0,
+                    atol=1.0e-12,
+                )
+                or
+                not np.isclose(
+                    desired_vy,
+                    command.y,
+                    rtol=0.0,
+                    atol=1.0e-12,
+                )
+            )
+
+            if command_changed:
+
+                command = (
+                    VelocityCommandSnapshot(
+                        x=(
+                            desired_vx
+                        ),
+                        y=(
+                            desired_vy
+                        ),
+                    )
+                )
+
+                (
+                    nominal_left_step,
+                    nominal_right_step,
+                ) = (
+                    compute_nominal_steps(
+                        planner=(
+                            planner
+                        ),
+                        velocity_command=(
+                            command
+                        ),
+                    )
+                )
+
+                print(
+                    f"[VELOCITY UPDATE]"
+                    f" data_t={data_time:.3f} s"
+                    f" | vx={command.x:+.3f} m/s"
+                    f" | vy={command.y:+.3f} m/s"
+                )
 
         # ====================================================
         # AUTOMATIC PUSH
