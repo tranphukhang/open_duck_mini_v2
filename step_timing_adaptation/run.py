@@ -231,8 +231,8 @@ MAX_PREPARATION_TIME = 5.0
 # Additional command changes can be added here without changing
 # automatic_velocity_profile().
 VELOCITY_PROFILE = (
-    (0.0, 0.01, 0.0),
-    (4.0, 0.03, 0.0),
+    (0.0, 0.03, 0.0),
+    (4.0, 0.06, 0.0),
 )
 
 FIRST_STANCE_SIDE = "left"
