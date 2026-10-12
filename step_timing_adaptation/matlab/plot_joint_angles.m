@@ -15,17 +15,17 @@ near_limit_margin = 5; % deg
 % {data, title, legend, lower_limit, upper_limit, y_min, y_max}
 
 joint_data = {
-    rad2deg(data.left_hip_yaw_rad),     'Chân trái hip yaw',     'L1', -30,  30, -0.5,  0.5;
-    rad2deg(data.left_hip_roll_rad),    'Chân trái hip roll',    'L2', -25,  25, 0,  30;
-    rad2deg(data.left_hip_pitch_rad),   'Chân trái hip pitch',   'L3', -70,  30, -50,  -20;
-    rad2deg(data.left_knee_rad),        'Chân trái knee',        'L4', -90,  90, 60, 100;
-    rad2deg(data.left_ankle_rad),       'Chân trái ankle',       'L5', -90,  90, -60, -20;
+    rad2deg(data.left_hip_yaw_rad),    'Left hip yaw',    'L1', -30, 30, -0.1, 0.4;
+    rad2deg(data.left_hip_roll_rad),   'Left hip roll',   'L2', -25, 25, -15, 35;
+    rad2deg(data.left_hip_pitch_rad),  'Left hip pitch',  'L3', -70, 30, -40, -10;
+    rad2deg(data.left_knee_rad),       'Left knee',       'L4', -90, 90, 50, 80;
+    rad2deg(data.left_ankle_rad),      'Left ankle',      'L5', -90, 90, -45, -20;
 
-    rad2deg(data.right_hip_yaw_rad),    'Chân phải hip yaw',     'R1', -30,  30, -0.5,  0.5;
-    rad2deg(data.right_hip_roll_rad),   'Chân phải hip roll',    'R2', -25,  25, -30,  0;
-    rad2deg(data.right_hip_pitch_rad),  'Chân phải hip pitch',   'R3', -30,  70, 20,  50;
-    rad2deg(data.right_knee_rad),       'Chân phải knee',        'R4', -90,  90, 60, 100;
-    rad2deg(data.right_ankle_rad),      'Chân phải ankle',       'R5', -90,  90, -60, -20
+    rad2deg(data.right_hip_yaw_rad),   'Right hip yaw',   'R1', -30, 30, -0.25, -0.05;
+    rad2deg(data.right_hip_roll_rad),  'Right hip roll',  'R2', -25, 25, -28, 20;
+    rad2deg(data.right_hip_pitch_rad), 'Right hip pitch', 'R3', -30, 70, 15, 40;
+    rad2deg(data.right_knee_rad),      'Right knee',      'R4', -90, 90, 50, 80;
+    rad2deg(data.right_ankle_rad),     'Right ankle',     'R5', -90, 90, -45, -20
 };
 
 for i = 1:size(joint_data, 1)
