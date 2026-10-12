@@ -9,24 +9,33 @@ data = readtable(csv_file);
 
 t = data.time_s;
 
-torque_limit = 3.23;        % N m
-near_limit_margin = 0.5;    % N m
+torque_limit = 3.23;        % N.m
+near_limit_margin = 0.5;    % N.m
 
-% Cấu trúc:
+% Sign convention used in the paper figure:
+% Reversed with respect to MuJoCo/XML:
+%   Left : hip roll, hip pitch, knee, ankle
+%   Right: hip roll, hip pitch
+%
+% If q_fig = -q_MJ, the corresponding generalized torque also changes sign:
+%   tau_fig = -tau_MJ.
+% The actuator torque limits remain [-3.23, 3.23] N.m because they are symmetric.
+
+% Structure:
 % {data, title, legend, lower_limit, upper_limit, y_min, y_max}
 
 joint_data = {
-    data.left_hip_yaw_Nm,      'Mô-men chân trái hip yaw',     'L1', -torque_limit, torque_limit, -0.25,  0.25;
-    data.left_hip_roll_Nm,     'Mô-men chân trái hip roll',    'L2', -torque_limit, torque_limit, -2.0,   2.5;
-    data.left_hip_pitch_Nm,    'Mô-men chân trái hip pitch',   'L3', -torque_limit, torque_limit, -2.5,   2.0;
-    data.left_knee_Nm,         'Mô-men chân trái knee',        'L4', -torque_limit, torque_limit, -4.5,   4.5;
-    data.left_ankle_Nm,        'Mô-men chân trái ankle',       'L5', -torque_limit, torque_limit, -2.0,   2.0;
+     data.left_hip_yaw_Nm,      'Left hip yaw torque',      'L1', -torque_limit, torque_limit, -0.12,   0.1;
+    -data.left_hip_roll_Nm,     'Left hip roll torque',     'L2', -torque_limit, torque_limit, -5.0,   3.0;
+    -data.left_hip_pitch_Nm,    'Left hip pitch torque',    'L3', -torque_limit, torque_limit, -2.0,   2.5;
+    -data.left_knee_Nm,         'Left knee torque',         'L4', -torque_limit, torque_limit, -5.5,   5.0;
+    -data.left_ankle_Nm,        'Left ankle torque',        'L5', -torque_limit, torque_limit, -3.0,   2.0;
 
-    data.right_hip_yaw_Nm,     'Mô-men chân phải hip yaw',     'R1', -torque_limit, torque_limit, -0.25,  0.25;
-    data.right_hip_roll_Nm,    'Mô-men chân phải hip roll',    'R2', -torque_limit, torque_limit, -2.5,   2.5;
-    data.right_hip_pitch_Nm,   'Mô-men chân phải hip pitch',   'R3', -torque_limit, torque_limit, -2.0,   2.0;
-    data.right_knee_Nm,        'Mô-men chân phải knee',        'R4', -torque_limit, torque_limit, -4.5,   4.5;
-    data.right_ankle_Nm,       'Mô-men chân phải ankle',       'R5', -torque_limit, torque_limit, -2.0,   2.0
+     data.right_hip_yaw_Nm,     'Right hip yaw torque',     'R1', -torque_limit, torque_limit, -0.1,   0.15;
+    -data.right_hip_roll_Nm,    'Right hip roll torque',    'R2', -torque_limit, torque_limit, -4.0,   3.5;
+    -data.right_hip_pitch_Nm,   'Right hip pitch torque',   'R3', -torque_limit, torque_limit, -3.0,   2.0;
+     data.right_knee_Nm,        'Right knee torque',        'R4', -torque_limit, torque_limit, -5.0,   5.5;
+     data.right_ankle_Nm,       'Right ankle torque',       'R5', -torque_limit, torque_limit, -2.0,   3.0
 };
 
 for i = 1:size(joint_data, 1)
@@ -49,7 +58,7 @@ for i = 1:size(joint_data, 1)
 
     hold on;
 
-    % Kiểm tra mô-men có gần hoặc vượt giới hạn hay không
+    % Check whether the torque approaches or exceeds the limit
     lower_near = min(tau) <= lower_limit + near_limit_margin;
     upper_near = max(tau) >= upper_limit - near_limit_margin;
 
@@ -86,10 +95,12 @@ for i = 1:size(joint_data, 1)
     end
 
     xlabel('Time (s)', ...
-        'FontSize', 12);
+        'FontSize', 12, ...
+        'FontName', 'Times New Roman');
 
-    ylabel('Amplitude (Nm)', ...
-        'FontSize', 12);
+    ylabel('Amplitude (N.m)', ...
+        'FontSize', 12, ...
+        'FontName', 'Times New Roman');
 
     title(joint_title, ...
         'FontSize', 13, ...
@@ -97,7 +108,8 @@ for i = 1:size(joint_data, 1)
         'FontWeight', 'normal');
 
     legend('Location', 'best', ...
-        'FontSize', 11);
+        'FontSize', 11, ...
+        'FontName', 'Times New Roman');
 
     grid on;
     box on;

@@ -11,21 +11,29 @@ t = data.time_s;
 
 near_limit_margin = 5; % deg
 
-% Cấu trúc:
+% Sign convention used in the paper figure:
+% Reversed with respect to MuJoCo/XML:
+%   Left : hip roll, hip pitch, knee, ankle
+%   Right: hip roll, hip pitch
+%
+% If q_fig = -q_MJ, then the joint limits are transformed as
+%   [q_min, q_max]_fig = [-q_max, -q_min]_MJ.
+
+% Structure:
 % {data, title, legend, lower_limit, upper_limit, y_min, y_max}
 
 joint_data = {
-    rad2deg(data.left_hip_yaw_rad),    'Left hip yaw',    'L1', -30, 30, -0.1, 0.4;
-    rad2deg(data.left_hip_roll_rad),   'Left hip roll',   'L2', -25, 25, -15, 35;
-    rad2deg(data.left_hip_pitch_rad),  'Left hip pitch',  'L3', -70, 30, -40, -10;
-    rad2deg(data.left_knee_rad),       'Left knee',       'L4', -90, 90, 50, 80;
-    rad2deg(data.left_ankle_rad),      'Left ankle',      'L5', -90, 90, -45, -20;
+     rad2deg(data.left_hip_yaw_rad),     'Left hip yaw',    'L1', -30,  30,  -0.1,   0.4;
+    -rad2deg(data.left_hip_roll_rad),    'Left hip roll',   'L2', -25,  25, -35.0,  15.0;
+    -rad2deg(data.left_hip_pitch_rad),   'Left hip pitch',  'L3', -30,  70,  10.0,  40.0;
+    -rad2deg(data.left_knee_rad),        'Left knee',       'L4', -90,  90, -80.0, -50.0;
+    -rad2deg(data.left_ankle_rad),       'Left ankle',      'L5', -90,  90,  20.0,  45.0;
 
-    rad2deg(data.right_hip_yaw_rad),   'Right hip yaw',   'R1', -30, 30, -0.25, -0.05;
-    rad2deg(data.right_hip_roll_rad),  'Right hip roll',  'R2', -25, 25, -28, 20;
-    rad2deg(data.right_hip_pitch_rad), 'Right hip pitch', 'R3', -30, 70, 15, 40;
-    rad2deg(data.right_knee_rad),      'Right knee',      'R4', -90, 90, 50, 80;
-    rad2deg(data.right_ankle_rad),     'Right ankle',     'R5', -90, 90, -45, -20
+     rad2deg(data.right_hip_yaw_rad),    'Right hip yaw',   'R1', -30,  30,  -0.25, -0.05;
+    -rad2deg(data.right_hip_roll_rad),   'Right hip roll',  'R2', -25,  25, -20.0,  28.0;
+    -rad2deg(data.right_hip_pitch_rad),  'Right hip pitch', 'R3', -70,  30, -40.0, -15.0;
+     rad2deg(data.right_knee_rad),       'Right knee',      'R4', -90,  90,  50.0,  80.0;
+     rad2deg(data.right_ankle_rad),      'Right ankle',     'R5', -90,  90, -45.0, -20.0
 };
 
 for i = 1:size(joint_data, 1)
@@ -48,7 +56,7 @@ for i = 1:size(joint_data, 1)
 
     hold on;
 
-    % Kiểm tra khớp có gần hoặc vượt giới hạn hay không
+    % Check whether the joint approaches or exceeds the limit
     lower_near = min(q) <= lower_limit + near_limit_margin;
     upper_near = max(q) >= upper_limit - near_limit_margin;
 
@@ -85,10 +93,12 @@ for i = 1:size(joint_data, 1)
     end
 
     xlabel('Time (s)', ...
-        'FontSize', 12);
+        'FontSize', 12, ...
+        'FontName', 'Times New Roman');
 
     ylabel('Amplitude (deg)', ...
-        'FontSize', 12);
+        'FontSize', 12, ...
+        'FontName', 'Times New Roman');
 
     title(joint_title, ...
         'FontSize', 13, ...
@@ -96,7 +106,8 @@ for i = 1:size(joint_data, 1)
         'FontWeight', 'normal');
 
     legend('Location', 'best', ...
-        'FontSize', 11);
+        'FontSize', 11, ...
+        'FontName', 'Times New Roman');
 
     grid on;
     box on;
