@@ -198,7 +198,7 @@ CONTROL_FREQUENCY = 1.0 / CONTROL_DT
 
 # Recorded experiment duration.
 # Preparation time is NOT included in this value.
-SIMULATION_DURATION = 9.0
+SIMULATION_DURATION = 4.0
 
 # ============================================================
 # INITIAL GAIT PREPARATION
@@ -232,7 +232,7 @@ MAX_PREPARATION_TIME = 5.0
 # automatic_velocity_profile().
 VELOCITY_PROFILE = (
     (0.0, 0.01, 0.0),
-    (4.0, 0.03, 0.0),
+    (2.0, 0.03, 0.0),
 )
 
 FIRST_STANCE_SIDE = "left"
