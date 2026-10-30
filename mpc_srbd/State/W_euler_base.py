@@ -73,11 +73,14 @@ def get_W_euler_base(
     # 3. Rotation matrix -> Euler angles
     #
     # Convention:
-    # roll  quanh x
-    # pitch quanh y
-    # yaw   quanh z
     #
-    # Output: rad
+    #       R = Rz(yaw) Ry(pitch) Rx(roll)
+    #
+    # Output:
+    #
+    #       [roll, pitch, yaw]
+    #
+    # Đơn vị: rad
     # ---------------------------------------------------------
     W_euler_base = (
         Rotation
@@ -89,3 +92,107 @@ def get_W_euler_base(
         W_euler_base,
         dtype=float
     )
+
+
+def get_Ew_inverse(
+    W_euler_base,
+    singularity_tolerance=1e-6
+):
+    """
+    Tính ma trận Ew^(-1) dùng để ánh xạ angular velocity
+    biểu diễn trong World frame sang Euler angle rates.
+
+    Quan hệ:
+
+        euler_dot = Ew^(-1) @ W_angular_velocity_base
+
+    với:
+
+        euler =
+            [roll, pitch, yaw]
+            [phi, theta, psi]
+
+    và:
+
+        W_angular_velocity_base =
+            [wx, wy, wz]
+
+    Parameters
+    ----------
+    W_euler_base : np.ndarray, shape (3,)
+        Euler angles:
+
+        [roll, pitch, yaw]
+
+        Đơn vị: [rad]
+
+    singularity_tolerance : float, optional
+        Ngưỡng kiểm tra singularity tại:
+
+            cos(pitch) = 0
+
+        Mặc định: 1e-6.
+
+    Returns
+    -------
+    Ew_inverse : np.ndarray, shape (3, 3)
+        Ma trận biến đổi từ angular velocity trong World frame
+        sang Euler angle rates.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Lấy Euler angles
+    # ---------------------------------------------------------
+    roll, pitch, yaw = W_euler_base
+
+    # ---------------------------------------------------------
+    # 2. Các giá trị lượng giác cần thiết
+    # ---------------------------------------------------------
+    cos_pitch = np.cos(pitch)
+    sin_pitch = np.sin(pitch)
+
+    cos_yaw = np.cos(yaw)
+    sin_yaw = np.sin(yaw)
+
+    # ---------------------------------------------------------
+    # 3. Kiểm tra Euler singularity
+    #
+    # pitch = +/- pi/2
+    # -> cos(pitch) = 0
+    # ---------------------------------------------------------
+    if abs(cos_pitch) < singularity_tolerance:
+        raise ValueError(
+            "Euler angle singularity: "
+            "pitch đang quá gần +/- 90 deg, "
+            "không thể tính Ew_inverse ổn định."
+        )
+
+    # ---------------------------------------------------------
+    # 4. Tính Ew^(-1)
+    #
+    # euler_dot =
+    #
+    # [ phi_dot   ]
+    # [ theta_dot ] = Ew_inverse * W_omega
+    # [ psi_dot   ]
+    #
+    # ---------------------------------------------------------
+    Ew_inverse = np.array([
+        [
+            cos_yaw / cos_pitch,
+            sin_yaw / cos_pitch,
+            0.0
+        ],
+        [
+            -sin_yaw,
+            cos_yaw,
+            0.0
+        ],
+        [
+            cos_yaw * sin_pitch / cos_pitch,
+            sin_yaw * sin_pitch / cos_pitch,
+            1.0
+        ]
+    ], dtype=float)
+
+    return Ew_inverse
