@@ -73,11 +73,14 @@
 
     <worldbody>
         <body name="base_link" pos="0 0 0.28" euler="0 0 0" childclass="open_duck_mini_v3">
-            <freejoint name="floating_base"/>
+            <!-- <freejoint name="floating_base"/> -->
+
+            <site name="base" pos="0 0 -0.08286" euler="0 0 0"/>
+            <site name="L0" pos="0 0.035 -0.08286" euler="0 0 90"/>
+            <site name="R0" pos="0 -0.035 -0.08286" euler="0 0 -90"/>
 
             <!-- IMU sensor -->
             <site name="imu" pos="0 0 0"/>
-            <site name="base_link" pos="0 0 0"/>
 
             <geom type="mesh" class="visual" mesh="base_link" mass="0.7"/>
             
