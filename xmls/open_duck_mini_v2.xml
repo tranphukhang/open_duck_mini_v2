@@ -430,6 +430,7 @@
       </body>
     </body>
   </worldbody>
+  
   <asset>
     <mesh file="body_back.stl"/>
     <mesh file="foot_bottom_pla.stl"/>
