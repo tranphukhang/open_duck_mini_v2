@@ -734,12 +734,12 @@ def main():
 
     qp_solver = QPSolver(
         verbose=False,
-        eps_abs=1e-5,
-        eps_rel=1e-5,
-        max_iter=4000,
+        eps_abs=1e-4,
+        eps_rel=1e-4,
+        max_iter=1000,
         polishing=True,
         enable_warm_start=False,
-        constraint_tolerance=1e-4
+        constraint_tolerance=1e-3
     )
 
 
