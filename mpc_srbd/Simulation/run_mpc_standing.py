@@ -20,6 +20,7 @@ SRBD_DIR = MPC_SRBD_DIR / "SRBD"
 QP_DIR = MPC_SRBD_DIR / "QP"
 KINEMATICS_DIR = MPC_SRBD_DIR / "Kinematics"
 ACTUATOR_DIR = MPC_SRBD_DIR / "Actuator"
+COMMAND_DIR = MPC_SRBD_DIR / "Command"
 
 
 for directory in (
@@ -27,7 +28,8 @@ for directory in (
     SRBD_DIR,
     QP_DIR,
     KINEMATICS_DIR,
-    ACTUATOR_DIR
+    ACTUATOR_DIR,
+    COMMAND_DIR
 ):
     if str(directory) not in sys.path:
         sys.path.insert(
@@ -125,6 +127,15 @@ from W_wrench_to_joint_torque import (
 
 from actuator_mapping import (
     apply_joint_torque
+)
+
+
+# ============================================================
+# COMMAND
+# ============================================================
+
+from reference_generator import (
+    ReferenceGenerator
 )
 
 
@@ -283,77 +294,6 @@ def get_current_state(
 
 
     return x_current
-
-
-# ============================================================
-# BUILD STANDING REFERENCE
-# ============================================================
-
-def build_standing_reference(
-    x_initial,
-    horizon
-):
-    """
-    Constant standing reference.
-
-    CoM position:
-        giữ tại vị trí ban đầu.
-
-    Orientation:
-        roll = pitch = yaw = 0.
-
-    Linear/angular velocity:
-        0.
-    """
-
-    x_ref = np.zeros(
-        13,
-        dtype=float
-    )
-
-
-    # CoM position
-    x_ref[
-        0:3
-    ] = x_initial[
-        0:3
-    ]
-
-
-    # Euler reference
-    x_ref[
-        3:6
-    ] = 0.0
-
-
-    # Linear velocity reference
-    x_ref[
-        6:9
-    ] = 0.0
-
-
-    # Angular velocity reference
-    x_ref[
-        9:12
-    ] = 0.0
-
-
-    # Augmented constant
-    x_ref[
-        12
-    ] = 1.0
-
-
-    X_ref = np.tile(
-        x_ref,
-        horizon
-    )
-
-
-    return (
-        x_ref,
-        X_ref
-    )
 
 
 # ============================================================
@@ -622,6 +562,7 @@ def main():
 
 
     if home_key_id < 0:
+
         raise RuntimeError(
             'Không tìm thấy keyframe "home" trong XML.'
         )
@@ -700,7 +641,7 @@ def main():
 
 
     # ========================================================
-    # 5. INITIAL STATE
+    # 5. INITIAL STATE AND COMMAND
     # ========================================================
 
     x_initial = get_current_state(
@@ -709,18 +650,57 @@ def main():
     )
 
 
-    (
-        x_ref,
-        X_ref
-    ) = build_standing_reference(
-        x_initial,
-        N
+    # --------------------------------------------------------
+    # Desired CoM linear velocity command [m/s]
+    #
+    # Current standing test:
+    #
+    #     vx_cmd = 0
+    #     vy_cmd = 0
+    #     vz_cmd = 0
+    # --------------------------------------------------------
+
+    v_CoM_cmd = np.array(
+        [
+            0.0,
+            0.0,
+            0.0
+        ],
+        dtype=float
+    )
+
+
+    # --------------------------------------------------------
+    # Initialize reference generator
+    #
+    # The generator stores its own CoM position reference.
+    #
+    # Therefore:
+    #
+    #     p_ref
+    #
+    # is independent of the measured robot state x_k.
+    #
+    # Prediction grid:
+    #
+    #     dt_prediction = dt_mpc
+    #
+    # Reference update:
+    #
+    #     dt_update = dt_mpc_update
+    # --------------------------------------------------------
+
+    reference_generator = ReferenceGenerator(
+        x_initial=x_initial,
+        horizon=N,
+        dt_prediction=dt_mpc,
+        dt_update=dt_mpc_update
     )
 
 
     print("\n")
     print("=" * 70)
-    print("INITIAL STATE")
+    print("INITIAL STATE AND COMMAND")
     print("=" * 70)
 
 
@@ -734,11 +714,20 @@ def main():
 
 
     print(
-        "\nStanding x_ref ="
+        "\nv_CoM_cmd [m/s] ="
     )
 
     print(
-        x_ref
+        v_CoM_cmd
+    )
+
+
+    print(
+        "\nInitial CoM position reference ="
+    )
+
+    print(
+        reference_generator.get_position_reference()
     )
 
 
@@ -811,13 +800,19 @@ def main():
             # =================================================
             # CURRENT CONTROL CYCLE
             #
-            # At this instant the plant is at:
+            # At this instant:
             #
-            #                   x_k
+            #                x_k
             #
-            # Correct sequence:
+            # Control sequence:
             #
             # x_k
+            #  |
+            #  v
+            # Command / Reference Generator
+            #  |
+            #  v
+            # X_ref
             #  |
             #  v
             # MPC
@@ -856,6 +851,42 @@ def main():
             # =================================================
             # STEP 2:
             #
+            # GENERATE MPC REFERENCE
+            #
+            # Input:
+            #
+            #     v_CoM_cmd
+            #
+            # Output:
+            #
+            #     X_ref
+            #
+            # ReferenceGenerator maintains p_ref internally.
+            #
+            # Therefore:
+            #
+            #     p_ref != measured p_CoM
+            #
+            # in general.
+            #
+            # For current standing command:
+            #
+            #     v_CoM_cmd = [0, 0, 0]
+            #
+            # p_ref remains equal to the initial home CoM
+            # position.
+            # =================================================
+
+            X_ref = (
+                reference_generator.generate_reference(
+                    v_CoM_cmd
+                )
+            )
+
+
+            # =================================================
+            # STEP 3:
+            #
             # UPDATE NONLINEAR QUANTITIES AT x_k
             #
             # These values are frozen over the current
@@ -891,7 +922,7 @@ def main():
 
 
             # =================================================
-            # STEP 3:
+            # STEP 4:
             #
             # CONTINUOUS SRBD
             #
@@ -918,17 +949,17 @@ def main():
 
 
             # =================================================
-            # STEP 4:
+            # STEP 5:
             #
             # MPC DISCRETIZATION
             #
             # IMPORTANT:
             #
-            # Use:
+            #     dt_mpc = prediction-grid spacing
+            #
+            # Current:
             #
             #     dt_mpc = 0.025 s
-            #
-            # This is prediction-grid spacing.
             # =================================================
 
             (
@@ -942,11 +973,17 @@ def main():
 
 
             # =================================================
-            # STEP 5:
+            # STEP 6:
             #
             # PREDICTION MODEL
             #
-            # X = Phi x_k + Gamma U
+            # X =
+            #
+            # Phi x_k
+            #
+            # +
+            #
+            # Gamma U
             # =================================================
 
             (
@@ -960,9 +997,15 @@ def main():
 
 
             # =================================================
-            # STEP 6:
+            # STEP 7:
             #
             # BUILD QP USING CURRENT x_k
+            #
+            # Tracking reference:
+            #
+            #     X_ref
+            #
+            # is provided by ReferenceGenerator.
             # =================================================
 
             (
@@ -990,21 +1033,26 @@ def main():
 
 
             # =================================================
-            # STEP 7:
+            # STEP 8:
             #
             # SOLVE MPC
             #
             # U* =
             #
             # [
-            #   u_k
-            #   u_k+1
-            #   ...
+            #     u_k
+            #     u_k+1
+            #     ...
+            #     u_k+N-1
             # ]
             #
             # Receding-horizon control:
             #
-            # only u_k = u0_opt is applied.
+            # only:
+            #
+            #     u_k = u0_opt
+            #
+            # is applied to the plant.
             # =================================================
 
             qp_solver.setup(
@@ -1028,7 +1076,7 @@ def main():
 
 
             # =================================================
-            # STEP 8:
+            # STEP 9:
             #
             # CHECK MPC SOLUTION
             #
@@ -1047,6 +1095,7 @@ def main():
             if u0_opt is None:
 
                 # Remove torque before stopping
+
                 data.ctrl[:] = 0.0
 
 
@@ -1067,7 +1116,7 @@ def main():
 
 
             # =================================================
-            # STEP 9:
+            # STEP 10:
             #
             # CURRENT MPC INPUT
             #
@@ -1079,13 +1128,17 @@ def main():
             #     F_R,
             #     M_R
             # ]
+            #
+            # Dimension:
+            #
+            #     u_k in R^12
             # =================================================
 
             u_k = u0_opt.copy()
 
 
             # =================================================
-            # STEP 10:
+            # STEP 11:
             #
             # WRENCH -> JOINT TORQUE
             #
@@ -1094,6 +1147,10 @@ def main():
             #    ->
             #
             # tau_k
+            #
+            # Dimension:
+            #
+            #     tau_k in R^10
             # =================================================
 
             (
@@ -1108,7 +1165,7 @@ def main():
 
 
             # =================================================
-            # STEP 11:
+            # STEP 12:
             #
             # APPLY tau_k TO data.ctrl
             #
@@ -1131,7 +1188,7 @@ def main():
             #
             # For now this is only monitoring.
             #
-            # It is NOT required to be < 0.01 s during
+            # It is NOT required to be < dt_mpc_update during
             # this development/debugging stage.
             # =================================================
 
@@ -1183,7 +1240,7 @@ def main():
 
 
             # =================================================
-            # STEP 12:
+            # STEP 13:
             #
             # PROPAGATE MUJOCO PLANT
             #
@@ -1191,13 +1248,15 @@ def main():
             #
             # tau_k is held constant using ZOH.
             #
-            # dt_mpc_update = 0.01 s
+            # Current:
             #
-            # dt_sim = 0.0005 s
+            #     dt_mpc_update = 0.01 s
+            #
+            #     dt_sim = 0.0005 s
             #
             # therefore:
             #
-            #     20 MuJoCo steps
+            #     20 MuJoCo steps / MPC update
             #
             #
             # x_k
@@ -1218,6 +1277,7 @@ def main():
             ):
 
                 if data.time >= SIM_DURATION:
+
                     break
 
 
@@ -1228,7 +1288,7 @@ def main():
 
 
             # =================================================
-            # STEP 13:
+            # STEP 14:
             #
             # MEASURE x_k+1
             #
@@ -1268,6 +1328,19 @@ def main():
                     "simulation time =",
                     f"{data.time:.4f}",
                     "s"
+                )
+
+
+                # --------------------------------------------
+                # Current CoM reference
+                # --------------------------------------------
+
+                print(
+                    "\nCoM position reference ="
+                )
+
+                print(
+                    reference_generator.get_position_reference()
                 )
 
 
@@ -1425,13 +1498,21 @@ def main():
             # =================================================
             # NEXT CONTROL CYCLE
             #
-            # The state currently in MuJoCo is x_k+1.
+            # Current MuJoCo state:
             #
-            # At the beginning of the next loop:
+            #     x_k+1
+            #
+            # Next loop:
             #
             #     x_k <- x_k+1
             #
-            # and a new MPC input will be calculated.
+            # while the command layer independently updates:
+            #
+            #     p_ref,k
+            #
+            # according to:
+            #
+            #     v_CoM_cmd
             # =================================================
 
             mpc_iteration += 1
@@ -1548,6 +1629,15 @@ def main():
                 0:3
             ]
         )
+
+
+    print(
+        "\nFinal CoM position reference ="
+    )
+
+    print(
+        reference_generator.get_position_reference()
+    )
 
 
 # ============================================================
