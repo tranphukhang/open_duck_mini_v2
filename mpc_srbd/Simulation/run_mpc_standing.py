@@ -46,25 +46,17 @@ from simulation_setup import (
     initialize_simulation
 )
 
+from simulation_logger import (
+    SimulationLogger
+)
+
 
 # ============================================================
 # STATE
 # ============================================================
 
-from get_current_state import (
-    get_current_state
-)
-
-from W_euler_base import (
-    get_Ew_inverse
-)
-
-from W_moment_arm import (
-    get_W_moment_arm
-)
-
-from W_R_6 import (
-    get_W_R_6
+from get_current_state_mpc import (
+    get_current_state_mpc
 )
 
 
@@ -163,35 +155,6 @@ def main():
     )
 
 
-    model = setup[
-        "model"
-    ]
-
-    data = setup[
-        "data"
-    ]
-
-    steps_per_mpc_update = setup[
-        "steps_per_mpc_update"
-    ]
-
-    mass_CoM = setup[
-        "mass_CoM"
-    ]
-
-    W_inertia_CoM_q0 = setup[
-        "W_inertia_CoM_q0"
-    ]
-
-    reference_generator = setup[
-        "reference_generator"
-    ]
-
-    qp_solver = setup[
-        "qp_solver"
-    ]
-
-
     # ========================================================
     # 2. STANDING COMMAND
     # ========================================================
@@ -226,17 +189,7 @@ def main():
     # 3. LOGGING
     # ========================================================
 
-    log_time = []
-
-    log_x = []
-
-    log_u0 = []
-
-    log_tau = []
-
-    log_mpc_compute_time = []
-
-    log_qp_solve_time = []
+    logger = SimulationLogger()
 
 
     # ========================================================
@@ -253,15 +206,15 @@ def main():
 
 
     with mujoco.viewer.launch_passive(
-        model,
-        data
+        setup.model,
+        setup.data
     ) as viewer:
 
 
         while (
             viewer.is_running()
             and
-            data.time < SIM_DURATION
+            setup.data.time < SIM_DURATION
         ):
 
 
@@ -277,13 +230,19 @@ def main():
             # =================================================
             # STEP 1:
             #
-            # MEASURE x_k
+            # READ CURRENT MPC STATE
+            #
+            # All state/configuration-dependent quantities
+            # required by the current MPC cycle are updated here.
             # =================================================
 
-            x_k = get_current_state(
-                model,
-                data
+            current = get_current_state_mpc(
+                setup.model,
+                setup.data
             )
+
+
+            x_k = current.x
 
 
             # =================================================
@@ -293,7 +252,7 @@ def main():
             # =================================================
 
             X_ref = (
-                reference_generator.generate_reference(
+                setup.reference_generator.generate_reference(
                     v_CoM_cmd
                 )
             )
@@ -301,40 +260,6 @@ def main():
 
             # =================================================
             # STEP 3:
-            #
-            # UPDATE NONLINEAR QUANTITIES AT x_k
-            # =================================================
-
-            W_euler_base = x_k[
-                3:6
-            ]
-
-
-            Ew_inverse = get_Ew_inverse(
-                W_euler_base
-            )
-
-
-            (
-                W_r_L,
-                W_r_R
-            ) = get_W_moment_arm(
-                model,
-                data
-            )
-
-
-            (
-                L6_R_W,
-                R6_R_W
-            ) = get_W_R_6(
-                model,
-                data
-            )
-
-
-            # =================================================
-            # STEP 4:
             #
             # BUILD SRBD PREDICTION MODEL
             #
@@ -352,17 +277,17 @@ def main():
                 Gamma
             ) = build_SRBD_model(
 
-                Ew_inverse=Ew_inverse,
+                Ew_inverse=current.Ew_inverse,
 
-                mass_CoM=mass_CoM,
+                mass_CoM=setup.mass_CoM,
 
                 W_inertia_CoM=(
-                    W_inertia_CoM_q0
+                    setup.W_inertia_CoM_q0
                 ),
 
-                W_r_L=W_r_L,
+                W_r_L=current.W_r_L,
 
-                W_r_R=W_r_R,
+                W_r_R=current.W_r_R,
 
                 dt_mpc=dt_mpc,
 
@@ -371,7 +296,7 @@ def main():
 
 
             # =================================================
-            # STEP 5:
+            # STEP 4:
             #
             # BUILD QP
             # =================================================
@@ -394,19 +319,19 @@ def main():
 
                 N=N,
 
-                L6_R_W=L6_R_W,
+                L6_R_W=current.L6_R_W,
 
-                R6_R_W=R6_R_W
+                R6_R_W=current.R6_R_W
             )
 
 
             # =================================================
-            # STEP 6:
+            # STEP 5:
             #
             # SETUP AND SOLVE QP
             # =================================================
 
-            qp_solver.setup(
+            setup.qp_solver.setup(
                 H,
                 f,
                 A,
@@ -421,20 +346,20 @@ def main():
                 u0_opt,
                 solver_info,
                 post_diagnostics
-            ) = qp_solver.solve(
+            ) = setup.qp_solver.solve(
                 print_diagnostics=False
             )
 
 
             # =================================================
-            # STEP 7:
+            # STEP 6:
             #
             # CHECK MPC SOLUTION
             # =================================================
 
             if u0_opt is None:
 
-                data.ctrl[:] = 0.0
+                setup.data.ctrl[:] = 0.0
 
 
                 print("\n")
@@ -445,7 +370,7 @@ def main():
 
                 print(
                     "simulation time =",
-                    data.time,
+                    setup.data.time,
                     "s"
                 )
 
@@ -525,7 +450,7 @@ def main():
 
 
             # =================================================
-            # STEP 8:
+            # STEP 7:
             #
             # CURRENT MPC INPUT
             # =================================================
@@ -534,7 +459,7 @@ def main():
 
 
             # =================================================
-            # STEP 9:
+            # STEP 8:
             #
             # WRENCH -> JOINT TORQUE
             # =================================================
@@ -544,21 +469,21 @@ def main():
                 tau_L,
                 tau_R
             ) = get_joint_torque_from_MPC_wrench(
-                model,
-                data,
+                setup.model,
+                setup.data,
                 u_k
             )
 
 
             # =================================================
-            # STEP 10:
+            # STEP 9:
             #
             # APPLY JOINT TORQUE
             # =================================================
 
             apply_joint_torque(
-                model,
-                data,
+                setup.model,
+                setup.data,
                 tau_k
             )
 
@@ -578,71 +503,52 @@ def main():
             # LOG CURRENT CONTROL CYCLE
             # =================================================
 
-            log_time.append(
-                float(
-                    data.time
-                )
-            )
-
-
-            log_x.append(
-                x_k.copy()
-            )
-
-
-            log_u0.append(
-                u_k.copy()
-            )
-
-
-            log_tau.append(
-                tau_k.copy()
-            )
-
-
-            log_mpc_compute_time.append(
-                mpc_compute_time
-            )
-
-
-            log_qp_solve_time.append(
-                solver_info[
+            logger.log_step(
+                time=setup.data.time,
+                x=x_k,
+                u0=u_k,
+                tau=tau_k,
+                mpc_compute_time=mpc_compute_time,
+                qp_solve_time=solver_info[
                     "solve_time"
                 ]
             )
 
 
             # =================================================
-            # STEP 11:
+            # STEP 10:
             #
             # PROPAGATE MUJOCO PLANT
             # =================================================
 
             for _ in range(
-                steps_per_mpc_update
+                setup.steps_per_mpc_update
             ):
 
-                if data.time >= SIM_DURATION:
+                if setup.data.time >= SIM_DURATION:
 
                     break
 
 
                 mujoco.mj_step(
-                    model,
-                    data
+                    setup.model,
+                    setup.data
                 )
 
 
             # =================================================
-            # STEP 12:
+            # STEP 11:
             #
             # MEASURE x_k+1
             # =================================================
 
-            x_k_plus_1 = get_current_state(
-                model,
-                data
+            current_next = get_current_state_mpc(
+                setup.model,
+                setup.data
             )
+
+
+            x_k_plus_1 = current_next.x
 
 
             # =================================================
@@ -669,7 +575,7 @@ def main():
 
                 print(
                     "simulation time =",
-                    f"{data.time:.4f}",
+                    f"{setup.data.time:.4f}",
                     "s"
                 )
 
@@ -680,7 +586,7 @@ def main():
 
 
                 print(
-                    reference_generator.get_position_reference()
+                    setup.reference_generator.get_position_reference()
                 )
 
 
@@ -825,43 +731,10 @@ def main():
 
 
     # ========================================================
-    # 5. CONVERT LOGS
+    # 5. FINALIZE LOG
     # ========================================================
 
-    log_time = np.asarray(
-        log_time,
-        dtype=float
-    )
-
-
-    log_x = np.asarray(
-        log_x,
-        dtype=float
-    )
-
-
-    log_u0 = np.asarray(
-        log_u0,
-        dtype=float
-    )
-
-
-    log_tau = np.asarray(
-        log_tau,
-        dtype=float
-    )
-
-
-    log_mpc_compute_time = np.asarray(
-        log_mpc_compute_time,
-        dtype=float
-    )
-
-
-    log_qp_solve_time = np.asarray(
-        log_qp_solve_time,
-        dtype=float
-    )
+    logger.finalize()
 
 
     # ========================================================
@@ -880,38 +753,14 @@ def main():
     )
 
 
-    if log_mpc_compute_time.size > 0:
-
-        print(
-            "Average MPC compute time =",
-            np.mean(
-                log_mpc_compute_time
-            ),
-            "s"
-        )
+    logger.print_summary()
 
 
-        print(
-            "Maximum MPC compute time =",
-            np.max(
-                log_mpc_compute_time
-            ),
-            "s"
-        )
-
-
-    if log_qp_solve_time.size > 0:
-
-        print(
-            "Average OSQP solve time =",
-            np.mean(
-                log_qp_solve_time
-            ),
-            "s"
-        )
-
-
-    if log_x.shape[0] > 0:
+    if (
+        logger.x.ndim == 2
+        and
+        logger.x.shape[0] > 0
+    ):
 
         print(
             "\nInitial logged CoM ="
@@ -919,7 +768,7 @@ def main():
 
 
         print(
-            log_x[
+            logger.x[
                 0,
                 0:3
             ]
@@ -932,7 +781,7 @@ def main():
 
 
         print(
-            log_x[
+            logger.x[
                 -1,
                 0:3
             ]
@@ -945,7 +794,7 @@ def main():
 
 
     print(
-        reference_generator.get_position_reference()
+        setup.reference_generator.get_position_reference()
     )
 
 

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,60 @@ from QP_solver import (
 
 
 # ============================================================
+# SIMULATION SETUP DATA
+# ============================================================
+
+@dataclass
+class SimulationSetup:
+    """
+    Common objects and parameters required by SRBD-MPC
+    simulation scenarios.
+    """
+
+    # --------------------------------------------------------
+    # MuJoCo
+    # --------------------------------------------------------
+
+    model: object
+
+    data: object
+
+
+    # --------------------------------------------------------
+    # Simulation timing
+    # --------------------------------------------------------
+
+    dt_sim: float
+
+    steps_per_mpc_update: int
+
+
+    # --------------------------------------------------------
+    # Constant SRBD parameters
+    # --------------------------------------------------------
+
+    mass_CoM: float
+
+    W_inertia_CoM_q0: np.ndarray
+
+
+    # --------------------------------------------------------
+    # Initial state
+    # --------------------------------------------------------
+
+    x_initial: np.ndarray
+
+
+    # --------------------------------------------------------
+    # MPC components
+    # --------------------------------------------------------
+
+    reference_generator: ReferenceGenerator
+
+    qp_solver: QPSolver
+
+
+# ============================================================
 # INITIALIZE SIMULATION
 # ============================================================
 
@@ -58,37 +113,56 @@ def initialize_simulation(
     qp_constraint_tolerance=1e-4
 ):
     """
-    Initialize the common components required by SRBD-MPC
-    simulations.
+    Initialize all common components required by an SRBD-MPC
+    MuJoCo simulation.
 
-    This function performs:
+    Processing sequence
+    -------------------
 
-        1. Load MuJoCo model
-        2. Create MuJoCo data
-        3. Configure simulation timing
-        4. Reset robot to home keyframe
-        5. Update MuJoCo kinematics/dynamics
-        6. Compute constant SRBD parameters
-        7. Read initial state
-        8. Initialize reference generator
-        9. Initialize QP solver
+        XML
+         |
+         v
+    MuJoCo model/data
+         |
+         v
+    Simulation timing
+         |
+         v
+    Home keyframe reset
+         |
+         v
+    MuJoCo forward update
+         |
+         v
+    Constant SRBD parameters
+         |
+         v
+    Initial state x_0
+         |
+         v
+    ReferenceGenerator
+         |
+         v
+    QPSolver
 
 
     Parameters
     ----------
     xml_path : str or pathlib.Path
 
-        Path to the MuJoCo scene XML.
+        Path to MuJoCo scene XML.
 
 
     horizon : int
 
-        MPC prediction horizon N.
+        MPC prediction horizon:
+
+            N
 
 
     dt_mpc : float
 
-        MPC prediction discretization step.
+        MPC prediction discretization period.
 
 
     dt_mpc_update : float
@@ -98,7 +172,7 @@ def initialize_simulation(
 
     home_key_name : str
 
-        Name of MuJoCo keyframe used for initialization.
+        MuJoCo keyframe used to initialize the robot.
 
         Default:
 
@@ -112,17 +186,17 @@ def initialize_simulation(
 
     qp_eps_abs : float
 
-        OSQP absolute tolerance.
+        OSQP absolute convergence tolerance.
 
 
     qp_eps_rel : float
 
-        OSQP relative tolerance.
+        OSQP relative convergence tolerance.
 
 
     qp_max_iter : int
 
-        Maximum number of OSQP iterations.
+        Maximum OSQP iterations.
 
 
     qp_polishing : bool
@@ -142,27 +216,27 @@ def initialize_simulation(
 
     Returns
     -------
-    setup : dict
+    setup : SimulationSetup
 
-        Dictionary containing:
+        Common simulation setup containing:
 
-            model
+            setup.model
 
-            data
+            setup.data
 
-            dt_sim
+            setup.dt_sim
 
-            steps_per_mpc_update
+            setup.steps_per_mpc_update
 
-            mass_CoM
+            setup.mass_CoM
 
-            W_inertia_CoM_q0
+            setup.W_inertia_CoM_q0
 
-            x_initial
+            setup.x_initial
 
-            reference_generator
+            setup.reference_generator
 
-            qp_solver
+            setup.qp_solver
     """
 
 
@@ -239,7 +313,13 @@ def initialize_simulation(
 
     # --------------------------------------------------------
     # MPC update period must correspond to an integer number
-    # of MuJoCo integration steps.
+    # of MuJoCo integration steps:
+    #
+    #     dt_mpc_update
+    #
+    #         =
+    #
+    #     steps_per_mpc_update * dt_sim
     # --------------------------------------------------------
 
     if not np.isclose(
@@ -275,6 +355,10 @@ def initialize_simulation(
         )
 
 
+    # --------------------------------------------------------
+    # Reset robot state to the selected keyframe.
+    # --------------------------------------------------------
+
     mujoco.mj_resetDataKeyframe(
         model,
         data,
@@ -283,7 +367,7 @@ def initialize_simulation(
 
 
     # --------------------------------------------------------
-    # Update all MuJoCo derived quantities at q0.
+    # Update MuJoCo derived quantities at q0.
     #
     # These operations do not advance simulation time.
     # --------------------------------------------------------
@@ -310,8 +394,12 @@ def initialize_simulation(
 
 
     # --------------------------------------------------------
-    # Current SRBD formulation freezes the CoM inertia tensor
-    # at the initial configuration q0.
+    # Freeze CoM inertia tensor at the initial configuration:
+    #
+    #     q = q0
+    #
+    # Current SRBD-MPC implementation keeps this inertia
+    # constant during simulation.
     # --------------------------------------------------------
 
     W_inertia_CoM_q0 = (
@@ -364,7 +452,7 @@ def initialize_simulation(
 
 
     # ========================================================
-    # 9. PRINT COMMON INITIALIZATION INFORMATION
+    # 9. PRINT INITIALIZATION INFORMATION
     # ========================================================
 
     print("\n")
@@ -458,38 +546,39 @@ def initialize_simulation(
 
 
     # ========================================================
-    # 10. RETURN SETUP
+    # 10. BUILD SETUP OBJECT
     # ========================================================
 
-    setup = {
+    setup = SimulationSetup(
 
-        "model":
-            model,
+        model=model,
 
-        "data":
-            data,
+        data=data,
 
-        "dt_sim":
-            dt_sim,
+        dt_sim=dt_sim,
 
-        "steps_per_mpc_update":
-            steps_per_mpc_update,
+        steps_per_mpc_update=(
+            steps_per_mpc_update
+        ),
 
-        "mass_CoM":
-            mass_CoM,
+        mass_CoM=mass_CoM,
 
-        "W_inertia_CoM_q0":
-            W_inertia_CoM_q0,
+        W_inertia_CoM_q0=(
+            W_inertia_CoM_q0
+        ),
 
-        "x_initial":
-            x_initial,
+        x_initial=x_initial,
 
-        "reference_generator":
-            reference_generator,
+        reference_generator=(
+            reference_generator
+        ),
 
-        "qp_solver":
-            qp_solver
-    }
+        qp_solver=qp_solver
+    )
 
+
+    # ========================================================
+    # 11. RETURN
+    # ========================================================
 
     return setup
