@@ -20,6 +20,7 @@ def build_and_solve_QP(
     N,
     L6_R_W,
     R6_R_W,
+    contact_schedule,
     print_diagnostics=False
 ):
     """
@@ -34,6 +35,7 @@ def build_and_solve_QP(
         N
         L6_R_W
         R6_R_W
+        contact_schedule
             |
             v
     build_QP_problem()
@@ -89,14 +91,41 @@ def build_and_solve_QP(
 
     L6_R_W : np.ndarray
 
-        Rotation matrix associated with the left foot
-        configuration used by the QP constraints.
+        Rotation matrix:
+
+            World -> L6
+
+        used by the QP moment constraints.
 
 
     R6_R_W : np.ndarray
 
-        Rotation matrix associated with the right foot
-        configuration used by the QP constraints.
+        Rotation matrix:
+
+            World -> R6
+
+        used by the QP moment constraints.
+
+
+    contact_schedule : np.ndarray
+
+        Contact schedule over the MPC prediction horizon.
+
+        Shape:
+
+            (N, 2)
+
+        Column convention:
+
+            [:, 0] = left foot
+
+            [:, 1] = right foot
+
+        Contact convention:
+
+            1 = stance / contact
+
+            0 = swing / non-contact
 
 
     print_diagnostics : bool
@@ -157,7 +186,9 @@ def build_and_solve_QP(
 
         L6_R_W=L6_R_W,
 
-        R6_R_W=R6_R_W
+        R6_R_W=R6_R_W,
+
+        contact_schedule=contact_schedule
     )
 
 

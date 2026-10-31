@@ -12,14 +12,22 @@ import mujoco.viewer
 # ============================================================
 
 SIMULATION_DIR = Path(__file__).resolve().parent
+
 MPC_SRBD_DIR = SIMULATION_DIR.parent
+
 REPO_ROOT = MPC_SRBD_DIR.parent
 
+
 STATE_DIR = MPC_SRBD_DIR / "State"
+
 SRBD_DIR = MPC_SRBD_DIR / "SRBD"
+
 QP_DIR = MPC_SRBD_DIR / "QP"
+
 KINEMATICS_DIR = MPC_SRBD_DIR / "Kinematics"
+
 ACTUATOR_DIR = MPC_SRBD_DIR / "Actuator"
+
 COMMAND_DIR = MPC_SRBD_DIR / "Command"
 
 
@@ -31,7 +39,9 @@ for directory in (
     ACTUATOR_DIR,
     COMMAND_DIR
 ):
+
     if str(directory) not in sys.path:
+
         sys.path.insert(
             0,
             str(directory)
@@ -157,6 +167,12 @@ def main():
 
     # ========================================================
     # 2. STANDING COMMAND
+    #
+    # Standing:
+    #
+    #     v_CoM_cmd = 0
+    #
+    # nên CoM reference position được giữ cố định.
     # ========================================================
 
     v_CoM_cmd = np.array(
@@ -186,14 +202,125 @@ def main():
 
 
     # ========================================================
-    # 3. LOGGING
+    # 3. STANDING CONTACT SCHEDULE
+    #
+    # Standing test luôn sử dụng DOUBLE SUPPORT.
+    #
+    # Contact convention:
+    #
+    #     1 = stance / contact
+    #
+    #     0 = swing / non-contact
+    #
+    #
+    # Vì cả hai chân luôn stance:
+    #
+    #     [c_L, c_R] = [1, 1]
+    #
+    #
+    # Contact schedule trên toàn prediction horizon:
+    #
+    #     contact_schedule =
+    #
+    #     [
+    #         [1, 1],
+    #         [1, 1],
+    #         ...
+    #         [1, 1]
+    #     ]
+    #
+    # Shape:
+    #
+    #     (N, 2)
+    #
+    #
+    # Lưu ý:
+    #
+    # Standing test không sử dụng open-loop walking contact
+    # schedule trong Command/contact_schedule.py.
+    #
+    # Walking contact schedule sẽ được dùng sau khi bổ sung:
+    #
+    #     footstep planner
+    #
+    #     swing-foot trajectory planner
+    # ========================================================
+
+    contact_schedule = np.tile(
+
+        np.array(
+            [
+                1,
+                1
+            ],
+            dtype=int
+        ),
+
+        (
+            N,
+            1
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Validate standing contact schedule
+    # --------------------------------------------------------
+
+    if contact_schedule.shape != (
+        N,
+        2
+    ):
+
+        raise RuntimeError(
+            "Standing contact_schedule phải có "
+            f"shape ({N}, 2)."
+        )
+
+
+    if not np.all(
+        contact_schedule
+        ==
+        1
+    ):
+
+        raise RuntimeError(
+            "Standing contact_schedule phải luôn là "
+            "[1, 1] cho toàn prediction horizon."
+        )
+
+
+    print("\n")
+    print("=" * 70)
+    print("STANDING CONTACT SCHEDULE")
+    print("=" * 70)
+
+
+    print(
+        "contact_schedule shape =",
+        contact_schedule.shape
+    )
+
+
+    print(
+        "\ncontact_schedule ="
+    )
+
+
+    print(
+        contact_schedule
+    )
+
+
+    # ========================================================
+    # 4. LOGGING
     # ========================================================
 
     logger = SimulationLogger()
 
 
     # ========================================================
-    # 4. CLOSED-LOOP SIMULATION
+    # 5. CLOSED-LOOP SIMULATION
     # ========================================================
 
     mpc_iteration = 0
@@ -299,6 +426,27 @@ def main():
             # STEP 4:
             #
             # BUILD AND SOLVE QP
+            #
+            # Standing contact:
+            #
+            #     contact_schedule[k] = [1, 1]
+            #
+            # for every:
+            #
+            #     k = 0, ..., N-1
+            #
+            # Therefore Eq. (2b):
+            #
+            #     (1 - c_k,i) u_k,i = 0
+            #
+            # becomes:
+            #
+            #     0 * u_k,i = 0
+            #
+            # for both feet.
+            #
+            # Both feet are therefore allowed to generate
+            # contact wrench during standing.
             # =================================================
 
             (
@@ -323,6 +471,8 @@ def main():
                 L6_R_W=current.L6_R_W,
 
                 R6_R_W=current.R6_R_W,
+
+                contact_schedule=contact_schedule,
 
                 print_diagnostics=False
             )
@@ -628,6 +778,22 @@ def main():
 
 
                 # ---------------------------------------------
+                # Current contact mode
+                # ---------------------------------------------
+
+                print(
+                    "\nStanding contact ="
+                )
+
+
+                print(
+                    contact_schedule[
+                        0
+                    ]
+                )
+
+
+                # ---------------------------------------------
                 # Current MPC wrench
                 # ---------------------------------------------
 
@@ -740,14 +906,14 @@ def main():
 
 
     # ========================================================
-    # 5. FINALIZE LOG
+    # 6. FINALIZE LOG
     # ========================================================
 
     logger.finalize()
 
 
     # ========================================================
-    # 6. FINAL SUMMARY
+    # 7. FINAL SUMMARY
     # ========================================================
 
     print("\n")
