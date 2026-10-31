@@ -739,7 +739,7 @@ def main():
         max_iter=1000,
         polishing=True,
         enable_warm_start=False,
-        constraint_tolerance=1e-3
+        constraint_tolerance=1e-4
     )
 
 
