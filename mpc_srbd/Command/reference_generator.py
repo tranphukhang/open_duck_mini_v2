@@ -67,6 +67,18 @@ class ReferenceGenerator:
         dt_update * v_CoM_cmd
 
 
+    The desired CoM linear velocity is also stored as:
+
+        W_p_dot_CoM_ref
+
+    corresponding to:
+
+        {}^W p_dot_CoM^ref
+
+    This reference velocity can be shared with other modules,
+    especially the Raibert foothold planner.
+
+
     This distinction is important because:
 
         dt_prediction
@@ -106,6 +118,7 @@ class ReferenceGenerator:
         # ----------------------------------------------------
 
         if x_initial.shape != (13,):
+
             raise ValueError(
                 "x_initial phải có shape (13,), "
                 f"nhưng nhận được {x_initial.shape}."
@@ -117,6 +130,7 @@ class ReferenceGenerator:
                 x_initial
             )
         ):
+
             raise ValueError(
                 "x_initial chứa NaN hoặc Inf."
             )
@@ -130,12 +144,14 @@ class ReferenceGenerator:
             horizon,
             (int, np.integer)
         ):
+
             raise TypeError(
                 "horizon phải là số nguyên."
             )
 
 
         if horizon <= 0:
+
             raise ValueError(
                 "horizon phải > 0."
             )
@@ -151,10 +167,13 @@ class ReferenceGenerator:
 
 
         if (
-            not np.isfinite(dt_prediction)
+            not np.isfinite(
+                dt_prediction
+            )
             or
             dt_prediction <= 0.0
         ):
+
             raise ValueError(
                 "dt_prediction phải là số hữu hạn và > 0."
             )
@@ -170,10 +189,13 @@ class ReferenceGenerator:
 
 
         if (
-            not np.isfinite(dt_update)
+            not np.isfinite(
+                dt_update
+            )
             or
             dt_update <= 0.0
         ):
+
             raise ValueError(
                 "dt_update phải là số hữu hạn và > 0."
             )
@@ -185,13 +207,16 @@ class ReferenceGenerator:
 
         self.nx = 13
 
+
         self.horizon = int(
             horizon
         )
 
+
         self.dt_prediction = (
             dt_prediction
         )
+
 
         self.dt_update = (
             dt_update
@@ -214,6 +239,24 @@ class ReferenceGenerator:
         ].copy()
 
 
+        # ====================================================
+        # INITIAL CoM VELOCITY REFERENCE
+        #
+        # Before the first velocity command is received:
+        #
+        #     {}^W p_dot_CoM^ref = [0, 0, 0]
+        #
+        # This reference will later be updated by:
+        #
+        #     v_CoM_cmd
+        # ====================================================
+
+        self.W_p_dot_CoM_ref = np.zeros(
+            3,
+            dtype=float
+        )
+
+
     # ========================================================
     # VELOCITY COMMAND VALIDATION
     # ========================================================
@@ -230,6 +273,7 @@ class ReferenceGenerator:
 
 
         if v_CoM_cmd.shape != (3,):
+
             raise ValueError(
                 "v_CoM_cmd phải có shape (3,), "
                 f"nhưng nhận được {v_CoM_cmd.shape}."
@@ -241,6 +285,7 @@ class ReferenceGenerator:
                 v_CoM_cmd
             )
         ):
+
             raise ValueError(
                 "v_CoM_cmd chứa NaN hoặc Inf."
             )
@@ -301,7 +346,31 @@ class ReferenceGenerator:
 
 
         # ====================================================
-        # 2. ALLOCATE REFERENCE TRAJECTORY
+        # 2. STORE CURRENT CoM VELOCITY REFERENCE
+        #
+        # The desired CoM linear velocity command is also
+        # the reference velocity used by the foothold planner.
+        #
+        # Therefore:
+        #
+        #     W_p_dot_CoM_ref
+        #
+        # corresponds to:
+        #
+        #     {}^W p_dot_CoM^ref
+        #
+        # and:
+        #
+        #     W_p_dot_CoM_ref = v_CoM_cmd
+        # ====================================================
+
+        self.W_p_dot_CoM_ref = (
+            v_CoM_cmd.copy()
+        )
+
+
+        # ====================================================
+        # 3. ALLOCATE REFERENCE TRAJECTORY
         # ====================================================
 
         X_ref_matrix = np.zeros(
@@ -314,7 +383,7 @@ class ReferenceGenerator:
 
 
         # ====================================================
-        # 3. BUILD REFERENCE OVER MPC HORIZON
+        # 4. BUILD REFERENCE OVER MPC HORIZON
         # ====================================================
 
         for i in range(
@@ -393,12 +462,18 @@ class ReferenceGenerator:
 
             # ------------------------------------------------
             # CoM linear velocity reference
+            #
+            #     {}^W p_dot_CoM^ref
+            #
+            # =
+            #
+            #     v_CoM_cmd
             # ------------------------------------------------
 
             X_ref_matrix[
                 i,
                 6:9
-            ] = v_CoM_cmd
+            ] = self.W_p_dot_CoM_ref
 
 
             # ------------------------------------------------
@@ -426,7 +501,7 @@ class ReferenceGenerator:
 
 
         # ====================================================
-        # 4. STACK INTO MPC FORMAT
+        # 5. STACK INTO MPC FORMAT
         #
         # X_ref =
         #
@@ -446,7 +521,7 @@ class ReferenceGenerator:
 
 
         # ====================================================
-        # 5. FINAL VALIDATION
+        # 6. FINAL VALIDATION
         # ====================================================
 
         expected_shape = (
@@ -457,6 +532,7 @@ class ReferenceGenerator:
 
 
         if X_ref.shape != expected_shape:
+
             raise RuntimeError(
                 "X_ref sai kích thước. "
                 f"Expected {expected_shape}, "
@@ -469,13 +545,14 @@ class ReferenceGenerator:
                 X_ref
             )
         ):
+
             raise RuntimeError(
                 "X_ref chứa NaN hoặc Inf."
             )
 
 
         # ====================================================
-        # 6. ADVANCE INTERNAL REFERENCE
+        # 7. ADVANCE INTERNAL REFERENCE
         #
         # IMPORTANT:
         #
@@ -498,9 +575,13 @@ class ReferenceGenerator:
             +
             self.dt_update
             *
-            v_CoM_cmd
+            self.W_p_dot_CoM_ref
         )
 
+
+        # ====================================================
+        # 8. RETURN
+        # ====================================================
 
         return X_ref
 
@@ -515,6 +596,108 @@ class ReferenceGenerator:
         """
         Return the current internally stored CoM position
         reference.
+
+        Returns
+        -------
+        p_ref : np.ndarray, shape (3,)
+
+            Current CoM position reference in World frame [m].
         """
 
-        return self.p_ref.copy()
+        p_ref = (
+            self.p_ref.copy()
+        )
+
+
+        if p_ref.shape != (
+            3,
+        ):
+
+            raise RuntimeError(
+                "p_ref phải có shape (3,), "
+                f"nhưng nhận được {p_ref.shape}."
+            )
+
+
+        if not np.all(
+            np.isfinite(
+                p_ref
+            )
+        ):
+
+            raise RuntimeError(
+                "p_ref chứa NaN hoặc Inf."
+            )
+
+
+        return p_ref
+
+
+    # ========================================================
+    # GET CURRENT CoM VELOCITY REFERENCE
+    # ========================================================
+
+    def get_velocity_reference(
+        self
+    ):
+        """
+        Return the current CoM linear velocity reference
+        expressed in the World frame.
+
+        Returns
+        -------
+        W_p_dot_CoM_ref : np.ndarray, shape (3,)
+
+            Current desired CoM linear velocity:
+
+                [
+                    vx_CoM_ref,
+                    vy_CoM_ref,
+                    vz_CoM_ref
+                ]
+
+            expressed in the World frame.
+
+        Notation
+        --------
+
+            {}^W p_dot_CoM^ref
+
+        Unit
+        ----
+
+            [m/s]
+        """
+
+        W_p_dot_CoM_ref = (
+            self.W_p_dot_CoM_ref.copy()
+        )
+
+
+        # ----------------------------------------------------
+        # Validation
+        # ----------------------------------------------------
+
+        if W_p_dot_CoM_ref.shape != (
+            3,
+        ):
+
+            raise RuntimeError(
+                "W_p_dot_CoM_ref phải có shape (3,), "
+                f"nhưng nhận được "
+                f"{W_p_dot_CoM_ref.shape}."
+            )
+
+
+        if not np.all(
+            np.isfinite(
+                W_p_dot_CoM_ref
+            )
+        ):
+
+            raise RuntimeError(
+                "W_p_dot_CoM_ref chứa NaN hoặc Inf."
+            )
+
+
+        return W_p_dot_CoM_ref
