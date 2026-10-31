@@ -42,20 +42,11 @@ for directory in (
 # STATE
 # ============================================================
 
-from W_position_CoM import (
-    get_W_position_CoM
-)
-
-from W_linear_velocity_CoM import (
-    get_W_linear_velocity_CoM
-)
-
-from W_angular_velocity_base import (
-    get_W_angular_velocity_base
+from get_current_state import (
+    get_current_state
 )
 
 from W_euler_base import (
-    get_W_euler_base,
     get_Ew_inverse
 )
 
@@ -109,6 +100,10 @@ from QP_problem import (
 
 from QP_solver import (
     QPSolver
+)
+
+from QP_diagnostics import (
+    print_QP_diagnostics
 )
 
 
@@ -171,276 +166,6 @@ XML_PATH = (
 
 
 # ============================================================
-# READ CURRENT STATE
-# ============================================================
-
-def get_current_state(
-    model,
-    data
-):
-    """
-    Read current SRBD state x_k.
-
-    State:
-
-        x =
-        [
-            p_CoM,
-            euler_base,
-            v_CoM,
-            omega_base,
-            1
-        ]
-
-    Important:
-
-        mj_forward()
-
-    does NOT advance simulation time.
-
-    Only:
-
-        mj_step()
-
-    advances the plant.
-    """
-
-    # --------------------------------------------------------
-    # Synchronize MuJoCo derived quantities
-    # --------------------------------------------------------
-
-    mujoco.mj_forward(
-        model,
-        data
-    )
-
-
-    # --------------------------------------------------------
-    # Update subtree CoM velocity
-    # --------------------------------------------------------
-
-    mujoco.mj_subtreeVel(
-        model,
-        data
-    )
-
-
-    # --------------------------------------------------------
-    # Read state components
-    # --------------------------------------------------------
-
-    W_position_CoM = (
-        get_W_position_CoM(
-            model,
-            data
-        )
-    )
-
-
-    W_euler_base = (
-        get_W_euler_base(
-            model,
-            data
-        )
-    )
-
-
-    W_linear_velocity_CoM = (
-        get_W_linear_velocity_CoM(
-            model,
-            data
-        )
-    )
-
-
-    W_angular_velocity_base = (
-        get_W_angular_velocity_base(
-            model,
-            data
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # Assemble augmented state
-    # --------------------------------------------------------
-
-    x_current = np.concatenate([
-        W_position_CoM,
-        W_euler_base,
-        W_linear_velocity_CoM,
-        W_angular_velocity_base,
-        np.array([1.0])
-    ])
-
-
-    if x_current.shape != (13,):
-
-        raise RuntimeError(
-            "x_current phải có shape (13,), "
-            f"nhưng nhận được {x_current.shape}."
-        )
-
-
-    if not np.all(
-        np.isfinite(
-            x_current
-        )
-    ):
-
-        raise RuntimeError(
-            "x_current chứa NaN hoặc Inf."
-        )
-
-
-    return x_current
-
-
-# ============================================================
-# PRINT QP FAILURE
-# ============================================================
-
-def print_QP_failure(
-    data,
-    mpc_iteration,
-    solver_info,
-    post_diagnostics
-):
-    """
-    Print detailed information when OSQP reports a solution
-    but post-solve diagnostics reject it.
-    """
-
-    print("\n")
-    print("=" * 70)
-    print("QP SOLUTION REJECTED")
-    print("=" * 70)
-
-
-    print(
-        "simulation time =",
-        data.time,
-        "s"
-    )
-
-
-    print(
-        "MPC iteration =",
-        mpc_iteration
-    )
-
-
-    print("\nSolver information:")
-
-
-    print(
-        "status =",
-        solver_info.get(
-            "status"
-        )
-    )
-
-
-    print(
-        "status_val =",
-        solver_info.get(
-            "status_val"
-        )
-    )
-
-
-    print(
-        "iterations =",
-        solver_info.get(
-            "iterations"
-        )
-    )
-
-
-    print(
-        "primal_residual =",
-        solver_info.get(
-            "primal_residual"
-        )
-    )
-
-
-    print(
-        "dual_residual =",
-        solver_info.get(
-            "dual_residual"
-        )
-    )
-
-
-    print(
-        "setup_time =",
-        solver_info.get(
-            "setup_time"
-        )
-    )
-
-
-    print(
-        "solve_time =",
-        solver_info.get(
-            "solve_time"
-        )
-    )
-
-
-    print(
-        "run_time =",
-        solver_info.get(
-            "run_time"
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # Post diagnostics
-    # --------------------------------------------------------
-
-    if post_diagnostics is None:
-
-        print(
-            "\npost_diagnostics = None"
-        )
-
-        return
-
-
-    print("\nPost-solve diagnostics:")
-
-
-    keys_to_print = (
-        "solution_dimension_ok",
-        "solution_finite",
-        "objective_value",
-        "objective_finite",
-        "max_lower_violation",
-        "max_upper_violation",
-        "max_violation",
-        "constraint_ok",
-        "solver_status",
-        "solver_status_val",
-        "solution_ok",
-        "errors",
-        "warnings"
-    )
-
-
-    for key in keys_to_print:
-
-        print(
-            f"{key} =",
-            post_diagnostics.get(
-                key
-            )
-        )
-
-
-# ============================================================
 # MAIN
 # ============================================================
 
@@ -486,7 +211,8 @@ def main():
 
 
     # --------------------------------------------------------
-    # dt_mpc_update must be an integer number of MuJoCo steps
+    # dt_mpc_update must be an integer number
+    # of MuJoCo simulation steps.
     # --------------------------------------------------------
 
     if not np.isclose(
@@ -510,35 +236,35 @@ def main():
 
 
     print(
-        "dt_sim            =",
+        "dt_sim             =",
         dt_sim,
         "s"
     )
 
 
     print(
-        "dt_mpc            =",
+        "dt_mpc             =",
         dt_mpc,
         "s"
     )
 
 
     print(
-        "dt_mpc_update     =",
+        "dt_mpc_update      =",
         dt_mpc_update,
         "s"
     )
 
 
     print(
-        "MPC update rate   =",
+        "MPC update rate    =",
         1.0 / dt_mpc_update,
         "Hz"
     )
 
 
     print(
-        "MuJoCo steps/MPC  =",
+        "MuJoCo steps/MPC   =",
         steps_per_mpc_update
     )
 
@@ -569,7 +295,7 @@ def main():
 
 
     # --------------------------------------------------------
-    # Reset MuJoCo state to keyframe "home"
+    # Reset MuJoCo state to home configuration.
     # --------------------------------------------------------
 
     mujoco.mj_resetDataKeyframe(
@@ -580,9 +306,9 @@ def main():
 
 
     # --------------------------------------------------------
-    # Update kinematics/dynamics at the home configuration
+    # Update MuJoCo derived quantities.
     #
-    # mj_forward does NOT advance simulation time.
+    # These functions do NOT advance simulation time.
     # --------------------------------------------------------
 
     mujoco.mj_forward(
@@ -607,7 +333,7 @@ def main():
 
 
     # --------------------------------------------------------
-    # Freeze ICoM at initial configuration q0
+    # Freeze ICoM at initial configuration q0.
     # --------------------------------------------------------
 
     W_inertia_CoM_q0 = (
@@ -635,6 +361,7 @@ def main():
         "\nW_inertia_CoM(q0) ="
     )
 
+
     print(
         W_inertia_CoM_q0
     )
@@ -651,7 +378,7 @@ def main():
 
 
     # --------------------------------------------------------
-    # Desired CoM linear velocity command [m/s]
+    # Desired CoM linear velocity command [m/s].
     #
     # Current standing test:
     #
@@ -671,23 +398,10 @@ def main():
 
 
     # --------------------------------------------------------
-    # Initialize reference generator
+    # Reference generator.
     #
-    # The generator stores its own CoM position reference.
-    #
-    # Therefore:
-    #
-    #     p_ref
-    #
-    # is independent of the measured robot state x_k.
-    #
-    # Prediction grid:
-    #
-    #     dt_prediction = dt_mpc
-    #
-    # Reference update:
-    #
-    #     dt_update = dt_mpc_update
+    # Position reference is maintained internally and does
+    # not follow measured x_k.
     # --------------------------------------------------------
 
     reference_generator = ReferenceGenerator(
@@ -708,6 +422,7 @@ def main():
         "x_0 ="
     )
 
+
     print(
         x_initial
     )
@@ -716,6 +431,7 @@ def main():
     print(
         "\nv_CoM_cmd [m/s] ="
     )
+
 
     print(
         v_CoM_cmd
@@ -726,6 +442,7 @@ def main():
         "\nInitial CoM position reference ="
     )
 
+
     print(
         reference_generator.get_position_reference()
     )
@@ -733,14 +450,6 @@ def main():
 
     # ========================================================
     # 6. QP SOLVER
-    #
-    # For first integration test:
-    #
-    # - rebuild QP every cycle
-    # - setup OSQP every cycle
-    # - no warm start yet
-    #
-    # This is intentionally not optimized for real-time.
     # ========================================================
 
     qp_solver = QPSolver(
@@ -800,35 +509,31 @@ def main():
             # =================================================
             # CURRENT CONTROL CYCLE
             #
-            # At this instant:
-            #
-            #                x_k
-            #
-            # Control sequence:
-            #
             # x_k
             #  |
             #  v
-            # Command / Reference Generator
+            # Reference Generator
             #  |
             #  v
             # X_ref
             #  |
             #  v
-            # MPC
+            # SRBD-MPC
             #  |
             #  v
             # u_k
             #  |
             #  v
+            # Wrench -> Joint Torque
+            #  |
+            #  v
             # tau_k
             #  |
             #  v
-            # MuJoCo plant
+            # MuJoCo
             #  |
             #  v
             # x_k+1
-            #
             # =================================================
 
             mpc_compute_start = (
@@ -852,29 +557,6 @@ def main():
             # STEP 2:
             #
             # GENERATE MPC REFERENCE
-            #
-            # Input:
-            #
-            #     v_CoM_cmd
-            #
-            # Output:
-            #
-            #     X_ref
-            #
-            # ReferenceGenerator maintains p_ref internally.
-            #
-            # Therefore:
-            #
-            #     p_ref != measured p_CoM
-            #
-            # in general.
-            #
-            # For current standing command:
-            #
-            #     v_CoM_cmd = [0, 0, 0]
-            #
-            # p_ref remains equal to the initial home CoM
-            # position.
             # =================================================
 
             X_ref = (
@@ -889,8 +571,8 @@ def main():
             #
             # UPDATE NONLINEAR QUANTITIES AT x_k
             #
-            # These values are frozen over the current
-            # MPC prediction horizon.
+            # These quantities are frozen over the current
+            # prediction horizon.
             # =================================================
 
             W_euler_base = x_k[
@@ -924,9 +606,9 @@ def main():
             # =================================================
             # STEP 4:
             #
-            # CONTINUOUS SRBD
+            # CONTINUOUS SRBD MODEL
             #
-            # x_dot = Ac x + Bc u
+            #     x_dot = Ac x + Bc u
             # =================================================
 
             (
@@ -951,15 +633,9 @@ def main():
             # =================================================
             # STEP 5:
             #
-            # MPC DISCRETIZATION
+            # DISCRETIZE SRBD MODEL
             #
-            # IMPORTANT:
-            #
-            #     dt_mpc = prediction-grid spacing
-            #
-            # Current:
-            #
-            #     dt_mpc = 0.025 s
+            #     x_k+1 = Ad x_k + Bd u_k
             # =================================================
 
             (
@@ -975,15 +651,9 @@ def main():
             # =================================================
             # STEP 6:
             #
-            # PREDICTION MODEL
+            # BUILD PREDICTION MODEL
             #
-            # X =
-            #
-            # Phi x_k
-            #
-            # +
-            #
-            # Gamma U
+            #     X = Phi x_k + Gamma U
             # =================================================
 
             (
@@ -999,13 +669,7 @@ def main():
             # =================================================
             # STEP 7:
             #
-            # BUILD QP USING CURRENT x_k
-            #
-            # Tracking reference:
-            #
-            #     X_ref
-            #
-            # is provided by ReferenceGenerator.
+            # BUILD QP
             # =================================================
 
             (
@@ -1035,24 +699,7 @@ def main():
             # =================================================
             # STEP 8:
             #
-            # SOLVE MPC
-            #
-            # U* =
-            #
-            # [
-            #     u_k
-            #     u_k+1
-            #     ...
-            #     u_k+N-1
-            # ]
-            #
-            # Receding-horizon control:
-            #
-            # only:
-            #
-            #     u_k = u0_opt
-            #
-            # is applied to the plant.
+            # SETUP AND SOLVE QP
             # =================================================
 
             qp_solver.setup(
@@ -1080,38 +727,123 @@ def main():
             #
             # CHECK MPC SOLUTION
             #
-            # Important:
+            # u0_opt can be None in two situations:
             #
-            # OSQP status = solved
+            # 1. OSQP failed to produce a candidate solution.
             #
-            # does NOT necessarily mean:
-            #
-            #     u0_opt != None
-            #
-            # because post-solve diagnostics may reject
-            # the solution.
+            # 2. OSQP produced a solution, but post-solve
+            #    diagnostics rejected it.
             # =================================================
 
             if u0_opt is None:
 
-                # Remove torque before stopping
+                # --------------------------------------------
+                # Remove all joint torques before stopping.
+                # --------------------------------------------
 
                 data.ctrl[:] = 0.0
 
 
-                print_QP_failure(
-                    data=data,
-                    mpc_iteration=mpc_iteration,
-                    solver_info=solver_info,
-                    post_diagnostics=(
-                        post_diagnostics
-                    )
+                print("\n")
+                print("=" * 70)
+                print("MPC STOPPED")
+                print("=" * 70)
+
+
+                print(
+                    "simulation time =",
+                    data.time,
+                    "s"
                 )
 
 
+                print(
+                    "MPC iteration =",
+                    mpc_iteration
+                )
+
+
+                # --------------------------------------------
+                # Case 1:
+                #
+                # OSQP produced a candidate solution.
+                #
+                # The candidate was then rejected by
+                # check_QP_after_solve().
+                # --------------------------------------------
+
+                if post_diagnostics is not None:
+
+                    print_QP_diagnostics(
+                        post_diagnostics
+                    )
+
+
+                # --------------------------------------------
+                # Case 2:
+                #
+                # OSQP failed before a candidate solution
+                # could be post-checked.
+                # --------------------------------------------
+
+                else:
+
+                    print(
+                        "\nOSQP solver information:"
+                    )
+
+
+                    print(
+                        "status =",
+                        solver_info.get(
+                            "status"
+                        )
+                    )
+
+
+                    print(
+                        "status_val =",
+                        solver_info.get(
+                            "status_val"
+                        )
+                    )
+
+
+                    print(
+                        "iterations =",
+                        solver_info.get(
+                            "iterations"
+                        )
+                    )
+
+
+                    print(
+                        "primal_residual =",
+                        solver_info.get(
+                            "primal_residual"
+                        )
+                    )
+
+
+                    print(
+                        "dual_residual =",
+                        solver_info.get(
+                            "dual_residual"
+                        )
+                    )
+
+
+                    print(
+                        "solve_time =",
+                        solver_info.get(
+                            "solve_time"
+                        ),
+                        "s"
+                    )
+
+
                 raise RuntimeError(
-                    "QP solution bị "
-                    "post-solve diagnostics từ chối."
+                    "Không có MPC input hợp lệ để áp dụng."
                 )
 
 
@@ -1128,10 +860,6 @@ def main():
             #     F_R,
             #     M_R
             # ]
-            #
-            # Dimension:
-            #
-            #     u_k in R^12
             # =================================================
 
             u_k = u0_opt.copy()
@@ -1141,16 +869,6 @@ def main():
             # STEP 11:
             #
             # WRENCH -> JOINT TORQUE
-            #
-            # u_k
-            #
-            #    ->
-            #
-            # tau_k
-            #
-            # Dimension:
-            #
-            #     tau_k in R^10
             # =================================================
 
             (
@@ -1167,13 +885,7 @@ def main():
             # =================================================
             # STEP 12:
             #
-            # APPLY tau_k TO data.ctrl
-            #
-            # IMPORTANT:
-            #
-            # The plant is STILL at x_k.
-            #
-            # We have NOT called mj_step() yet.
+            # APPLY JOINT TORQUE
             # =================================================
 
             apply_joint_torque(
@@ -1185,11 +897,6 @@ def main():
 
             # =================================================
             # MPC COMPUTATION TIME
-            #
-            # For now this is only monitoring.
-            #
-            # It is NOT required to be < dt_mpc_update during
-            # this development/debugging stage.
             # =================================================
 
             mpc_compute_time = (
@@ -1200,9 +907,7 @@ def main():
 
 
             # =================================================
-            # LOG:
-            #
-            # x_k and u_k before plant propagation
+            # LOG CURRENT CONTROL CYCLE
             # =================================================
 
             log_time.append(
@@ -1244,32 +949,9 @@ def main():
             #
             # PROPAGATE MUJOCO PLANT
             #
-            # This is the ONLY part that advances time.
+            # tau_k is held constant using ZOH during:
             #
-            # tau_k is held constant using ZOH.
-            #
-            # Current:
-            #
-            #     dt_mpc_update = 0.01 s
-            #
-            #     dt_sim = 0.0005 s
-            #
-            # therefore:
-            #
-            #     20 MuJoCo steps / MPC update
-            #
-            #
-            # x_k
-            #   |
-            #   | u_k / tau_k
-            #   v
-            # mj_step()
-            # mj_step()
-            # ...
-            # mj_step()
-            #   |
-            #   v
-            # x_k+1
+            #     dt_mpc_update
             # =================================================
 
             for _ in range(
@@ -1291,9 +973,6 @@ def main():
             # STEP 14:
             #
             # MEASURE x_k+1
-            #
-            # This state is measured AFTER u_k has acted
-            # on the MuJoCo plant.
             # =================================================
 
             x_k_plus_1 = get_current_state(
@@ -1339,18 +1018,20 @@ def main():
                     "\nCoM position reference ="
                 )
 
+
                 print(
                     reference_generator.get_position_reference()
                 )
 
 
                 # --------------------------------------------
-                # x_k -> x_k+1
+                # Current and next CoM state
                 # --------------------------------------------
 
                 print(
                     "\nx_k CoM position ="
                 )
+
 
                 print(
                     x_k[
@@ -1363,6 +1044,7 @@ def main():
                     "x_k+1 CoM position ="
                 )
 
+
                 print(
                     x_k_plus_1[
                         0:3
@@ -1370,9 +1052,14 @@ def main():
                 )
 
 
+                # --------------------------------------------
+                # Euler orientation
+                # --------------------------------------------
+
                 print(
                     "\nx_k Euler [rad] ="
                 )
+
 
                 print(
                     x_k[
@@ -1384,6 +1071,7 @@ def main():
                 print(
                     "x_k+1 Euler [rad] ="
                 )
+
 
                 print(
                     x_k_plus_1[
@@ -1400,6 +1088,7 @@ def main():
                     "\nu_k ="
                 )
 
+
                 print(
                     u_k
                 )
@@ -1413,13 +1102,14 @@ def main():
                     "\ntau_k ="
                 )
 
+
                 print(
                     tau_k
                 )
 
 
                 # --------------------------------------------
-                # Solver
+                # OSQP solver information
                 # --------------------------------------------
 
                 print(
@@ -1464,7 +1154,7 @@ def main():
 
 
                 # --------------------------------------------
-                # Post diagnostics
+                # Post-solve constraint diagnostics
                 # --------------------------------------------
 
                 if post_diagnostics is not None:
@@ -1478,7 +1168,7 @@ def main():
 
 
                 # --------------------------------------------
-                # Total computation time
+                # Full MPC computation time
                 # --------------------------------------------
 
                 print(
@@ -1496,23 +1186,7 @@ def main():
 
 
             # =================================================
-            # NEXT CONTROL CYCLE
-            #
-            # Current MuJoCo state:
-            #
-            #     x_k+1
-            #
-            # Next loop:
-            #
-            #     x_k <- x_k+1
-            #
-            # while the command layer independently updates:
-            #
-            #     p_ref,k
-            #
-            # according to:
-            #
-            #     v_CoM_cmd
+            # NEXT MPC CYCLE
             # =================================================
 
             mpc_iteration += 1
@@ -1611,6 +1285,7 @@ def main():
             "\nInitial logged CoM ="
         )
 
+
         print(
             log_x[
                 0,
@@ -1623,6 +1298,7 @@ def main():
             "Final logged CoM ="
         )
 
+
         print(
             log_x[
                 -1,
@@ -1634,6 +1310,7 @@ def main():
     print(
         "\nFinal CoM position reference ="
     )
+
 
     print(
         reference_generator.get_position_reference()
