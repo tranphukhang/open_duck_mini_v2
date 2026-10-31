@@ -143,7 +143,7 @@ np.set_printoptions(
 # SIMULATION PARAMETERS
 # ============================================================
 
-SIM_DURATION = 10.0
+SIM_DURATION = 20.0
 
 PRINT_EVERY_N_MPC = 10
 
@@ -739,7 +739,7 @@ def main():
         max_iter=1000,
         polishing=True,
         enable_warm_start=False,
-        constraint_tolerance=1e-4
+        constraint_tolerance=1e-3
     )
 
 
