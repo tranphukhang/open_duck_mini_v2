@@ -9,8 +9,8 @@ import mujoco
 # STATE
 # ============================================================
 
-from get_current_state import (
-    get_current_state
+from get_current_state_mpc import (
+    get_current_state_mpc
 )
 
 from mass_CoM import (
@@ -79,7 +79,7 @@ class SimulationSetup:
 
 
     # --------------------------------------------------------
-    # Initial state
+    # Initial MPC state
     # --------------------------------------------------------
 
     x_initial: np.ndarray
@@ -137,7 +137,7 @@ def initialize_simulation(
     Constant SRBD parameters
          |
          v
-    Initial state x_0
+    Initial MPC state x_0
          |
          v
     ReferenceGenerator
@@ -411,13 +411,16 @@ def initialize_simulation(
 
 
     # ========================================================
-    # 6. INITIAL STATE
+    # 6. INITIAL MPC STATE
     # ========================================================
 
-    x_initial = get_current_state(
+    initial = get_current_state_mpc(
         model,
         data
     )
+
+
+    x_initial = initial.x.copy()
 
 
     # ========================================================

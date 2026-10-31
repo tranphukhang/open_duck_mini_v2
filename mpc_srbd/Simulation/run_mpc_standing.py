@@ -79,8 +79,8 @@ from QP_parameters import (
     dt_mpc_update
 )
 
-from QP_problem import (
-    build_QP_problem
+from build_and_solve_QP import (
+    build_and_solve_QP
 )
 
 from QP_diagnostics import (
@@ -298,16 +298,17 @@ def main():
             # =================================================
             # STEP 4:
             #
-            # BUILD QP
+            # BUILD AND SOLVE QP
             # =================================================
 
             (
-                H,
-                f,
-                A,
-                l,
-                u
-            ) = build_QP_problem(
+                U_opt,
+                u0_opt,
+                solver_info,
+                post_diagnostics
+            ) = build_and_solve_QP(
+
+                qp_solver=setup.qp_solver,
 
                 Phi=Phi,
 
@@ -321,40 +322,16 @@ def main():
 
                 L6_R_W=current.L6_R_W,
 
-                R6_R_W=current.R6_R_W
+                R6_R_W=current.R6_R_W,
+
+                print_diagnostics=False
             )
 
 
             # =================================================
             # STEP 5:
             #
-            # SETUP AND SOLVE QP
-            # =================================================
-
-            setup.qp_solver.setup(
-                H,
-                f,
-                A,
-                l,
-                u,
-                print_diagnostics=False
-            )
-
-
-            (
-                U_opt,
-                u0_opt,
-                solver_info,
-                post_diagnostics
-            ) = setup.qp_solver.solve(
-                print_diagnostics=False
-            )
-
-
-            # =================================================
-            # STEP 6:
-            #
-            # CHECK MPC SOLUTION
+            # HANDLE INVALID MPC SOLUTION
             # =================================================
 
             if u0_opt is None:
@@ -450,7 +427,7 @@ def main():
 
 
             # =================================================
-            # STEP 7:
+            # STEP 6:
             #
             # CURRENT MPC INPUT
             # =================================================
@@ -459,7 +436,7 @@ def main():
 
 
             # =================================================
-            # STEP 8:
+            # STEP 7:
             #
             # WRENCH -> JOINT TORQUE
             # =================================================
@@ -476,7 +453,7 @@ def main():
 
 
             # =================================================
-            # STEP 9:
+            # STEP 8:
             #
             # APPLY JOINT TORQUE
             # =================================================
@@ -516,7 +493,7 @@ def main():
 
 
             # =================================================
-            # STEP 10:
+            # STEP 9:
             #
             # PROPAGATE MUJOCO PLANT
             # =================================================
@@ -537,7 +514,7 @@ def main():
 
 
             # =================================================
-            # STEP 11:
+            # STEP 10:
             #
             # MEASURE x_k+1
             # =================================================
@@ -580,6 +557,10 @@ def main():
                 )
 
 
+                # ---------------------------------------------
+                # Current CoM reference
+                # ---------------------------------------------
+
                 print(
                     "\nCoM position reference ="
                 )
@@ -589,6 +570,10 @@ def main():
                     setup.reference_generator.get_position_reference()
                 )
 
+
+                # ---------------------------------------------
+                # Current and next CoM position
+                # ---------------------------------------------
 
                 print(
                     "\nx_k CoM position ="
@@ -614,6 +599,10 @@ def main():
                 )
 
 
+                # ---------------------------------------------
+                # Current and next Euler orientation
+                # ---------------------------------------------
+
                 print(
                     "\nx_k Euler [rad] ="
                 )
@@ -638,6 +627,10 @@ def main():
                 )
 
 
+                # ---------------------------------------------
+                # Current MPC wrench
+                # ---------------------------------------------
+
                 print(
                     "\nu_k ="
                 )
@@ -648,6 +641,10 @@ def main():
                 )
 
 
+                # ---------------------------------------------
+                # Current joint torque
+                # ---------------------------------------------
+
                 print(
                     "\ntau_k ="
                 )
@@ -657,6 +654,10 @@ def main():
                     tau_k
                 )
 
+
+                # ---------------------------------------------
+                # OSQP information
+                # ---------------------------------------------
 
                 print(
                     "\nOSQP status =",
@@ -699,6 +700,10 @@ def main():
                 )
 
 
+                # ---------------------------------------------
+                # Post-solve constraint diagnostics
+                # ---------------------------------------------
+
                 if post_diagnostics is not None:
 
                     print(
@@ -708,6 +713,10 @@ def main():
                         ]
                     )
 
+
+                # ---------------------------------------------
+                # Full MPC computation time
+                # ---------------------------------------------
 
                 print(
                     "Full MPC compute time =",
