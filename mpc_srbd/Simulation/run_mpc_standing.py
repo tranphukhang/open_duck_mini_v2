@@ -143,7 +143,7 @@ np.set_printoptions(
 # SIMULATION PARAMETERS
 # ============================================================
 
-SIM_DURATION = 20.0
+SIM_DURATION = 30.0
 
 PRINT_EVERY_N_MPC = 10
 
@@ -611,16 +611,38 @@ def main():
 
 
     # ========================================================
-    # 3. INITIALIZE MUJOCO
-    #
-    # mj_forward:
-    #
-    #     update kinematics/dynamics at x_0
-    #
-    # NOT:
-    #
-    #     x_0 -> x_1
+    # 3. INITIALIZE MUJOCO FROM HOME KEYFRAME
     # ========================================================
+
+    home_key_id = mujoco.mj_name2id(
+        model,
+        mujoco.mjtObj.mjOBJ_KEY,
+        "home"
+    )
+
+
+    if home_key_id < 0:
+        raise RuntimeError(
+            'Không tìm thấy keyframe "home" trong XML.'
+        )
+
+
+    # --------------------------------------------------------
+    # Reset MuJoCo state to keyframe "home"
+    # --------------------------------------------------------
+
+    mujoco.mj_resetDataKeyframe(
+        model,
+        data,
+        home_key_id
+    )
+
+
+    # --------------------------------------------------------
+    # Update kinematics/dynamics at the home configuration
+    #
+    # mj_forward does NOT advance simulation time.
+    # --------------------------------------------------------
 
     mujoco.mj_forward(
         model,
@@ -734,12 +756,12 @@ def main():
 
     qp_solver = QPSolver(
         verbose=False,
-        eps_abs=1e-4,
-        eps_rel=1e-4,
+        eps_abs=1e-5,
+        eps_rel=1e-5,
         max_iter=1000,
         polishing=True,
         enable_warm_start=False,
-        constraint_tolerance=1e-3
+        constraint_tolerance=1e-4
     )
 
 

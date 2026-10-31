@@ -9,5 +9,7 @@
         "./mpc_srbd/Kinematics",
         "./mpc_srbd/Actuator",
         "./mpc_srbd/Simulation"
-    ]
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }
