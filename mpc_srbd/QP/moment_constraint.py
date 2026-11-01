@@ -9,7 +9,7 @@ def build_moment_constraints(
     l_h
 ):
     """
-    Xây dựng moment / ZMP-CoP constraints cho SRBD-MPC.
+    Xây dựng line-contact moment constraints cho SRBD-MPC.
 
     Decision variable:
 
@@ -45,16 +45,16 @@ def build_moment_constraints(
     World frame.
 
     =========================================================
-    World -> L6/R6 transformation
+    World -> foot-frame transformation
     =========================================================
 
     L6_R_W:
         Rotation matrix chuyển vector từ World frame
-        về local frame L6.
+        về local contact frame của chân trái.
 
     R6_R_W:
         Rotation matrix chuyển vector từ World frame
-        về local frame R6.
+        về local contact frame của chân phải.
 
     Do đó:
 
@@ -67,10 +67,16 @@ def build_moment_constraints(
         R6_M = R6_R_W @ W_M
 
     =========================================================
-    Moment / ZMP-CoP constraint
+    Line-contact moment constraints
     =========================================================
 
     Với mỗi chân:
+
+    1. Không cho phép moment quanh local x-axis:
+
+        Mx_foot = 0
+
+    2. Giới hạn moment quanh local y-axis:
 
         -l_t * Fz_foot
         <=
@@ -78,7 +84,7 @@ def build_moment_constraints(
         <=
         l_h * Fz_foot
 
-    Tách thành hai bất đẳng thức:
+    tương đương:
 
         My_foot - l_h * Fz_foot <= 0
 
@@ -101,33 +107,33 @@ def build_moment_constraints(
 
     L6_R_W : np.ndarray, shape (3, 3)
         Rotation matrix chuyển từ World frame
-        về L6 frame.
+        về local contact frame chân trái.
 
     R6_R_W : np.ndarray, shape (3, 3)
         Rotation matrix chuyển từ World frame
-        về R6 frame.
+        về local contact frame chân phải.
 
     l_t : float
         Khoảng cách từ wrench reference point
-        đến toe theo trục x của foot.
+        đến toe theo local x-axis của foot.
 
     l_h : float
         Khoảng cách từ wrench reference point
-        đến heel theo trục x của foot.
+        đến heel theo local x-axis của foot.
 
     Returns
     -------
     A_moment : np.ndarray
         Moment constraint matrix.
-        Shape = (4*N, 12*N)
+        Shape = (6*N, 12*N)
 
     l_moment : np.ndarray
         Lower bound vector.
-        Shape = (4*N,)
+        Shape = (6*N,)
 
     u_moment : np.ndarray
         Upper bound vector.
-        Shape = (4*N,)
+        Shape = (6*N,)
     """
 
     # ========================================================
@@ -183,13 +189,23 @@ def build_moment_constraints(
 
     # Mỗi chân có:
     #
-    # 2 moment constraints
+    # 1 equality constraint:
+    #
+    #     Mx = 0
+    #
+    # 2 inequality constraints:
+    #
+    #     My - l_h*Fz <= 0
+    #
+    #    -My - l_t*Fz <= 0
+    #
+    # => 3 constraints / foot
     #
     # Hai chân:
     #
-    # 4 constraints / prediction step
+    # => 6 constraints / prediction step
 
-    constraints_per_step = 4
+    constraints_per_step = 6
 
     total_constraints = (
         N * constraints_per_step
@@ -208,6 +224,14 @@ def build_moment_constraints(
         dtype=float
     )
 
+    # Mặc định các inequality constraint có:
+    #
+    #     -inf <= A U <= 0
+    #
+    # Riêng Mx = 0 sẽ được set:
+    #
+    #     0 <= A U <= 0
+
     l_moment = np.full(
         total_constraints,
         -np.inf,
@@ -223,10 +247,18 @@ def build_moment_constraints(
     # ========================================================
     # Selector vectors
     #
+    # S_x extracts Mx from local moment vector
+    #
     # S_y extracts My from local moment vector
     #
     # S_z extracts Fz from local force vector
     # ========================================================
+
+    S_x = np.array([
+        1.0,
+        0.0,
+        0.0
+    ])
 
     S_y = np.array([
         0.0,
@@ -245,17 +277,28 @@ def build_moment_constraints(
     # Local foot components written directly as
     # coefficients acting on World-frame wrench
     #
+    # LEFT:
+    #
     # L6_Fz =
     # S_z @ L6_R_W @ W_F
+    #
+    # L6_Mx =
+    # S_x @ L6_R_W @ W_M
     #
     # L6_My =
     # S_y @ L6_R_W @ W_M
     #
-    # tương tự cho R6
+    #
+    # RIGHT tương tự.
     # ========================================================
 
     L_Fz_row = (
         S_z
+        @ L6_R_W
+    )
+
+    L_Mx_row = (
+        S_x
         @ L6_R_W
     )
 
@@ -264,8 +307,14 @@ def build_moment_constraints(
         @ L6_R_W
     )
 
+
     R_Fz_row = (
         S_z
+        @ R6_R_W
+    )
+
+    R_Mx_row = (
+        S_x
         @ R6_R_W
     )
 
@@ -308,6 +357,34 @@ def build_moment_constraints(
         # ----------------------------------------------------
         # 1.
         #
+        # Mx_L6 = 0
+        #
+        # OSQP:
+        #
+        #     0 <= Mx_L6 <= 0
+        # ----------------------------------------------------
+
+        A_moment[
+            row,
+            L_moment_cols
+        ] = (
+            L_Mx_row
+        )
+
+        l_moment[
+            row
+        ] = 0.0
+
+        u_moment[
+            row
+        ] = 0.0
+
+        row += 1
+
+
+        # ----------------------------------------------------
+        # 2.
+        #
         # My_L6 - l_h * Fz_L6 <= 0
         # ----------------------------------------------------
 
@@ -330,7 +407,7 @@ def build_moment_constraints(
 
 
         # ----------------------------------------------------
-        # 2.
+        # 3.
         #
         # -My_L6 - l_t * Fz_L6 <= 0
         # ----------------------------------------------------
@@ -373,7 +450,35 @@ def build_moment_constraints(
 
 
         # ----------------------------------------------------
-        # 3.
+        # 4.
+        #
+        # Mx_R6 = 0
+        #
+        # OSQP:
+        #
+        #     0 <= Mx_R6 <= 0
+        # ----------------------------------------------------
+
+        A_moment[
+            row,
+            R_moment_cols
+        ] = (
+            R_Mx_row
+        )
+
+        l_moment[
+            row
+        ] = 0.0
+
+        u_moment[
+            row
+        ] = 0.0
+
+        row += 1
+
+
+        # ----------------------------------------------------
+        # 5.
         #
         # My_R6 - l_h * Fz_R6 <= 0
         # ----------------------------------------------------
@@ -397,7 +502,7 @@ def build_moment_constraints(
 
 
         # ----------------------------------------------------
-        # 4.
+        # 6.
         #
         # -My_R6 - l_t * Fz_R6 <= 0
         # ----------------------------------------------------
@@ -418,6 +523,17 @@ def build_moment_constraints(
         )
 
         row += 1
+
+
+    # ========================================================
+    # Final validation
+    # ========================================================
+
+    if row != total_constraints:
+        raise RuntimeError(
+            "Số moment constraints được xây dựng "
+            "không khớp với kích thước dự kiến."
+        )
 
 
     return (
