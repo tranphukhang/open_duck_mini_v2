@@ -47,7 +47,7 @@ from Actuator.swing_joint_PD_params import (
 # ============================================================
 # SWING-FOOT ORIENTATION COMMAND
 #
-# Numerical IK now controls the 5D task:
+# Numerical IK controls the 5D task:
 #
 #     [
 #         x
@@ -57,21 +57,12 @@ from Actuator.swing_joint_PD_params import (
 #         pitch
 #     ]
 #
-# The newly introduced:
-#
-#     L6_IK
-#     R6_IK
-#
-# sites are World-aligned at the home configuration.
+# L6_IK / R6_IK are World-aligned at the home configuration.
 #
 # Therefore, for flat-ground walking:
 #
 #     roll_des  = 0
 #     pitch_des = 0
-#
-# means:
-#
-#     keep the swing foot parallel to the flat ground.
 #
 # Yaw is deliberately not controlled by the numerical IK.
 # ============================================================
@@ -83,18 +74,6 @@ SWING_PITCH_DES = 0.0
 
 # ============================================================
 # IK ORIENTATION CONVERGENCE TOLERANCE
-#
-# Position tolerance is imported from:
-#
-#     numerical_IK_params.py
-#
-# Orientation tolerance:
-#
-#     || e_orientation || <= IK_ORIENTATION_TOLERANCE
-#
-# Unit:
-#
-#     [rad]
 # ============================================================
 
 IK_ORIENTATION_TOLERANCE = 1e-3
@@ -110,11 +89,6 @@ IK_ORIENTATION_TOLERANCE = 1e-3
 #     2. hip pitch
 #     3. knee
 #     4. ankle
-#
-# This ordering is consistent with:
-#
-#     numerical_IK_hybrid.py
-#     swing_joint_PD.py
 # ============================================================
 
 SWING_LEG_JOINT_NAMES = {
@@ -363,12 +337,15 @@ def compute_swing_low_level_control(
     swing_trajectory,
     swing_foot,
     delta_T,
-    W_p_L6_ref,
-    W_p_R6_ref,
+    W_p_CoM,
+    W_R_B,
+    B_p_L6_offset,
+    B_p_R6_offset,
     W_p_L6,
     W_p_R6,
     W_p_dot_CoM,
     W_p_dot_CoM_ref,
+    T_stance,
     k_d,
     ground_height=0.0
 ):
@@ -379,7 +356,7 @@ def compute_swing_low_level_control(
     Control pipeline
     ----------------
 
-        Raibert foothold planner
+        HECTOR-style Raibert foothold planner
 
             -> W_p_foothold
 
@@ -407,8 +384,47 @@ def compute_swing_low_level_control(
             -> tau_swing
 
 
-    Important
-    ---------
+    ==========================================================
+    HECTOR-STYLE RAIBERT
+    ==========================================================
+
+    For swing foot i:
+
+        W_p_foothold,i
+            =
+        W_p_CoM
+            +
+        W_R_B @ B_p_offset,i
+            +
+        W_p_dot_CoM * delta_T
+            +
+        1/2 * W_p_dot_CoM * T_stance
+            +
+        k_d
+        (
+            W_p_dot_CoM
+            -
+            W_p_dot_CoM_ref
+        )
+
+
+    where:
+
+        delta_T
+
+    is the remaining swing time.
+
+
+    Only x-y are planned using the Raibert heuristic.
+
+    The foothold z coordinate is assigned separately using:
+
+        ground_height
+
+
+    ==========================================================
+    IMPORTANT
+    ==========================================================
 
     This function is only used when:
 
@@ -418,42 +434,61 @@ def compute_swing_low_level_control(
 
         swing_foot = "R"
 
+
     Double Support is handled outside this function by the
     simulation run file.
 
 
-    Foot position
-    -------------
+    ==========================================================
+    FOOTHOLD PLANNING
+    ==========================================================
 
-    Raibert and Bezier still use the physical:
+    The HECTOR-style Raibert planner uses:
+
+        W_p_CoM
+
+        W_R_B
+
+        B_p_L6_offset
+
+        B_p_R6_offset
+
+        W_p_dot_CoM
+
+        W_p_dot_CoM_ref
+
+        delta_T
+
+        T_stance
+
+    to compute the desired touchdown foothold.
+
+
+    The Bezier trajectory still starts from the actual physical:
 
         L6
         R6
 
-    positions.
+    positions and ends at the Raibert foothold.
+
 
     Since:
 
         L6_IK
-
-    is located at the same position as:
-
-        L6
-
-    and:
-
         R6_IK
 
-    is located at the same position as:
+    are colocated with physical:
 
+        L6
         R6
 
-    the desired Bezier position can be passed directly to the
-    new 5D numerical IK.
+    the desired Bezier position can still be passed directly
+    to the existing 5D numerical IK.
 
 
-    Foot orientation
-    ----------------
+    ==========================================================
+    FOOT ORIENTATION
+    ==========================================================
 
     The numerical IK internally uses:
 
@@ -462,13 +497,15 @@ def compute_swing_low_level_control(
 
     for both position and orientation.
 
+
     For flat-ground walking:
 
         roll_swing_des  = 0
 
         pitch_swing_des = 0
 
-    Yaw is not controlled.
+
+    Yaw is deliberately not controlled.
     """
 
 
@@ -509,17 +546,27 @@ def compute_swing_low_level_control(
 
 
     # ========================================================
-    # 3. RAIBERT FOOTHOLD
+    # 3. HECTOR-STYLE RAIBERT FOOTHOLD
     #
-    #     W_p_foothold
+    # For swing foot i:
+    #
+    #     W_p_foothold,i
     #
     # =
     #
-    #     W_p_i6_ref
+    #     W_p_CoM
     #
     #     +
     #
-    #     1/2 W_p_dot_CoM delta_T
+    #     W_R_B @ B_p_offset,i
+    #
+    #     +
+    #
+    #     W_p_dot_CoM * delta_T
+    #
+    #     +
+    #
+    #     1/2 * W_p_dot_CoM * T_stance
     #
     #     +
     #
@@ -531,16 +578,28 @@ def compute_swing_low_level_control(
     #     )
     #
     #
-    # Flat terrain:
+    # Only x-y are planned by the heuristic.
     #
-    #     z_foothold = ground_height
+    # z touchdown is assigned separately by:
+    #
+    #     ground_height
+    #
+    # Here:
+    #
+    #     delta_T
+    #
+    # is the remaining swing time.
     # ========================================================
 
     W_p_foothold = compute_raibert_foothold(
 
-        W_p_L6_ref=W_p_L6_ref,
+        W_p_CoM=W_p_CoM,
 
-        W_p_R6_ref=W_p_R6_ref,
+        W_R_B=W_R_B,
+
+        B_p_L6_offset=B_p_L6_offset,
+
+        B_p_R6_offset=B_p_R6_offset,
 
         W_p_dot_CoM=W_p_dot_CoM,
 
@@ -551,6 +610,8 @@ def compute_swing_low_level_control(
         swing_foot=swing_foot,
 
         delta_T=delta_T,
+
+        T_stance=T_stance,
 
         k_d=k_d,
 

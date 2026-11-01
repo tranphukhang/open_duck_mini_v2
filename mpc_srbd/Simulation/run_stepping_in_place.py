@@ -23,7 +23,18 @@ Important
 This file intentionally monkey-patches only the Raibert foothold
 function used inside swing_low_level_controller.py.
 
-It is a TEST-ONLY overlay.  No existing module is modified.
+It is a TEST-ONLY overlay.
+No existing production module is modified.
+
+For this stepping-in-place test, the touchdown position is exactly
+the physical home foot position:
+
+    x_foothold = x_home
+    y_foothold = y_home
+    z_foothold = z_home
+
+Therefore the swing foot returns to the same physical position from
+which the test was initialized.
 """
 
 import numpy as np
@@ -63,9 +74,11 @@ def compute_fixed_home_foothold(
 
         x_foothold = x_home
         y_foothold = y_home
-        z_foothold = ground_height
+        z_foothold = z_home
 
-    Therefore this function deliberately ignores:
+    Therefore the complete home foot position is preserved.
+
+    The following arguments are intentionally ignored:
 
         W_p_L6_ref
         W_p_R6_ref
@@ -73,12 +86,16 @@ def compute_fixed_home_foothold(
         W_p_dot_CoM_ref
         delta_T
         k_d
+        ground_height
 
-    The arguments are kept only so that the function has the same
-    call interface as the current Raibert planner.
+    They are kept only so that this function has the same call
+    interface as the current Raibert foothold planner.
     """
 
-    if swing_foot not in ("L", "R"):
+    if swing_foot not in (
+        "L",
+        "R"
+    ):
         raise ValueError(
             "swing_foot phải là 'L' hoặc 'R'."
         )
@@ -97,15 +114,21 @@ def compute_fixed_home_foothold(
         dtype=float
     ).copy()
 
-    if foothold.shape != (3,):
+    if foothold.shape != (
+        3,
+    ):
         raise RuntimeError(
             "Fixed home foothold phải có shape (3,)."
         )
 
-    # Flat-ground touchdown height.
-    foothold[2] = float(
-        ground_height
-    )
+    # IMPORTANT:
+    #
+    # Không ép:
+    #
+    #     foothold[2] = ground_height
+    #
+    # vì stepping-in-place test cần chân quay về đúng
+    # physical home position, bao gồm cả z_home.
 
     return foothold
 
@@ -127,8 +150,12 @@ def initialize_simulation_fixed_foothold(
     Call the normal simulation initialization, then capture the
     physical L6/R6 positions at the home configuration.
 
-    Only x and y are used as fixed touchdown references.
-    z is forced to GROUND_HEIGHT by compute_fixed_home_foothold().
+    The complete home positions are preserved:
+
+        [x_home, y_home, z_home]
+
+    These positions are used directly as the fixed touchdown
+    targets for stepping in place.
     """
 
     setup = _original_initialize_simulation(
@@ -139,7 +166,11 @@ def initialize_simulation_fixed_foothold(
     model = setup.model
     data = setup.data
 
-    # Home physical foot positions in World frame.
+
+    # ========================================================
+    # HOME PHYSICAL FOOT POSITIONS
+    # ========================================================
+
     W_p_L6_home = (
         base_run.get_W_position_L6(
             model,
@@ -154,43 +185,74 @@ def initialize_simulation_fixed_foothold(
         )
     )
 
+
     W_p_L6_home = np.asarray(
         W_p_L6_home,
         dtype=float
-    ).reshape(3)
+    ).reshape(
+        3
+    )
 
     W_p_R6_home = np.asarray(
         W_p_R6_home,
         dtype=float
-    ).reshape(3)
+    ).reshape(
+        3
+    )
 
-    # Fixed stepping-in-place touchdown targets.
-    _FIXED_HOME_FOOTHOLDS["L"] = (
+
+    # ========================================================
+    # FIXED STEPPING-IN-PLACE FOOTHOLDS
+    #
+    # Preserve complete home position:
+    #
+    #     x = x_home
+    #     y = y_home
+    #     z = z_home
+    #
+    # Do NOT force z to GROUND_HEIGHT.
+    # ========================================================
+
+    _FIXED_HOME_FOOTHOLDS[
+        "L"
+    ] = (
         W_p_L6_home.copy()
     )
 
-    _FIXED_HOME_FOOTHOLDS["R"] = (
+    _FIXED_HOME_FOOTHOLDS[
+        "R"
+    ] = (
         W_p_R6_home.copy()
     )
 
-    _FIXED_HOME_FOOTHOLDS["L"][2] = (
-        base_run.GROUND_HEIGHT
-    )
 
-    _FIXED_HOME_FOOTHOLDS["R"][2] = (
-        base_run.GROUND_HEIGHT
-    )
+    # ========================================================
+    # MONKEY PATCH ONLY THE RAIBERT FOOTHOLD PLANNER
+    # ========================================================
 
-    # Replace only the Raibert foothold calculation used by
-    # swing_low_level_controller.py.
     swing_controller.compute_raibert_foothold = (
         compute_fixed_home_foothold
     )
 
+
+    # ========================================================
+    # PRINT TEST CONFIGURATION
+    # ========================================================
+
     print("\n")
-    print("=" * 70)
-    print("STEPPING-IN-PLACE TEST")
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "STEPPING-IN-PLACE TEST"
+    )
+
+    print(
+        "=" * 70
+    )
+
 
     print(
         "\nRaibert foothold planner: DISABLED"
@@ -199,6 +261,7 @@ def initialize_simulation_fixed_foothold(
     print(
         "Fixed foothold planner: ENABLED"
     )
+
 
     print(
         "\nHome L6 position [World] =",
@@ -210,26 +273,50 @@ def initialize_simulation_fixed_foothold(
         W_p_R6_home
     )
 
+
     print(
         "\nFixed L foothold [World] =",
-        _FIXED_HOME_FOOTHOLDS["L"]
+        _FIXED_HOME_FOOTHOLDS[
+            "L"
+        ]
     )
 
     print(
         "Fixed R foothold [World] =",
-        _FIXED_HOME_FOOTHOLDS["R"]
+        _FIXED_HOME_FOOTHOLDS[
+            "R"
+        ]
     )
+
 
     print(
         "\nFoothold rule:"
     )
 
     print(
-        "x = home x, y = home y, "
-        "z = GROUND_HEIGHT"
+        "x = home x, "
+        "y = home y, "
+        "z = home z"
     )
 
-    print("=" * 70)
+
+    print(
+        "\nIMPORTANT:"
+    )
+
+    print(
+        "Touchdown height is the physical home-foot height."
+    )
+
+    print(
+        "GROUND_HEIGHT is NOT used to overwrite foothold z."
+    )
+
+
+    print(
+        "=" * 70
+    )
+
 
     return setup
 
@@ -238,14 +325,21 @@ def initialize_simulation_fixed_foothold(
 # TEST CONFIGURATION
 # ============================================================
 
-# Force stepping-in-place CoM command.
+# Force stepping-in-place CoM command:
+#
+#     vx_ref = 0
+#     vy_ref = 0
+#     vz_ref = 0
+
 base_run.V_COM_CMD = np.zeros(
     3,
     dtype=float
 )
 
+
 # Replace only the initialization entry point used inside
 # run_walking.main().
+
 base_run.initialize_simulation = (
     initialize_simulation_fixed_foothold
 )
@@ -256,8 +350,10 @@ base_run.initialize_simulation = (
 # ============================================================
 
 def main():
+
     base_run.main()
 
 
 if __name__ == "__main__":
+
     main()

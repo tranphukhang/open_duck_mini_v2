@@ -37,7 +37,7 @@ import numpy as np
 #
 # Current values:
 #
-#     N_DS = 2
+#     N_DS = 8
 #
 #     N_SS = 8
 #
@@ -54,7 +54,7 @@ import numpy as np
 #     T_cycle = 0.50 s
 # ============================================================
 
-N_DS = 2
+N_DS = 8
 
 N_SS = 8
 
