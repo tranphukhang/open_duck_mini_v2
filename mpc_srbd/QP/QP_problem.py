@@ -509,7 +509,9 @@ def build_QP_problem(
 
         l_t=l_t,
 
-        l_h=l_h
+        l_h=l_h,
+
+        mu=mu
     )
 
 

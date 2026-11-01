@@ -6,7 +6,8 @@ def build_moment_constraints(
     L6_R_W,
     R6_R_W,
     l_t,
-    l_h
+    l_h,
+    mu
 ):
     """
     Xây dựng line-contact moment constraints cho SRBD-MPC.
@@ -25,58 +26,33 @@ def build_moment_constraints(
 
         u_k =
         [
-            W_F_L6,
-            W_M_L6,
-            W_F_R6,
-            W_M_R6
-        ]
-
-    hay theo từng thành phần:
-
-        u_k =
-        [
             F_Lx, F_Ly, F_Lz,
             M_Lx, M_Ly, M_Lz,
             F_Rx, F_Ry, F_Rz,
             M_Rx, M_Ry, M_Rz
         ]
 
-    Tất cả decision variables vẫn được biểu diễn trong
-    World frame.
+    Tất cả decision variables được biểu diễn trong World frame.
 
     =========================================================
     World -> foot-frame transformation
     =========================================================
 
-    L6_R_W:
-        Rotation matrix chuyển vector từ World frame
-        về local contact frame của chân trái.
+        F_foot = R_foot_W @ F_W
 
-    R6_R_W:
-        Rotation matrix chuyển vector từ World frame
-        về local contact frame của chân phải.
-
-    Do đó:
-
-        L6_F = L6_R_W @ W_F
-
-        L6_M = L6_R_W @ W_M
-
-        R6_F = R6_R_W @ W_F
-
-        R6_M = R6_R_W @ W_M
+        M_foot = R_foot_W @ M_W
 
     =========================================================
-    Line-contact moment constraints
+    Line-contact constraints
     =========================================================
 
     Với mỗi chân:
 
-    1. Không cho phép moment quanh local x-axis:
+    1. Line contact không sinh moment quanh local x-axis:
 
         Mx_foot = 0
 
-    2. Giới hạn moment quanh local y-axis:
+    2. Toe / heel normal-contact constraint:
 
         -l_t * Fz_foot
         <=
@@ -89,6 +65,64 @@ def build_moment_constraints(
         My_foot - l_h * Fz_foot <= 0
 
        -My_foot - l_t * Fz_foot <= 0
+
+    3. Toe / heel lateral friction pyramid:
+
+        |f_ty| <= mu * f_tz
+
+        |f_hy| <= mu * f_hz
+
+    với:
+
+        f_tz =
+            (l_h * Fz - My)
+            /
+            (l_t + l_h)
+
+        f_hz =
+            (l_t * Fz + My)
+            /
+            (l_t + l_h)
+
+        f_ty =
+            (l_h * Fy + Mz)
+            /
+            (l_t + l_h)
+
+        f_hy =
+            (l_t * Fy - Mz)
+            /
+            (l_t + l_h)
+
+    Sau khi khử mẫu số:
+
+    Toe:
+
+        l_h*Fy
+        - mu*l_h*Fz
+        + mu*My
+        + Mz
+        <= 0
+
+       -l_h*Fy
+        - mu*l_h*Fz
+        + mu*My
+        - Mz
+        <= 0
+
+    Heel:
+
+        l_t*Fy
+        - mu*l_t*Fz
+        - mu*My
+        - Mz
+        <= 0
+
+       -l_t*Fy
+        - mu*l_t*Fz
+        - mu*My
+        + Mz
+        <= 0
 
     =========================================================
     OSQP form
@@ -106,34 +140,34 @@ def build_moment_constraints(
         Prediction horizon.
 
     L6_R_W : np.ndarray, shape (3, 3)
-        Rotation matrix chuyển từ World frame
-        về local contact frame chân trái.
+        Rotation matrix:
+            World -> left foot contact frame.
 
     R6_R_W : np.ndarray, shape (3, 3)
-        Rotation matrix chuyển từ World frame
-        về local contact frame chân phải.
+        Rotation matrix:
+            World -> right foot contact frame.
 
     l_t : float
         Khoảng cách từ wrench reference point
-        đến toe theo local x-axis của foot.
+        đến toe theo local x-axis.
 
     l_h : float
         Khoảng cách từ wrench reference point
-        đến heel theo local x-axis của foot.
+        đến heel theo local x-axis.
+
+    mu : float
+        Hệ số ma sát.
 
     Returns
     -------
     A_moment : np.ndarray
-        Moment constraint matrix.
-        Shape = (6*N, 12*N)
+        Shape = (14*N, 12*N)
 
     l_moment : np.ndarray
-        Lower bound vector.
-        Shape = (6*N,)
+        Shape = (14*N,)
 
     u_moment : np.ndarray
-        Upper bound vector.
-        Shape = (6*N,)
+        Shape = (14*N,)
     """
 
     # ========================================================
@@ -180,6 +214,11 @@ def build_moment_constraints(
             "l_h phải lớn hơn 0."
         )
 
+    if mu < 0.0:
+        raise ValueError(
+            "mu phải >= 0."
+        )
+
 
     # ========================================================
     # Dimensions
@@ -187,28 +226,32 @@ def build_moment_constraints(
 
     nu = 12
 
-    # Mỗi chân có:
+    # Mỗi chân:
     #
-    # 1 equality constraint:
+    # 1 constraint:
     #
     #     Mx = 0
     #
-    # 2 inequality constraints:
+    # 2 constraints:
     #
-    #     My - l_h*Fz <= 0
+    #     toe / heel normal contact
     #
-    #    -My - l_t*Fz <= 0
+    # 4 constraints:
     #
-    # => 3 constraints / foot
+    #     toe / heel lateral friction pyramid
+    #
+    # => 7 constraints / foot
     #
     # Hai chân:
     #
-    # => 6 constraints / prediction step
+    # => 14 constraints / prediction step
 
-    constraints_per_step = 6
+    constraints_per_step = 14
 
     total_constraints = (
-        N * constraints_per_step
+        N
+        *
+        constraints_per_step
     )
 
 
@@ -224,11 +267,11 @@ def build_moment_constraints(
         dtype=float
     )
 
-    # Mặc định các inequality constraint có:
+    # Mặc định:
     #
     #     -inf <= A U <= 0
     #
-    # Riêng Mx = 0 sẽ được set:
+    # Riêng equality Mx = 0:
     #
     #     0 <= A U <= 0
 
@@ -246,12 +289,6 @@ def build_moment_constraints(
 
     # ========================================================
     # Selector vectors
-    #
-    # S_x extracts Mx from local moment vector
-    #
-    # S_y extracts My from local moment vector
-    #
-    # S_z extracts Fz from local force vector
     # ========================================================
 
     S_x = np.array([
@@ -274,23 +311,13 @@ def build_moment_constraints(
 
 
     # ========================================================
-    # Local foot components written directly as
-    # coefficients acting on World-frame wrench
-    #
-    # LEFT:
-    #
-    # L6_Fz =
-    # S_z @ L6_R_W @ W_F
-    #
-    # L6_Mx =
-    # S_x @ L6_R_W @ W_M
-    #
-    # L6_My =
-    # S_y @ L6_R_W @ W_M
-    #
-    #
-    # RIGHT tương tự.
+    # LEFT FOOT local component rows
     # ========================================================
+
+    L_Fy_row = (
+        S_y
+        @ L6_R_W
+    )
 
     L_Fz_row = (
         S_z
@@ -307,6 +334,20 @@ def build_moment_constraints(
         @ L6_R_W
     )
 
+    L_Mz_row = (
+        S_z
+        @ L6_R_W
+    )
+
+
+    # ========================================================
+    # RIGHT FOOT local component rows
+    # ========================================================
+
+    R_Fy_row = (
+        S_y
+        @ R6_R_W
+    )
 
     R_Fz_row = (
         S_z
@@ -323,6 +364,11 @@ def build_moment_constraints(
         @ R6_R_W
     )
 
+    R_Mz_row = (
+        S_z
+        @ R6_R_W
+    )
+
 
     # ========================================================
     # Build constraints
@@ -332,13 +378,15 @@ def build_moment_constraints(
 
     for k in range(N):
 
-        step_col = k * nu
+        step_col = (
+            k
+            *
+            nu
+        )
 
 
         # ====================================================
         # LEFT FOOT
-        #
-        # u_L =
         #
         # [Fx Fy Fz Mx My Mz]
         # ====================================================
@@ -355,13 +403,7 @@ def build_moment_constraints(
 
 
         # ----------------------------------------------------
-        # 1.
-        #
-        # Mx_L6 = 0
-        #
-        # OSQP:
-        #
-        #     0 <= Mx_L6 <= 0
+        # 1. Mx_L = 0
         # ----------------------------------------------------
 
         A_moment[
@@ -371,21 +413,14 @@ def build_moment_constraints(
             L_Mx_row
         )
 
-        l_moment[
-            row
-        ] = 0.0
-
-        u_moment[
-            row
-        ] = 0.0
+        l_moment[row] = 0.0
+        u_moment[row] = 0.0
 
         row += 1
 
 
         # ----------------------------------------------------
-        # 2.
-        #
-        # My_L6 - l_h * Fz_L6 <= 0
+        # 2. My_L - l_h * Fz_L <= 0
         # ----------------------------------------------------
 
         A_moment[
@@ -393,7 +428,8 @@ def build_moment_constraints(
             L_force_cols
         ] = (
             -l_h
-            * L_Fz_row
+            *
+            L_Fz_row
         )
 
         A_moment[
@@ -407,9 +443,7 @@ def build_moment_constraints(
 
 
         # ----------------------------------------------------
-        # 3.
-        #
-        # -My_L6 - l_t * Fz_L6 <= 0
+        # 3. -My_L - l_t * Fz_L <= 0
         # ----------------------------------------------------
 
         A_moment[
@@ -417,7 +451,8 @@ def build_moment_constraints(
             L_force_cols
         ] = (
             -l_t
-            * L_Fz_row
+            *
+            L_Fz_row
         )
 
         A_moment[
@@ -430,10 +465,164 @@ def build_moment_constraints(
         row += 1
 
 
+        # ----------------------------------------------------
+        # 4. TOE friction:
+        #
+        # l_h*Fy
+        # - mu*l_h*Fz
+        # + mu*My
+        # + Mz
+        # <= 0
+        # ----------------------------------------------------
+
+        A_moment[
+            row,
+            L_force_cols
+        ] = (
+            l_h
+            *
+            L_Fy_row
+            -
+            mu
+            *
+            l_h
+            *
+            L_Fz_row
+        )
+
+        A_moment[
+            row,
+            L_moment_cols
+        ] = (
+            mu
+            *
+            L_My_row
+            +
+            L_Mz_row
+        )
+
+        row += 1
+
+
+        # ----------------------------------------------------
+        # 5. TOE friction:
+        #
+        # -l_h*Fy
+        # - mu*l_h*Fz
+        # + mu*My
+        # - Mz
+        # <= 0
+        # ----------------------------------------------------
+
+        A_moment[
+            row,
+            L_force_cols
+        ] = (
+            -l_h
+            *
+            L_Fy_row
+            -
+            mu
+            *
+            l_h
+            *
+            L_Fz_row
+        )
+
+        A_moment[
+            row,
+            L_moment_cols
+        ] = (
+            mu
+            *
+            L_My_row
+            -
+            L_Mz_row
+        )
+
+        row += 1
+
+
+        # ----------------------------------------------------
+        # 6. HEEL friction:
+        #
+        # l_t*Fy
+        # - mu*l_t*Fz
+        # - mu*My
+        # - Mz
+        # <= 0
+        # ----------------------------------------------------
+
+        A_moment[
+            row,
+            L_force_cols
+        ] = (
+            l_t
+            *
+            L_Fy_row
+            -
+            mu
+            *
+            l_t
+            *
+            L_Fz_row
+        )
+
+        A_moment[
+            row,
+            L_moment_cols
+        ] = (
+            -mu
+            *
+            L_My_row
+            -
+            L_Mz_row
+        )
+
+        row += 1
+
+
+        # ----------------------------------------------------
+        # 7. HEEL friction:
+        #
+        # -l_t*Fy
+        # - mu*l_t*Fz
+        # - mu*My
+        # + Mz
+        # <= 0
+        # ----------------------------------------------------
+
+        A_moment[
+            row,
+            L_force_cols
+        ] = (
+            -l_t
+            *
+            L_Fy_row
+            -
+            mu
+            *
+            l_t
+            *
+            L_Fz_row
+        )
+
+        A_moment[
+            row,
+            L_moment_cols
+        ] = (
+            -mu
+            *
+            L_My_row
+            +
+            L_Mz_row
+        )
+
+        row += 1
+
+
         # ====================================================
         # RIGHT FOOT
-        #
-        # u_R =
         #
         # [Fx Fy Fz Mx My Mz]
         # ====================================================
@@ -450,13 +639,7 @@ def build_moment_constraints(
 
 
         # ----------------------------------------------------
-        # 4.
-        #
-        # Mx_R6 = 0
-        #
-        # OSQP:
-        #
-        #     0 <= Mx_R6 <= 0
+        # 8. Mx_R = 0
         # ----------------------------------------------------
 
         A_moment[
@@ -466,21 +649,14 @@ def build_moment_constraints(
             R_Mx_row
         )
 
-        l_moment[
-            row
-        ] = 0.0
-
-        u_moment[
-            row
-        ] = 0.0
+        l_moment[row] = 0.0
+        u_moment[row] = 0.0
 
         row += 1
 
 
         # ----------------------------------------------------
-        # 5.
-        #
-        # My_R6 - l_h * Fz_R6 <= 0
+        # 9. My_R - l_h * Fz_R <= 0
         # ----------------------------------------------------
 
         A_moment[
@@ -488,7 +664,8 @@ def build_moment_constraints(
             R_force_cols
         ] = (
             -l_h
-            * R_Fz_row
+            *
+            R_Fz_row
         )
 
         A_moment[
@@ -502,9 +679,7 @@ def build_moment_constraints(
 
 
         # ----------------------------------------------------
-        # 6.
-        #
-        # -My_R6 - l_t * Fz_R6 <= 0
+        # 10. -My_R - l_t * Fz_R <= 0
         # ----------------------------------------------------
 
         A_moment[
@@ -512,7 +687,8 @@ def build_moment_constraints(
             R_force_cols
         ] = (
             -l_t
-            * R_Fz_row
+            *
+            R_Fz_row
         )
 
         A_moment[
@@ -520,6 +696,138 @@ def build_moment_constraints(
             R_moment_cols
         ] = (
             -R_My_row
+        )
+
+        row += 1
+
+
+        # ----------------------------------------------------
+        # 11. TOE friction
+        # ----------------------------------------------------
+
+        A_moment[
+            row,
+            R_force_cols
+        ] = (
+            l_h
+            *
+            R_Fy_row
+            -
+            mu
+            *
+            l_h
+            *
+            R_Fz_row
+        )
+
+        A_moment[
+            row,
+            R_moment_cols
+        ] = (
+            mu
+            *
+            R_My_row
+            +
+            R_Mz_row
+        )
+
+        row += 1
+
+
+        # ----------------------------------------------------
+        # 12. TOE friction
+        # ----------------------------------------------------
+
+        A_moment[
+            row,
+            R_force_cols
+        ] = (
+            -l_h
+            *
+            R_Fy_row
+            -
+            mu
+            *
+            l_h
+            *
+            R_Fz_row
+        )
+
+        A_moment[
+            row,
+            R_moment_cols
+        ] = (
+            mu
+            *
+            R_My_row
+            -
+            R_Mz_row
+        )
+
+        row += 1
+
+
+        # ----------------------------------------------------
+        # 13. HEEL friction
+        # ----------------------------------------------------
+
+        A_moment[
+            row,
+            R_force_cols
+        ] = (
+            l_t
+            *
+            R_Fy_row
+            -
+            mu
+            *
+            l_t
+            *
+            R_Fz_row
+        )
+
+        A_moment[
+            row,
+            R_moment_cols
+        ] = (
+            -mu
+            *
+            R_My_row
+            -
+            R_Mz_row
+        )
+
+        row += 1
+
+
+        # ----------------------------------------------------
+        # 14. HEEL friction
+        # ----------------------------------------------------
+
+        A_moment[
+            row,
+            R_force_cols
+        ] = (
+            -l_t
+            *
+            R_Fy_row
+            -
+            mu
+            *
+            l_t
+            *
+            R_Fz_row
+        )
+
+        A_moment[
+            row,
+            R_moment_cols
+        ] = (
+            -mu
+            *
+            R_My_row
+            +
+            R_Mz_row
         )
 
         row += 1
@@ -533,6 +841,41 @@ def build_moment_constraints(
         raise RuntimeError(
             "Số moment constraints được xây dựng "
             "không khớp với kích thước dự kiến."
+        )
+
+
+    if A_moment.shape != (
+        14 * N,
+        12 * N
+    ):
+        raise RuntimeError(
+            "A_moment có dimension không đúng."
+        )
+
+
+    if l_moment.shape != (
+        14 * N,
+    ):
+        raise RuntimeError(
+            "l_moment có dimension không đúng."
+        )
+
+
+    if u_moment.shape != (
+        14 * N,
+    ):
+        raise RuntimeError(
+            "u_moment có dimension không đúng."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            A_moment
+        )
+    ):
+        raise RuntimeError(
+            "A_moment chứa NaN hoặc Inf."
         )
 
 
