@@ -16,8 +16,17 @@
 
     <worldbody>
         <body name="floor">
-            <geom name="floor" size="0 0 0.01" type="plane" material="groundplane" contype="1" conaffinity="0"
-                priority="1" friction="0.6" condim="3"/>
+            <geom name="floor"
+                size="0 0 0.01"
+                type="plane"
+                material="groundplane"
+                contype="1"
+                conaffinity="0"
+                priority="1"
+                friction="0.6"
+                condim="3"
+                solref="0.04 1"
+                solimp="0.7 0.95 0.003 0.5 2"/>
         </body>
     </worldbody>
 
@@ -28,13 +37,13 @@
                 1 0 0 0
 
                 0
-                0
+                -0.2
                 0.5235987756
                 -1.0471975512
                 0.5235987756
 
                 0
-                0
+                0.2
                 -0.5235987756
                 1.0471975512
                 -0.5235987756

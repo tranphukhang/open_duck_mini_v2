@@ -136,4 +136,4 @@ N = 10
 dt_mpc = 0.025   # [s]
 
 # MPC controller update period
-dt_mpc_update = 0.01   # [s]
+dt_mpc_update = 0.0025   # [s]
