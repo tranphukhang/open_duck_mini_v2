@@ -1,0 +1,110 @@
+{
+    "model": "E:\\TPK\\conda_env\\open_duck_mini_v2\\xmls\\scene_flat_terrian_v3.xml",
+    "home_key": "home",
+    "scan_parameters": {
+        "dx_min": -0.15,
+        "dx_max": 0.15,
+        "dy_min": -0.1,
+        "dy_max": 0.1,
+        "grid_step": 0.005,
+        "safe_joint_margin_deg": 5.0,
+        "ik_tolerance": 0.0001,
+        "ik_orientation_tolerance": 0.001
+    },
+    "legs": [
+        {
+            "leg": "L",
+            "home_position": [
+                -0.016059999999999974,
+                0.05481745061955274,
+                3.7185340199481776e-05
+            ],
+            "total_points": 2501,
+            "raw_reachable_points": 673,
+            "safe_reachable_points": 561,
+            "raw_reachable_fraction": 0.26909236305477807,
+            "safe_reachable_fraction": 0.22431027588964414,
+            "raw_pointwise_bounds": {
+                "dx_min": -0.07999999999999999,
+                "dx_max": 0.08500000000000002,
+                "dy_min": -0.045000000000000005,
+                "dy_max": 0.07500000000000001,
+                "point_count": 673
+            },
+            "safe_pointwise_bounds": {
+                "dx_min": -0.07999999999999999,
+                "dx_max": 0.08000000000000002,
+                "dy_min": -0.03,
+                "dy_max": 0.07500000000000001,
+                "point_count": 561
+            },
+            "safe_rectangle": {
+                "dx_min": -0.05499999999999999,
+                "dx_max": 0.065,
+                "dy_min": -0.02500000000000001,
+                "dy_max": 0.044999999999999984,
+                "point_count": 375,
+                "span_x": 0.12,
+                "span_y": 0.06999999999999999,
+                "area": 0.0084
+            },
+            "safe_dx_interval_at_dy_zero": {
+                "dy": 0.0,
+                "dx_min": -0.075,
+                "dx_max": 0.08000000000000002
+            },
+            "safe_dy_interval_at_dx_zero": {
+                "dx": 0.0,
+                "dy_min": -0.02500000000000001,
+                "dy_max": 0.07500000000000001
+            }
+        },
+        {
+            "leg": "R",
+            "home_position": [
+                -0.016059999999999974,
+                -0.05481745061955274,
+                3.7185340199481776e-05
+            ],
+            "total_points": 2501,
+            "raw_reachable_points": 673,
+            "safe_reachable_points": 561,
+            "raw_reachable_fraction": 0.26909236305477807,
+            "safe_reachable_fraction": 0.22431027588964414,
+            "raw_pointwise_bounds": {
+                "dx_min": -0.07999999999999999,
+                "dx_max": 0.08500000000000002,
+                "dy_min": -0.07500000000000001,
+                "dy_max": 0.044999999999999984,
+                "point_count": 673
+            },
+            "safe_pointwise_bounds": {
+                "dx_min": -0.07999999999999999,
+                "dx_max": 0.08000000000000002,
+                "dy_min": -0.07500000000000001,
+                "dy_max": 0.03,
+                "point_count": 561
+            },
+            "safe_rectangle": {
+                "dx_min": -0.05499999999999999,
+                "dx_max": 0.065,
+                "dy_min": -0.045000000000000005,
+                "dy_max": 0.024999999999999994,
+                "point_count": 375,
+                "span_x": 0.12,
+                "span_y": 0.07,
+                "area": 0.008400000000000001
+            },
+            "safe_dx_interval_at_dy_zero": {
+                "dy": 0.0,
+                "dx_min": -0.075,
+                "dx_max": 0.08000000000000002
+            },
+            "safe_dy_interval_at_dx_zero": {
+                "dx": 0.0,
+                "dy_min": -0.07500000000000001,
+                "dy_max": 0.024999999999999994
+            }
+        }
+    ]
+}
