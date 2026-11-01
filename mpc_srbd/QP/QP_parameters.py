@@ -33,9 +33,9 @@ Q = np.diag([
     50.0,   # py
     100.0,   # pz
 
-    100.0,   # roll
-    100.0,   # pitch
-    20.0,   # yaw
+    50.0,   # roll
+    50.0,   # pitch
+    100.0,   # yaw
 
     1.0,     # vx
     1.0,     # vy
