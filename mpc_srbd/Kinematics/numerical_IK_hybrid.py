@@ -40,13 +40,14 @@ except ImportError:
 #     - are located at the same physical positions as L6/R6
 #     - are World-aligned at the home configuration
 #
-# Therefore:
+# Controlled IK task:
 #
-#     position task
-#         -> L6_IK / R6_IK position
+#     x
+#     y
+#     z
+#     pitch
 #
-#     orientation task
-#         -> L6_IK / R6_IK orientation
+# Roll and yaw are deliberately left free.
 #
 #
 # Joint order:
@@ -303,125 +304,27 @@ def _apply_joint_limits(
 
 
 # ============================================================
-# ROTATION MATRIX FROM ROLL-PITCH-YAW
-#
-# Convention:
-#
-#     R = Rz(yaw) Ry(pitch) Rx(roll)
-#
-# This is used only to construct the desired World-frame
-# orientation of L6_IK / R6_IK.
-#
-# Since the IK sites are World-aligned at home:
-#
-#     roll_des  = 0
-#     pitch_des = 0
-#
-# corresponds naturally to a flat foot.
-# ============================================================
-
-def _rotation_matrix_from_rpy(
-    roll,
-    pitch,
-    yaw
-):
-
-    roll = float(
-        roll
-    )
-
-    pitch = float(
-        pitch
-    )
-
-    yaw = float(
-        yaw
-    )
-
-
-    c_r = np.cos(
-        roll
-    )
-
-    s_r = np.sin(
-        roll
-    )
-
-
-    c_p = np.cos(
-        pitch
-    )
-
-    s_p = np.sin(
-        pitch
-    )
-
-
-    c_y = np.cos(
-        yaw
-    )
-
-    s_y = np.sin(
-        yaw
-    )
-
-
-    R_x = np.array(
-        [
-            [1.0, 0.0, 0.0],
-            [0.0, c_r, -s_r],
-            [0.0, s_r, c_r]
-        ],
-        dtype=float
-    )
-
-
-    R_y = np.array(
-        [
-            [c_p, 0.0, s_p],
-            [0.0, 1.0, 0.0],
-            [-s_p, 0.0, c_p]
-        ],
-        dtype=float
-    )
-
-
-    R_z = np.array(
-        [
-            [c_y, -s_y, 0.0],
-            [s_y, c_y, 0.0],
-            [0.0, 0.0, 1.0]
-        ],
-        dtype=float
-    )
-
-
-    R = (
-        R_z
-        @
-        R_y
-        @
-        R_x
-    )
-
-
-    return R
-
-
-# ============================================================
-# GET YAW FROM ROTATION MATRIX
-#
-# Because L6_IK / R6_IK are near the flat-foot configuration,
-# the yaw extraction below no longer suffers from the
-# pitch = +/- pi/2 singular configuration that existed for
-# the original L6/R6 site frames.
+# GET PITCH FROM ROTATION MATRIX
 #
 # ZYX convention:
 #
-#     yaw = atan2(R[1,0], R[0,0])
+#     R = Rz(yaw) Ry(pitch) Rx(roll)
+#
+# For a rotation matrix:
+#
+#     pitch
+#         =
+#     atan2(
+#         -R[2,0],
+#         sqrt(R[0,0]^2 + R[1,0]^2)
+#     )
+#
+# The IK sites are close to a flat-foot configuration, so the
+# pitch extraction is well away from the +/- pi/2 singularity
+# during normal walking.
 # ============================================================
 
-def _get_yaw_from_rotation_matrix(
+def _get_pitch_from_rotation_matrix(
     R
 ):
 
@@ -452,89 +355,112 @@ def _get_yaw_from_rotation_matrix(
         )
 
 
-    yaw = np.arctan2(
-        R[
-            1,
-            0
-        ],
+    denominator = np.sqrt(
+
         R[
             0,
             0
-        ]
+        ] ** 2
+
+        +
+
+        R[
+            1,
+            0
+        ] ** 2
+    )
+
+
+    pitch = np.arctan2(
+
+        -R[
+            2,
+            0
+        ],
+
+        denominator
     )
 
 
     return float(
-        yaw
+        pitch
     )
 
 
 # ============================================================
-# COMPUTE ROLL-PITCH ORIENTATION ERROR
+# WRAP ANGLE TO [-pi, pi]
+# ============================================================
+
+def _wrap_to_pi(
+    angle
+):
+
+    angle = float(
+        angle
+    )
+
+
+    wrapped = (
+
+        angle
+        +
+        np.pi
+
+    ) % (
+
+        2.0
+        *
+        np.pi
+
+    ) - np.pi
+
+
+    return float(
+        wrapped
+    )
+
+
+# ============================================================
+# COMPUTE PITCH-ONLY ORIENTATION ERROR
 #
-# Only:
+# Only pitch is constrained.
 #
-#     roll
-#     pitch
+# Roll:
+#     free
 #
-# are controlled.
+# Yaw:
+#     free
 #
-# Yaw is deliberately left free.
+#
+# Current pitch:
+#
+#     pitch_current
 #
 #
-# At each IK iteration:
+# Desired pitch:
 #
-#     yaw_des = yaw_current
-#
-# while:
-#
-#     roll_des
 #     pitch_des
 #
-# are commanded.
 #
+# Scalar pitch error:
 #
-# Desired orientation:
-#
-#     R_des
+#     e_pitch
 #
 # =
 #
-#     Rz(yaw_current)
-#     Ry(pitch_des)
-#     Rx(roll_des)
-#
-#
-# Orientation error:
-#
-#     e_R
-#
-# =
-#
-#     1/2 vee(
-#
-#         R_des R_current^T
-#
-#         -
-#
-#         R_current R_des^T
-#
+#     wrap_to_pi(
+#         pitch_des - pitch_current
 #     )
 #
 #
-# e_R is expressed in the World frame.
+# The error is represented as a 1D vector so that it can be
+# concatenated directly with the 3D Cartesian position error:
 #
-# Only:
-#
-#     e_R_x
-#     e_R_y
-#
-# are used for the 5D IK task.
+#     [e_x, e_y, e_z, e_pitch]^T
 # ============================================================
 
-def _compute_roll_pitch_orientation_error(
+def _compute_pitch_orientation_error(
     R_current,
-    roll_des,
     pitch_des
 ):
 
@@ -565,23 +491,9 @@ def _compute_roll_pitch_orientation_error(
         )
 
 
-    roll_des = float(
-        roll_des
-    )
-
-
     pitch_des = float(
         pitch_des
     )
-
-
-    if not np.isfinite(
-        roll_des
-    ):
-
-        raise ValueError(
-            "roll_des phải hữu hạn."
-        )
 
 
     if not np.isfinite(
@@ -593,145 +505,70 @@ def _compute_roll_pitch_orientation_error(
         )
 
 
-    # --------------------------------------------------------
-    # Current yaw
-    #
-    # Yaw is deliberately not controlled.
-    # --------------------------------------------------------
-
-    yaw_current = (
-        _get_yaw_from_rotation_matrix(
+    pitch_current = (
+        _get_pitch_from_rotation_matrix(
             R_current
         )
     )
 
 
-    # --------------------------------------------------------
-    # Desired orientation
-    # --------------------------------------------------------
+    pitch_error_scalar = (
+        _wrap_to_pi(
 
-    R_des = (
-        _rotation_matrix_from_rpy(
+            pitch_des
 
-            roll=roll_des,
+            -
 
-            pitch=pitch_des,
-
-            yaw=yaw_current
+            pitch_current
         )
     )
 
 
-    # --------------------------------------------------------
-    # Rotation error matrix
-    # --------------------------------------------------------
-
-    error_matrix = (
-
-        R_des
-        @
-        R_current.T
-
-        -
-
-        R_current
-        @
-        R_des.T
+    pitch_error = np.array(
+        [
+            pitch_error_scalar
+        ],
+        dtype=float
     )
 
 
-    # --------------------------------------------------------
-    # vee(.) operator
-    #
-    #     [  0  -z   y ]
-    #     [  z   0  -x ]
-    #     [ -y   x   0 ]
-    #
-    #             |
-    #             v
-    #
-    #         [x y z]^T
-    # --------------------------------------------------------
-
-    e_rotation = (
-        0.5
-        *
-        np.array(
-            [
-                error_matrix[
-                    2,
-                    1
-                ],
-
-                error_matrix[
-                    0,
-                    2
-                ],
-
-                error_matrix[
-                    1,
-                    0
-                ]
-            ],
-            dtype=float
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # 2D orientation task:
-    #
-    #     roll correction
-    #     pitch correction
-    #
-    # Yaw correction is excluded.
-    # --------------------------------------------------------
-
-    e_roll_pitch = (
-        e_rotation[
-            0:2
-        ].copy()
-    )
-
-
-    if e_roll_pitch.shape != (
-        2,
+    if pitch_error.shape != (
+        1,
     ):
 
         raise RuntimeError(
-            "e_roll_pitch phải có shape (2,)."
+            "pitch_error phải có shape (1,)."
         )
 
 
     if not np.all(
         np.isfinite(
-            e_roll_pitch
+            pitch_error
         )
     ):
 
         raise RuntimeError(
-            "e_roll_pitch chứa NaN hoặc Inf."
+            "pitch_error chứa NaN hoặc Inf."
         )
 
 
-    return e_roll_pitch
+    return pitch_error
 
 
 # ============================================================
-# COMPUTE LEG 5D TASK JACOBIAN
+# COMPUTE LEG 4D TASK JACOBIAN
 #
 # Task:
 #
 #     x
 #     y
 #     z
-#     roll
 #     pitch
 #
 #
 # Therefore:
 #
-#     J_task in R^(5x5)
+#     J_task in R^(4x5)
 #
 #
 # mj_jacSite gives:
@@ -748,9 +585,15 @@ def _compute_roll_pitch_orientation_error(
 #     first 3 rows:
 #         Cartesian position Jacobian
 #
-#     last 2 rows:
-#         World omega_x
+#     final row:
 #         World omega_y
+#
+#
+# Roll row:
+#     NOT included
+#
+# Yaw row:
+#     NOT included
 # ============================================================
 
 def _compute_leg_task_jacobian(
@@ -852,36 +695,52 @@ def _compute_leg_task_jacobian(
 
 
     # --------------------------------------------------------
-    # Only World-frame omega_x and omega_y
+    # Pitch-only angular Jacobian
+    #
+    # World-frame omega_y is row index 1.
+    # Shape:
+    #
+    #     (1, 5)
     # --------------------------------------------------------
 
-    J_roll_pitch = (
+    J_pitch = (
         J_rotation[
-            0:2,
+            1:2,
             :
         ].copy()
     )
 
 
+    if J_pitch.shape != (
+        1,
+        5
+    ):
+
+        raise RuntimeError(
+            "J_pitch phải có shape (1, 5), "
+            f"nhưng nhận được {J_pitch.shape}."
+        )
+
+
     # --------------------------------------------------------
-    # Complete 5D task Jacobian
+    # Complete 4D task Jacobian
     # --------------------------------------------------------
 
     J_task = np.vstack(
         (
             J_position,
-            J_roll_pitch
+            J_pitch
         )
     )
 
 
     if J_task.shape != (
-        5,
+        4,
         5
     ):
 
         raise RuntimeError(
-            "J_task phải có shape (5, 5), "
+            "J_task phải có shape (4, 5), "
             f"nhưng nhận được {J_task.shape}."
         )
 
@@ -901,7 +760,7 @@ def _compute_leg_task_jacobian(
 
 
 # ============================================================
-# COMPUTE CURRENT 5D TASK ERROR
+# COMPUTE CURRENT 4D TASK ERROR
 #
 #     e
 #
@@ -911,7 +770,6 @@ def _compute_leg_task_jacobian(
 #         e_x
 #         e_y
 #         e_z
-#         e_roll
 #         e_pitch
 #     ]
 # ============================================================
@@ -920,7 +778,6 @@ def _compute_task_error(
     data,
     site_id,
     W_p_swing_des,
-    roll_swing_des,
     pitch_swing_des
 ):
 
@@ -968,15 +825,13 @@ def _compute_task_error(
 
 
     # --------------------------------------------------------
-    # Roll/pitch orientation error
+    # Pitch-only orientation error
     # --------------------------------------------------------
 
     orientation_error = (
-        _compute_roll_pitch_orientation_error(
+        _compute_pitch_orientation_error(
 
             R_current=R_current,
-
-            roll_des=roll_swing_des,
 
             pitch_des=pitch_swing_des
         )
@@ -984,7 +839,7 @@ def _compute_task_error(
 
 
     # --------------------------------------------------------
-    # Complete 5D error
+    # Complete 4D error
     # --------------------------------------------------------
 
     task_error = np.concatenate(
@@ -1005,20 +860,20 @@ def _compute_task_error(
 
 
     if orientation_error.shape != (
-        2,
+        1,
     ):
 
         raise RuntimeError(
-            "orientation_error phải có shape (2,)."
+            "orientation_error phải có shape (1,)."
         )
 
 
     if task_error.shape != (
-        5,
+        4,
     ):
 
         raise RuntimeError(
-            "task_error phải có shape (5,)."
+            "task_error phải có shape (4,)."
         )
 
 
@@ -1059,7 +914,7 @@ def solve_numerical_IK_hybrid(
     max_iterations=50
 ):
     """
-    Solve the 5D swing-leg numerical inverse kinematics.
+    Solve the 4D swing-leg numerical inverse kinematics.
 
     Controlled task:
 
@@ -1067,9 +922,13 @@ def solve_numerical_IK_hybrid(
             foot x
             foot y
             foot z
-            foot roll
             foot pitch
         ]
+
+    Roll is deliberately NOT controlled.
+
+    Yaw is deliberately NOT controlled.
+
 
     IK sites:
 
@@ -1079,22 +938,24 @@ def solve_numerical_IK_hybrid(
         Right:
             R6_IK
 
-    These sites are World-aligned at the home configuration.
 
-    Therefore for flat-ground walking:
+    The argument:
 
-        roll_swing_des  = 0
+        roll_swing_des
+
+    is temporarily retained only for backward compatibility with
+    the current swing_low_level_controller.py interface.
+
+    It is NOT used in the IK task.
+
+    It will be removed from the low-level caller in the next step.
+
+
+    For flat-ground walking:
 
         pitch_swing_des = 0
 
-    is the natural flat-foot orientation command.
-
-
-    Yaw is deliberately not controlled.
-
-    At every iteration:
-
-        yaw_des = yaw_current
+    is the desired pitch command.
 
 
     Hybrid method:
@@ -1113,9 +974,9 @@ def solve_numerical_IK_hybrid(
         ||e_position|| <= tolerance
 
 
-    Orientation convergence:
+    Pitch convergence:
 
-        ||e_orientation|| <= orientation_tolerance
+        ||e_pitch|| <= orientation_tolerance
 
 
     Important:
@@ -1182,6 +1043,7 @@ def solve_numerical_IK_hybrid(
 
             "joint_names": None,
 
+            # Retained only for backward-compatible diagnostics.
             "roll_swing_des": None,
 
             "pitch_swing_des": None
@@ -1215,6 +1077,11 @@ def solve_numerical_IK_hybrid(
 
     # ========================================================
     # 4. VALIDATE DESIRED ORIENTATION
+    #
+    # Only pitch is used.
+    #
+    # roll_swing_des is intentionally ignored for backward
+    # compatibility with the current caller.
     # ========================================================
 
     roll_swing_des = float(
@@ -1454,7 +1321,7 @@ def solve_numerical_IK_hybrid(
         ):
 
             # =================================================
-            # 10.1 CURRENT 5D TASK ERROR
+            # 10.1 CURRENT 4D TASK ERROR
             # =================================================
 
             (
@@ -1469,8 +1336,6 @@ def solve_numerical_IK_hybrid(
                 site_id=site_id,
 
                 W_p_swing_des=W_p_swing_des,
-
-                roll_swing_des=roll_swing_des,
 
                 pitch_swing_des=pitch_swing_des
             )
@@ -1508,7 +1373,7 @@ def solve_numerical_IK_hybrid(
             #
             #     [m]
             #
-            # Orientation:
+            # Pitch orientation:
             #
             #     [rad]
             #
@@ -1566,7 +1431,7 @@ def solve_numerical_IK_hybrid(
 
 
             # =================================================
-            # 10.4 COMPLETE 5D TASK JACOBIAN
+            # 10.4 COMPLETE 4D TASK JACOBIAN
             # =================================================
 
             J_task = (
@@ -1729,8 +1594,6 @@ def solve_numerical_IK_hybrid(
 
             W_p_swing_des=W_p_swing_des,
 
-            roll_swing_des=roll_swing_des,
-
             pitch_swing_des=pitch_swing_des
         )
 
@@ -1842,7 +1705,7 @@ def solve_numerical_IK_hybrid(
 
 
         # ----------------------------------------------------
-        # Complete 5D error
+        # Complete 4D error
         # ----------------------------------------------------
 
         "final_error": (
@@ -1870,7 +1733,7 @@ def solve_numerical_IK_hybrid(
 
 
         # ----------------------------------------------------
-        # Roll/pitch orientation error
+        # Pitch-only orientation error
         # ----------------------------------------------------
 
         "final_orientation_error": (
@@ -1939,6 +1802,8 @@ def solve_numerical_IK_hybrid(
         # Desired IK-site orientation
         # ----------------------------------------------------
 
+        # Retained only for backward compatibility.
+        # It is NOT part of the IK task.
         "roll_swing_des": float(
             roll_swing_des
         ),

@@ -14,13 +14,12 @@ def compute_newton_step(
     Compute one numerical inverse-kinematics update step
     using the pseudo-Newton method.
 
-    The method is intended for the 5D swing-foot task:
+    The method is intended for the 4D swing-foot task:
 
         error
             =
         [
             position error
-            roll error
             pitch error
         ]
 
@@ -32,7 +31,6 @@ def compute_newton_step(
             e_x
             e_y
             e_z
-            e_roll
             e_pitch
         ]
 
@@ -44,9 +42,9 @@ def compute_newton_step(
 
     and:
 
-        e_roll, e_pitch
+        e_pitch
 
-    are the swing-foot orientation errors.
+    is the swing-foot pitch-orientation error.
 
 
     The swing leg has 5 actuated joints:
@@ -61,9 +59,9 @@ def compute_newton_step(
             q_ankle
         ]
 
-    Therefore the 5D task Jacobian has:
+    Therefore the 4D task Jacobian has:
 
-        J in R^(5x5)
+        J in R^(4x5)
 
 
     The Moore-Penrose pseudoinverse is used:
@@ -77,14 +75,22 @@ def compute_newton_step(
         error
 
 
-    The pseudoinverse is retained instead of explicitly using
-    the matrix inverse because it is numerically safer when
-    the Jacobian is close to singular.
+    Since:
+
+        J in R^(4x5)
+
+    its pseudoinverse has:
+
+        pinv(J) in R^(5x4)
+
+    and therefore:
+
+        delta_q in R^5
 
 
     Parameters
     ----------
-    J : array_like, shape (5, 5)
+    J : array_like, shape (4, 5)
 
         Swing-leg task Jacobian.
 
@@ -95,14 +101,13 @@ def compute_newton_step(
             y
             z
 
-        The final two rows correspond to the selected
+        The final row corresponds to the selected
         orientation task:
 
-            roll
             pitch
 
 
-    error : array_like, shape (5,)
+    error : array_like, shape (4,)
 
         Swing-foot task-space error:
 
@@ -110,7 +115,6 @@ def compute_newton_step(
                 e_x,
                 e_y,
                 e_z,
-                e_roll,
                 e_pitch
             ]
 
@@ -170,12 +174,12 @@ def compute_newton_step(
     # ========================================================
 
     if J.shape != (
-        5,
+        4,
         5
     ):
 
         raise ValueError(
-            "J phải có shape (5, 5), "
+            "J phải có shape (4, 5), "
             f"nhưng nhận được {J.shape}."
         )
 
@@ -196,11 +200,11 @@ def compute_newton_step(
     # ========================================================
 
     if error.shape != (
-        5,
+        4,
     ):
 
         raise ValueError(
-            "error phải có shape (5,), "
+            "error phải có shape (4,), "
             f"nhưng nhận được {error.shape}."
         )
 
@@ -241,15 +245,15 @@ def compute_newton_step(
     #
     # For:
     #
-    #     J in R^(5x5)
+    #     J in R^(4x5)
     #
     # the pseudoinverse has:
     #
-    #     J_pinv in R^(5x5)
+    #     J_pinv in R^(5x4)
     #
-    # Even though J is square, pinv(J) is retained because
-    # it is numerically more robust near singular
-    # configurations than explicitly computing inv(J).
+    # The pseudoinverse is retained exactly as in the original
+    # IK structure because it remains numerically robust near
+    # singular configurations.
     # ========================================================
 
     J_pinv = np.linalg.pinv(

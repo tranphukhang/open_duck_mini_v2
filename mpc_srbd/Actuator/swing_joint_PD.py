@@ -10,11 +10,11 @@ def compute_swing_joint_PD(
     q,
     q_dot,
     Kp,
-    Kd
+    Kd,
+    q_dot_des=None,
 ):
     """
-    Compute joint torque for one swing leg using a joint-space
-    PD controller.
+    Compute joint torque for one swing leg using joint-space PD.
 
     Control law
     -----------
@@ -22,211 +22,102 @@ def compute_swing_joint_PD(
         tau_PD
             =
         Kp * (q_des - q)
+            +
+        Kd * (q_dot_des - q_dot)
+
+
+    Backward compatibility
+    ----------------------
+
+    If q_dot_des is omitted:
+
+        q_dot_des = 0
+
+    and the controller becomes the previous implementation:
+
+        tau_PD
+            =
+        Kp * (q_des - q)
             -
         Kd * q_dot
 
-    where the desired joint velocity is assumed to be zero:
 
-        q_dot_des = 0
+    Joint order
+    -----------
+
+        0. hip yaw
+        1. hip roll
+        2. hip pitch
+        3. knee
+        4. ankle
 
 
     Parameters
     ----------
     q_des : array_like, shape (5,)
-
-        Desired swing-leg joint positions obtained from IK:
-
-            [
-                q_hip_yaw_des,
-                q_hip_roll_des,
-                q_hip_pitch_des,
-                q_knee_des,
-                q_ankle_des
-            ]
-
-        Unit:
-
-            [rad]
-
+        Desired joint positions [rad].
 
     q : array_like, shape (5,)
-
-        Current swing-leg joint positions:
-
-            [
-                q_hip_yaw,
-                q_hip_roll,
-                q_hip_pitch,
-                q_knee,
-                q_ankle
-            ]
-
-        Unit:
-
-            [rad]
-
+        Current joint positions [rad].
 
     q_dot : array_like, shape (5,)
-
-        Current swing-leg joint velocities:
-
-            [
-                q_dot_hip_yaw,
-                q_dot_hip_roll,
-                q_dot_hip_pitch,
-                q_dot_knee,
-                q_dot_ankle
-            ]
-
-        Unit:
-
-            [rad/s]
-
+        Current joint velocities [rad/s].
 
     Kp : float or array_like, shape (5,)
-
-        Proportional gain.
-
-        Can be:
-
-            scalar
-
-        or:
-
-            [
-                Kp_hip_yaw,
-                Kp_hip_roll,
-                Kp_hip_pitch,
-                Kp_knee,
-                Kp_ankle
-            ]
-
+        Proportional gains.
 
     Kd : float or array_like, shape (5,)
+        Derivative gains.
 
-        Derivative gain.
+    q_dot_des : None or array_like, shape (5,), optional
+        Desired joint velocities [rad/s].
 
-        Can be:
-
-            scalar
-
-        or:
-
-            [
-                Kd_hip_yaw,
-                Kd_hip_roll,
-                Kd_hip_pitch,
-                Kd_knee,
-                Kd_ankle
-            ]
+        If None:
+            q_dot_des = zeros(5)
 
 
     Returns
     -------
     tau_PD : np.ndarray, shape (5,)
-
-        Swing-leg joint torques:
-
-            [
-                tau_hip_yaw,
-                tau_hip_roll,
-                tau_hip_pitch,
-                tau_knee,
-                tau_ankle
-            ]
-
-        Unit:
-
-            [N.m]
+        Swing-leg joint torques [N.m].
     """
-
 
     # ========================================================
     # 1. CONVERT JOINT INPUTS
     # ========================================================
 
-    q_des = np.asarray(
+    q_des = _convert_joint_vector(
         q_des,
-        dtype=float
-    ).reshape(-1)
+        "q_des",
+    )
 
-
-    q = np.asarray(
+    q = _convert_joint_vector(
         q,
-        dtype=float
-    ).reshape(-1)
+        "q",
+    )
 
-
-    q_dot = np.asarray(
+    q_dot = _convert_joint_vector(
         q_dot,
-        dtype=float
-    ).reshape(-1)
+        "q_dot",
+    )
 
 
     # ========================================================
-    # 2. VALIDATE JOINT INPUTS
+    # 2. DESIRED JOINT VELOCITY
     # ========================================================
 
-    if q_des.shape != (
-        5,
-    ):
+    if q_dot_des is None:
 
-        raise ValueError(
-            "q_des phải có shape (5,), "
-            f"nhưng nhận được {q_des.shape}."
+        q_dot_des = np.zeros(
+            5,
+            dtype=float,
         )
 
+    else:
 
-    if q.shape != (
-        5,
-    ):
-
-        raise ValueError(
-            "q phải có shape (5,), "
-            f"nhưng nhận được {q.shape}."
-        )
-
-
-    if q_dot.shape != (
-        5,
-    ):
-
-        raise ValueError(
-            "q_dot phải có shape (5,), "
-            f"nhưng nhận được {q_dot.shape}."
-        )
-
-
-    if not np.all(
-        np.isfinite(
-            q_des
-        )
-    ):
-
-        raise ValueError(
-            "q_des chứa NaN hoặc Inf."
-        )
-
-
-    if not np.all(
-        np.isfinite(
-            q
-        )
-    ):
-
-        raise ValueError(
-            "q chứa NaN hoặc Inf."
-        )
-
-
-    if not np.all(
-        np.isfinite(
-            q_dot
-        )
-    ):
-
-        raise ValueError(
-            "q_dot chứa NaN hoặc Inf."
+        q_dot_des = _convert_joint_vector(
+            q_dot_des,
+            "q_dot_des",
         )
 
 
@@ -236,24 +127,25 @@ def compute_swing_joint_PD(
 
     Kp = _convert_gain(
         Kp,
-        "Kp"
+        "Kp",
     )
-
 
     Kd = _convert_gain(
         Kd,
-        "Kd"
+        "Kd",
     )
 
 
     # ========================================================
-    # 4. JOINT POSITION ERROR
+    # 4. JOINT ERRORS
     #
-    #     e_q
+    # Position:
     #
-    # =
+    #     e_q = q_des - q
     #
-    #     q_des - q
+    # Velocity:
+    #
+    #     e_q_dot = q_dot_des - q_dot
     # ========================================================
 
     q_error = (
@@ -262,35 +154,33 @@ def compute_swing_joint_PD(
         q
     )
 
+    q_dot_error = (
+        q_dot_des
+        -
+        q_dot
+    )
+
 
     # ========================================================
     # 5. PD CONTROL LAW
     #
-    # Desired joint velocity:
-    #
-    #     q_dot_des = 0
-    #
-    # Therefore:
-    #
     #     tau_PD
-    #
-    # =
-    #
-    #     Kp * (q_des - q)
-    #
-    #     -
-    #
-    #     Kd * q_dot
+    #         =
+    #     Kp * e_q
+    #         +
+    #     Kd * e_q_dot
     # ========================================================
 
     tau_PD = (
         Kp
         *
         q_error
-        -
+
+        +
+
         Kd
         *
-        q_dot
+        q_dot_error
     )
 
 
@@ -327,37 +217,59 @@ def compute_swing_joint_PD(
 
 
 # ============================================================
+# JOINT VECTOR CONVERSION
+# ============================================================
+
+def _convert_joint_vector(
+    value,
+    value_name,
+):
+
+    value = np.asarray(
+        value,
+        dtype=float,
+    ).reshape(-1)
+
+
+    if value.shape != (
+        5,
+    ):
+
+        raise ValueError(
+            f"{value_name} phải có shape (5,), "
+            f"nhưng nhận được {value.shape}."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            value
+        )
+    ):
+
+        raise ValueError(
+            f"{value_name} chứa NaN hoặc Inf."
+        )
+
+
+    return value.copy()
+
+
+# ============================================================
 # GAIN CONVERSION
 # ============================================================
 
 def _convert_gain(
     gain,
-    gain_name
+    gain_name,
 ):
     """
     Convert scalar or 5-element gain into a 5-element vector.
-
-    Examples
-    --------
-
-        Kp = 20
-
-    becomes:
-
-        [20, 20, 20, 20, 20]
-
-
-    while:
-
-        Kp = [20, 20, 30, 30, 20]
-
-    is kept unchanged.
     """
-
 
     gain = np.asarray(
         gain,
-        dtype=float
+        dtype=float,
     )
 
 
@@ -391,7 +303,7 @@ def _convert_gain(
         return np.full(
             5,
             gain_value,
-            dtype=float
+            dtype=float,
         )
 
 

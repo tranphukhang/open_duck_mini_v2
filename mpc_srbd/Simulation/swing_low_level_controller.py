@@ -6,10 +6,16 @@ import numpy as np
 
 # ============================================================
 # FOOTHOLD PLANNER
+#
+# Keep this import at module level because run.py may replace:
+#
+#     swing_low_level_controller.compute_raibert_foothold
+#
+# with the DCM foothold callback.
 # ============================================================
 
 from Foothold_Planner.raibert_heuristic import (
-    compute_raibert_foothold
+    compute_raibert_foothold,
 )
 
 
@@ -18,7 +24,7 @@ from Foothold_Planner.raibert_heuristic import (
 # ============================================================
 
 from Kinematics.numerical_IK_hybrid import (
-    solve_numerical_IK_hybrid
+    solve_numerical_IK_hybrid,
 )
 
 from Kinematics.numerical_IK_params import (
@@ -26,7 +32,7 @@ from Kinematics.numerical_IK_params import (
     ALPHA_NEWTON,
     ETA_GRADIENT,
     IK_TOLERANCE,
-    IK_MAX_ITERATIONS
+    IK_MAX_ITERATIONS,
 )
 
 
@@ -35,81 +41,120 @@ from Kinematics.numerical_IK_params import (
 # ============================================================
 
 from Actuator.swing_joint_PD import (
-    compute_swing_joint_PD
+    compute_swing_joint_PD,
 )
 
 from Actuator.swing_joint_PD_params import (
     KP_SWING,
-    KD_SWING
+    KD_SWING,
 )
 
 
 # ============================================================
-# SWING-FOOT ORIENTATION COMMAND
+# SWING-FOOT ORIENTATION
 #
-# Numerical IK controls the 5D task:
+# Current numerical IK task:
 #
-#     [
-#         x
-#         y
-#         z
-#         roll
-#         pitch
-#     ]
+#     [x, y, z, pitch]
 #
-# L6_IK / R6_IK are World-aligned at the home configuration.
-#
-# Therefore, for flat-ground walking:
-#
-#     roll_des  = 0
-#     pitch_des = 0
-#
-# Yaw is deliberately not controlled by the numerical IK.
+# Roll is free.
+# Yaw is free.
+# Pitch is constrained.
 # ============================================================
-
-SWING_ROLL_DES = 0.0
 
 SWING_PITCH_DES = 0.0
 
 
 # ============================================================
-# IK ORIENTATION CONVERGENCE TOLERANCE
+# DESIRED JOINT VELOCITY ESTIMATOR
+#
+# q_dot_des is estimated from consecutive IK outputs:
+#
+#     q_dot_des_raw(k)
+#         =
+#     [q_des(k) - q_des(k-1)] / dt
+#
+# Then:
+#
+#     1) velocity limit
+#     2) first-order low-pass filter
+#
+# Filter:
+#
+#     alpha = 1 - exp(-dt / tau)
+#
+#     q_dot_des_f(k)
+#         =
+#     alpha * q_dot_des_raw(k)
+#         +
+#     (1-alpha) * q_dot_des_f(k-1)
 # ============================================================
 
-IK_ORIENTATION_TOLERANCE = 1e-3
+Q_DOT_DES_FILTER_TAU = 0.005
+
+Q_DOT_DES_HISTORY_RESET_GAP = 0.020
+
+Q_DOT_DES_LIMIT = np.array(
+    [
+        6.0,    # hip yaw   [rad/s]
+        6.0,    # hip roll  [rad/s]
+        8.0,    # hip pitch [rad/s]
+        10.0,   # knee      [rad/s]
+        8.0,    # ankle     [rad/s]
+    ],
+    dtype=float,
+)
 
 
 # ============================================================
-# SWING LEG JOINT CONFIGURATION
-#
-# Joint order:
-#
-#     0. hip yaw
-#     1. hip roll
-#     2. hip pitch
-#     3. knee
-#     4. ankle
+# JOINT ORDER
 # ============================================================
 
 SWING_LEG_JOINT_NAMES = {
-
     "L": (
         "L_hip_yaw",
         "L_hip_roll",
         "L_hip_pitch",
         "L_knee",
-        "L_ankle"
+        "L_ankle",
     ),
-
     "R": (
         "R_hip_yaw",
         "R_hip_roll",
         "R_hip_pitch",
         "R_knee",
-        "R_ankle"
-    )
-
+        "R_ankle",
+    ),
 }
+
+
+# ============================================================
+# DESIRED JOINT VELOCITY HISTORY
+# ============================================================
+
+def _new_q_dot_des_state():
+    return {
+        "initialized": False,
+        "previous_time": None,
+        "previous_q_des": None,
+        "q_dot_des_filtered": np.zeros(
+            5,
+            dtype=float,
+        ),
+    }
+
+
+_Q_DOT_DES_STATE = {
+    "L": _new_q_dot_des_state(),
+    "R": _new_q_dot_des_state(),
+}
+
+
+# ============================================================
+# IK ORIENTATION TOLERANCE
+# ============================================================
+
+IK_ORIENTATION_TOLERANCE = 1e-3
 
 
 # ============================================================
@@ -118,10 +163,6 @@ SWING_LEG_JOINT_NAMES = {
 
 @dataclass
 class SwingLowLevelResult:
-    """
-    Output of one swing-leg low-level control cycle.
-    """
-
     tau_swing: np.ndarray
 
     W_p_foothold: np.ndarray
@@ -134,11 +175,339 @@ class SwingLowLevelResult:
 
     q_dot_swing: np.ndarray
 
+    q_dot_swing_des: np.ndarray
+
     ik_diagnostics: dict
 
     swing_foot: str
 
     phase_next: float
+
+
+# ============================================================
+# RESET q_dot_des HISTORY
+# ============================================================
+
+def reset_swing_joint_velocity_reference(
+    swing_foot=None,
+):
+    """
+    Reset desired-joint-velocity history.
+
+    Parameters
+    ----------
+    swing_foot : {"L", "R", None}
+        None -> reset both legs.
+    """
+
+    if swing_foot is None:
+        legs = (
+            "L",
+            "R",
+        )
+
+    else:
+        if swing_foot not in (
+            "L",
+            "R",
+        ):
+            raise ValueError(
+                "swing_foot phải là 'L', 'R' hoặc None."
+            )
+
+        legs = (
+            swing_foot,
+        )
+
+
+    for leg in legs:
+        _Q_DOT_DES_STATE[
+            leg
+        ] = _new_q_dot_des_state()
+
+
+# ============================================================
+# ESTIMATE q_dot_des
+# ============================================================
+
+def _estimate_q_dot_swing_des(
+    q_swing_des,
+    swing_foot,
+    current_time,
+):
+    """
+    Estimate desired swing-joint velocity from consecutive IK
+    joint references.
+    """
+
+    if swing_foot not in (
+        "L",
+        "R",
+    ):
+        raise ValueError(
+            "swing_foot phải là 'L' hoặc 'R'."
+        )
+
+
+    q_swing_des = np.asarray(
+        q_swing_des,
+        dtype=float,
+    ).reshape(-1)
+
+
+    if q_swing_des.shape != (
+        5,
+    ):
+        raise ValueError(
+            "q_swing_des phải có shape (5,), "
+            f"nhưng nhận được {q_swing_des.shape}."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            q_swing_des
+        )
+    ):
+        raise ValueError(
+            "q_swing_des chứa NaN hoặc Inf."
+        )
+
+
+    current_time = float(
+        current_time
+    )
+
+
+    if not np.isfinite(
+        current_time
+    ):
+        raise ValueError(
+            "current_time phải hữu hạn."
+        )
+
+
+    state = _Q_DOT_DES_STATE[
+        swing_foot
+    ]
+
+
+    # --------------------------------------------------------
+    # First sample for this leg
+    # --------------------------------------------------------
+
+    if not state[
+        "initialized"
+    ]:
+        q_dot_swing_des = np.zeros(
+            5,
+            dtype=float,
+        )
+
+        state[
+            "initialized"
+        ] = True
+
+        state[
+            "previous_time"
+        ] = current_time
+
+        state[
+            "previous_q_des"
+        ] = q_swing_des.copy()
+
+        state[
+            "q_dot_des_filtered"
+        ] = q_dot_swing_des.copy()
+
+        return q_dot_swing_des
+
+
+    previous_time = state[
+        "previous_time"
+    ]
+
+    previous_q_des = state[
+        "previous_q_des"
+    ]
+
+
+    # --------------------------------------------------------
+    # Time interval
+    # --------------------------------------------------------
+
+    if (
+        previous_time is None
+        or
+        previous_q_des is None
+    ):
+        reset_swing_joint_velocity_reference(
+            swing_foot
+        )
+
+        return _estimate_q_dot_swing_des(
+            q_swing_des=q_swing_des,
+            swing_foot=swing_foot,
+            current_time=current_time,
+        )
+
+
+    dt = (
+        current_time
+        -
+        float(
+            previous_time
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Reset after a long gap or invalid time step
+    #
+    # This avoids a derivative spike when a leg starts a new
+    # swing after being inactive.
+    # --------------------------------------------------------
+
+    if (
+        not np.isfinite(
+            dt
+        )
+        or
+        dt <= 0.0
+        or
+        dt > Q_DOT_DES_HISTORY_RESET_GAP
+    ):
+        q_dot_swing_des = np.zeros(
+            5,
+            dtype=float,
+        )
+
+        state[
+            "previous_time"
+        ] = current_time
+
+        state[
+            "previous_q_des"
+        ] = q_swing_des.copy()
+
+        state[
+            "q_dot_des_filtered"
+        ] = q_dot_swing_des.copy()
+
+        return q_dot_swing_des
+
+
+    # --------------------------------------------------------
+    # Finite difference
+    # --------------------------------------------------------
+
+    q_dot_des_raw = (
+        q_swing_des
+        -
+        np.asarray(
+            previous_q_des,
+            dtype=float,
+        )
+    ) / dt
+
+
+    # --------------------------------------------------------
+    # Limit numerical IK derivative spikes
+    # --------------------------------------------------------
+
+    q_dot_des_raw = np.clip(
+        q_dot_des_raw,
+        -Q_DOT_DES_LIMIT,
+        Q_DOT_DES_LIMIT,
+    )
+
+
+    # --------------------------------------------------------
+    # Low-pass filter
+    # --------------------------------------------------------
+
+    if Q_DOT_DES_FILTER_TAU <= 0.0:
+        alpha = 1.0
+
+    else:
+        alpha = (
+            1.0
+            -
+            np.exp(
+                -dt
+                /
+                Q_DOT_DES_FILTER_TAU
+            )
+        )
+
+
+    alpha = float(
+        np.clip(
+            alpha,
+            0.0,
+            1.0,
+        )
+    )
+
+
+    q_dot_des_previous = np.asarray(
+        state[
+            "q_dot_des_filtered"
+        ],
+        dtype=float,
+    )
+
+
+    q_dot_swing_des = (
+        alpha
+        *
+        q_dot_des_raw
+        +
+        (
+            1.0
+            -
+            alpha
+        )
+        *
+        q_dot_des_previous
+    )
+
+
+    q_dot_swing_des = np.clip(
+        q_dot_swing_des,
+        -Q_DOT_DES_LIMIT,
+        Q_DOT_DES_LIMIT,
+    )
+
+
+    if not np.all(
+        np.isfinite(
+            q_dot_swing_des
+        )
+    ):
+        raise RuntimeError(
+            "q_dot_swing_des chứa NaN hoặc Inf."
+        )
+
+
+    # --------------------------------------------------------
+    # Update history
+    # --------------------------------------------------------
+
+    state[
+        "previous_time"
+    ] = current_time
+
+    state[
+        "previous_q_des"
+    ] = q_swing_des.copy()
+
+    state[
+        "q_dot_des_filtered"
+    ] = q_dot_swing_des.copy()
+
+
+    return q_dot_swing_des
 
 
 # ============================================================
@@ -148,101 +517,64 @@ class SwingLowLevelResult:
 def _get_swing_joint_state(
     model,
     data,
-    swing_foot
+    swing_foot,
 ):
     """
-    Read current joint positions and velocities of one leg.
+    Read current swing-leg joint positions and velocities.
 
     Returns
     -------
-    q_swing : np.ndarray, shape (5,)
-
-        Current swing-leg joint positions [rad].
-
-    q_dot_swing : np.ndarray, shape (5,)
-
-        Current swing-leg joint velocities [rad/s].
+    q_swing : shape (5,)
+    q_dot_swing : shape (5,)
     """
-
-
-    # ========================================================
-    # 1. VALIDATE SWING FOOT
-    # ========================================================
 
     if swing_foot not in (
         "L",
-        "R"
+        "R",
     ):
-
         raise ValueError(
             "swing_foot phải là 'L' hoặc 'R'."
         )
 
 
-    # ========================================================
-    # 2. JOINT NAMES
-    # ========================================================
+    joint_names = SWING_LEG_JOINT_NAMES[
+        swing_foot
+    ]
 
-    joint_names = (
-        SWING_LEG_JOINT_NAMES[
-            swing_foot
-        ]
-    )
-
-
-    # ========================================================
-    # 3. READ JOINT STATE
-    # ========================================================
 
     q_swing = np.zeros(
         5,
-        dtype=float
+        dtype=float,
     )
-
 
     q_dot_swing = np.zeros(
         5,
-        dtype=float
+        dtype=float,
     )
 
 
     for i, joint_name in enumerate(
         joint_names
     ):
-
-        # ----------------------------------------------------
-        # Joint ID
-        # ----------------------------------------------------
-
         joint_id = mujoco.mj_name2id(
             model,
             mujoco.mjtObj.mjOBJ_JOINT,
-            joint_name
+            joint_name,
         )
 
 
         if joint_id < 0:
-
             raise ValueError(
-                f"Không tìm thấy joint "
-                f"'{joint_name}' trong MuJoCo model."
+                f"Không tìm thấy joint '{joint_name}' "
+                "trong MuJoCo model."
             )
 
-
-        # ----------------------------------------------------
-        # qpos address
-        # ----------------------------------------------------
 
         qpos_address = int(
             model.jnt_qposadr[
                 joint_id
             ]
         )
-
-
-        # ----------------------------------------------------
-        # qvel / DOF address
-        # ----------------------------------------------------
 
         dof_address = int(
             model.jnt_dofadr[
@@ -251,20 +583,11 @@ def _get_swing_joint_state(
         )
 
 
-        # ----------------------------------------------------
-        # Current joint position
-        # ----------------------------------------------------
-
         q_swing[
             i
         ] = data.qpos[
             qpos_address
         ]
-
-
-        # ----------------------------------------------------
-        # Current joint velocity
-        # ----------------------------------------------------
 
         q_dot_swing[
             i
@@ -273,34 +596,11 @@ def _get_swing_joint_state(
         ]
 
 
-    # ========================================================
-    # 4. OUTPUT VALIDATION
-    # ========================================================
-
-    if q_swing.shape != (
-        5,
-    ):
-
-        raise RuntimeError(
-            "q_swing phải có shape (5,)."
-        )
-
-
-    if q_dot_swing.shape != (
-        5,
-    ):
-
-        raise RuntimeError(
-            "q_dot_swing phải có shape (5,)."
-        )
-
-
     if not np.all(
         np.isfinite(
             q_swing
         )
     ):
-
         raise RuntimeError(
             "q_swing chứa NaN hoặc Inf."
         )
@@ -311,19 +611,14 @@ def _get_swing_joint_state(
             q_dot_swing
         )
     ):
-
         raise RuntimeError(
             "q_dot_swing chứa NaN hoặc Inf."
         )
 
 
-    # ========================================================
-    # 5. RETURN
-    # ========================================================
-
     return (
         q_swing,
-        q_dot_swing
+        q_dot_swing,
     )
 
 
@@ -347,189 +642,57 @@ def compute_swing_low_level_control(
     W_p_dot_CoM_ref,
     T_stance,
     k_d,
-    ground_height=0.0
+    ground_height=0.0,
 ):
     """
-    Compute the low-level joint torque command for the current
-    swing leg.
+    Compute low-level torque for the current swing leg.
 
-    Control pipeline
-    ----------------
+    Pipeline
+    --------
 
-        HECTOR-style Raibert foothold planner
-
-            -> W_p_foothold
-
-
-        Cubic Bezier trajectory
-
-            -> W_p_swing_des
-
-
-        5D Hybrid numerical IK
-
-            [
-                x
-                y
-                z
-                roll
-                pitch
-            ]
-
-            -> q_swing_des
+        foothold planner
+            ->
+        Bezier swing trajectory
+            ->
+        pitch-only 4D numerical IK
+            ->
+        q_dot_des estimator
+            ->
+        joint-space PD
 
 
-        Joint-space PD
+    PD law
+    ------
 
-            -> tau_swing
-
-
-    ==========================================================
-    HECTOR-STYLE RAIBERT
-    ==========================================================
-
-    For swing foot i:
-
-        W_p_foothold,i
+        tau
             =
-        W_p_CoM
+        Kp * (q_des - q)
             +
-        W_R_B @ B_p_offset,i
-            +
-        W_p_dot_CoM * delta_T
-            +
-        1/2 * W_p_dot_CoM * T_stance
-            +
-        k_d
-        (
-            W_p_dot_CoM
-            -
-            W_p_dot_CoM_ref
-        )
+        Kd * (q_dot_des - q_dot)
 
 
-    where:
+    Important
+    ---------
 
-        delta_T
-
-    is the remaining swing time.
-
-
-    Only x-y are planned using the Raibert heuristic.
-
-    The foothold z coordinate is assigned separately using:
-
-        ground_height
-
-
-    ==========================================================
-    IMPORTANT
-    ==========================================================
-
-    This function is only used when:
-
-        swing_foot = "L"
-
-    or:
-
-        swing_foot = "R"
-
-
-    Double Support is handled outside this function by the
-    simulation run file.
-
-
-    ==========================================================
-    FOOTHOLD PLANNING
-    ==========================================================
-
-    The HECTOR-style Raibert planner uses:
-
-        W_p_CoM
-
-        W_R_B
-
-        B_p_L6_offset
-
-        B_p_R6_offset
-
-        W_p_dot_CoM
-
-        W_p_dot_CoM_ref
-
-        delta_T
-
-        T_stance
-
-    to compute the desired touchdown foothold.
-
-
-    The Bezier trajectory still starts from the actual physical:
-
-        L6
-        R6
-
-    positions and ends at the Raibert foothold.
-
-
-    Since:
-
-        L6_IK
-        R6_IK
-
-    are colocated with physical:
-
-        L6
-        R6
-
-    the desired Bezier position can still be passed directly
-    to the existing 5D numerical IK.
-
-
-    ==========================================================
-    FOOT ORIENTATION
-    ==========================================================
-
-    The numerical IK internally uses:
-
-        L6_IK
-        R6_IK
-
-    for both position and orientation.
-
-
-    For flat-ground walking:
-
-        roll_swing_des  = 0
-
-        pitch_swing_des = 0
-
-
-    Yaw is deliberately not controlled.
+    The function signature is kept unchanged so the existing
+    run.py can continue calling this function exactly as before.
     """
 
-
     # ========================================================
-    # 1. VALIDATE SWING FOOT
+    # 1. VALIDATE INPUT
     # ========================================================
 
     if swing_foot not in (
         "L",
-        "R"
+        "R",
     ):
-
         raise ValueError(
             "compute_swing_low_level_control chỉ được gọi "
             "khi swing_foot là 'L' hoặc 'R'."
         )
 
 
-    # ========================================================
-    # 2. VALIDATE TRAJECTORY GENERATOR
-    # ========================================================
-
     if swing_trajectory is None:
-
         raise ValueError(
             "swing_trajectory không được là None."
         )
@@ -537,160 +700,98 @@ def compute_swing_low_level_control(
 
     if not hasattr(
         swing_trajectory,
-        "update"
+        "update",
     ):
-
         raise TypeError(
             "swing_trajectory phải có hàm update()."
         )
 
 
     # ========================================================
-    # 3. HECTOR-STYLE RAIBERT FOOTHOLD
+    # 2. FOOTHOLD PLANNER
     #
-    # For swing foot i:
+    # IMPORTANT:
     #
-    #     W_p_foothold,i
-    #
-    # =
-    #
-    #     W_p_CoM
-    #
-    #     +
-    #
-    #     W_R_B @ B_p_offset,i
-    #
-    #     +
-    #
-    #     W_p_dot_CoM * delta_T
-    #
-    #     +
-    #
-    #     1/2 * W_p_dot_CoM * T_stance
-    #
-    #     +
-    #
-    #     k_d
-    #     (
-    #         W_p_dot_CoM
-    #         -
-    #         W_p_dot_CoM_ref
-    #     )
-    #
-    #
-    # Only x-y are planned by the heuristic.
-    #
-    # z touchdown is assigned separately by:
-    #
-    #     ground_height
-    #
-    # Here:
-    #
-    #     delta_T
-    #
-    # is the remaining swing time.
+    # run.py may monkeypatch the module-level function
+    # compute_raibert_foothold with the DCM foothold planner.
+    # Keep this call at module level.
     # ========================================================
 
     W_p_foothold = compute_raibert_foothold(
-
         W_p_CoM=W_p_CoM,
-
         W_R_B=W_R_B,
-
         B_p_L6_offset=B_p_L6_offset,
-
         B_p_R6_offset=B_p_R6_offset,
-
         W_p_dot_CoM=W_p_dot_CoM,
-
-        W_p_dot_CoM_ref=(
-            W_p_dot_CoM_ref
-        ),
-
+        W_p_dot_CoM_ref=W_p_dot_CoM_ref,
         swing_foot=swing_foot,
-
         delta_T=delta_T,
-
         T_stance=T_stance,
-
         k_d=k_d,
-
-        ground_height=ground_height
+        ground_height=ground_height,
     )
 
 
     if W_p_foothold is None:
-
         raise RuntimeError(
-            "Raibert planner trả về None "
+            "Foothold planner trả về None "
             "trong khi đang có swing foot."
         )
 
 
-    # ========================================================
-    # 4. CUBIC BEZIER SWING TRAJECTORY
-    #
-    # Input:
-    #
-    #     actual L6
-    #     actual R6
-    #     current foothold
-    #     swing foot
-    #
-    #
-    # Output:
-    #
-    #     W_p_swing_des
-    #
-    # =
-    #
-    #     desired swing-foot position
-    #     expressed in World frame
-    #
-    #
-    # Because:
-    #
-    #     p_L6_IK = p_L6
-    #
-    # and:
-    #
-    #     p_R6_IK = p_R6
-    #
-    # this position target can be passed directly to the 5D IK.
-    # ========================================================
+    W_p_foothold = np.asarray(
+        W_p_foothold,
+        dtype=float,
+    ).reshape(-1)
 
-    W_p_swing_des = (
-        swing_trajectory.update(
 
-            W_p_L6=W_p_L6,
-
-            W_p_R6=W_p_R6,
-
-            W_p_foothold=W_p_foothold,
-
-            swing_foot=swing_foot
+    if W_p_foothold.shape != (
+        3,
+    ):
+        raise RuntimeError(
+            "W_p_foothold phải có shape (3,), "
+            f"nhưng nhận được {W_p_foothold.shape}."
         )
+
+
+    if not np.all(
+        np.isfinite(
+            W_p_foothold
+        )
+    ):
+        raise RuntimeError(
+            "W_p_foothold chứa NaN hoặc Inf."
+        )
+
+
+    # ========================================================
+    # 3. SWING-FOOT TRAJECTORY
+    # ========================================================
+
+    W_p_swing_des = swing_trajectory.update(
+        W_p_L6=W_p_L6,
+        W_p_R6=W_p_R6,
+        W_p_foothold=W_p_foothold,
+        swing_foot=swing_foot,
     )
 
 
     if W_p_swing_des is None:
-
         raise RuntimeError(
-            "Bezier trajectory trả về None "
+            "Swing trajectory trả về None "
             "trong khi đang có swing foot."
         )
 
 
     W_p_swing_des = np.asarray(
         W_p_swing_des,
-        dtype=float
+        dtype=float,
     ).reshape(-1)
 
 
     if W_p_swing_des.shape != (
         3,
     ):
-
         raise RuntimeError(
             "W_p_swing_des phải có shape (3,), "
             f"nhưng nhận được {W_p_swing_des.shape}."
@@ -702,126 +803,69 @@ def compute_swing_low_level_control(
             W_p_swing_des
         )
     ):
-
         raise RuntimeError(
             "W_p_swing_des chứa NaN hoặc Inf."
         )
 
 
     # ========================================================
-    # 5. READ CURRENT SWING-LEG JOINT STATE
-    #
-    # These values are used by the joint-space PD controller:
-    #
-    #     q_swing
-    #
-    #     q_dot_swing
+    # 4. CURRENT SWING JOINT STATE
     # ========================================================
 
     (
         q_swing,
-        q_dot_swing
-
+        q_dot_swing,
     ) = _get_swing_joint_state(
-        model,
-        data,
-        swing_foot
+        model=model,
+        data=data,
+        swing_foot=swing_foot,
     )
 
 
     # ========================================================
-    # 6. 5D HYBRID NUMERICAL IK
+    # 5. PITCH-ONLY HYBRID NUMERICAL IK
     #
-    # Desired task:
+    # Task:
     #
-    #     [
-    #         W_p_swing_des_x
-    #         W_p_swing_des_y
-    #         W_p_swing_des_z
-    #         SWING_ROLL_DES
-    #         SWING_PITCH_DES
-    #     ]
+    #     [x, y, z, pitch]
     #
-    #
-    # Flat ground:
-    #
-    #     SWING_ROLL_DES  = 0
-    #
-    #     SWING_PITCH_DES = 0
-    #
-    #
-    # The Hybrid solver internally uses:
-    #
-    #     L6_IK
-    #
-    # or:
-    #
-    #     R6_IK
-    #
-    #
-    # Method selection:
-    #
-    #     sigma_min > SIGMA_THRESHOLD
-    #
-    #         -> pseudo-Newton
-    #
-    # otherwise:
-    #
-    #         -> Gradient Descent
+    # Roll free.
+    # Yaw free.
     # ========================================================
 
     (
         q_swing_des,
-        ik_diagnostics
-
+        ik_diagnostics,
     ) = solve_numerical_IK_hybrid(
-
         model=model,
-
         data=data,
-
         W_p_swing_des=W_p_swing_des,
-
         swing_foot=swing_foot,
-
-        roll_swing_des=SWING_ROLL_DES,
-
         pitch_swing_des=SWING_PITCH_DES,
-
         sigma_threshold=SIGMA_THRESHOLD,
-
         alpha_newton=ALPHA_NEWTON,
-
         eta_gradient=ETA_GRADIENT,
-
         tolerance=IK_TOLERANCE,
-
-        orientation_tolerance=(
-            IK_ORIENTATION_TOLERANCE
-        ),
-
-        max_iterations=IK_MAX_ITERATIONS
+        orientation_tolerance=IK_ORIENTATION_TOLERANCE,
+        max_iterations=IK_MAX_ITERATIONS,
     )
 
 
     if q_swing_des is None:
-
         raise RuntimeError(
-            "Hybrid IK trả về q_swing_des = None "
-            "trong khi đang có swing foot."
+            "Hybrid IK trả về q_swing_des = None."
         )
 
 
     q_swing_des = np.asarray(
         q_swing_des,
-        dtype=float
+        dtype=float,
     ).reshape(-1)
 
 
     if q_swing_des.shape != (
         5,
     ):
-
         raise RuntimeError(
             "q_swing_des phải có shape (5,), "
             f"nhưng nhận được {q_swing_des.shape}."
@@ -833,67 +877,51 @@ def compute_swing_low_level_control(
             q_swing_des
         )
     ):
-
         raise RuntimeError(
             "q_swing_des chứa NaN hoặc Inf."
         )
 
 
     # ========================================================
-    # 7. SWING JOINT PD
-    #
-    #     tau_swing
-    #
-    # =
-    #
-    #     KP_SWING
-    #
-    #     (
-    #         q_swing_des
-    #         -
-    #         q_swing
-    #     )
-    #
-    #     -
-    #
-    #     KD_SWING
-    #
-    #     q_dot_swing
-    #
-    #
-    # Desired joint velocity:
-    #
-    #     q_dot_des = 0
+    # 6. DESIRED JOINT VELOCITY
     # ========================================================
 
-    tau_swing = compute_swing_joint_PD(
-
-        q_des=q_swing_des,
-
-        q=q_swing,
-
-        q_dot=q_dot_swing,
-
-        Kp=KP_SWING,
-
-        Kd=KD_SWING
+    q_dot_swing_des = _estimate_q_dot_swing_des(
+        q_swing_des=q_swing_des,
+        swing_foot=swing_foot,
+        current_time=data.time,
     )
 
 
     # ========================================================
-    # 8. OUTPUT VALIDATION
+    # 7. JOINT-SPACE PD
+    #
+    #     tau
+    #         =
+    #     Kp(q_des-q)
+    #         +
+    #     Kd(q_dot_des-q_dot)
     # ========================================================
+
+    tau_swing = compute_swing_joint_PD(
+        q_des=q_swing_des,
+        q=q_swing,
+        q_dot=q_dot_swing,
+        Kp=KP_SWING,
+        Kd=KD_SWING,
+        q_dot_des=q_dot_swing_des,
+    )
+
 
     tau_swing = np.asarray(
         tau_swing,
-        dtype=float
+        dtype=float,
     ).reshape(-1)
 
 
     if tau_swing.shape != (
         5,
     ):
-
         raise RuntimeError(
             "tau_swing phải có shape (5,), "
             f"nhưng nhận được {tau_swing.shape}."
@@ -905,85 +933,46 @@ def compute_swing_low_level_control(
             tau_swing
         )
     ):
-
         raise RuntimeError(
             "tau_swing chứa NaN hoặc Inf."
         )
 
 
     # ========================================================
-    # 9. CURRENT TRAJECTORY INTERNAL PHASE
+    # 8. TRAJECTORY PHASE
     #
-    # CubicBezierSwingTrajectory.update() already advances:
-    #
-    #     phi_(k+1)
-    #
-    # Therefore this value represents the phase stored for
-    # the NEXT low-level update.
+    # update() may already advance the internal phase, so this
+    # is the phase stored for the next update.
     # ========================================================
 
     if hasattr(
         swing_trajectory,
-        "get_phase"
+        "get_phase",
     ):
-
-        phase_next = (
+        phase_next = float(
             swing_trajectory.get_phase()
         )
 
-
     else:
-
         phase_next = np.nan
 
 
     # ========================================================
-    # 10. RETURN
+    # 9. RETURN
     #
-    # No torque saturation is performed here.
-    #
-    # MuJoCo actuator ctrlrange defined in the XML is
-    # responsible for actuator control limits.
+    # No torque clipping is performed here.
+    # MuJoCo actuator ctrlrange handles actuator limits.
     # ========================================================
 
     return SwingLowLevelResult(
-
-        tau_swing=(
-            tau_swing.copy()
-        ),
-
-        W_p_foothold=(
-            np.asarray(
-                W_p_foothold,
-                dtype=float
-            ).copy()
-        ),
-
-        W_p_swing_des=(
-            W_p_swing_des.copy()
-        ),
-
-        q_swing_des=(
-            q_swing_des.copy()
-        ),
-
-        q_swing=(
-            q_swing.copy()
-        ),
-
-        q_dot_swing=(
-            q_dot_swing.copy()
-        ),
-
-        ik_diagnostics=(
-            ik_diagnostics
-        ),
-
-        swing_foot=(
-            swing_foot
-        ),
-
-        phase_next=float(
-            phase_next
-        )
+        tau_swing=tau_swing.copy(),
+        W_p_foothold=W_p_foothold.copy(),
+        W_p_swing_des=W_p_swing_des.copy(),
+        q_swing_des=q_swing_des.copy(),
+        q_swing=q_swing.copy(),
+        q_dot_swing=q_dot_swing.copy(),
+        q_dot_swing_des=q_dot_swing_des.copy(),
+        ik_diagnostics=ik_diagnostics,
+        swing_foot=swing_foot,
+        phase_next=phase_next,
     )

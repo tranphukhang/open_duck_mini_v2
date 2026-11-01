@@ -11,6 +11,9 @@ import numpy as np
 #     2. hip pitch
 #     3. knee
 #     4. ankle
+#
+# Tuned using isolated MuJoCo swing-joint tracking tests,
+# including a 2.5 Hz coupled moving-reference test.
 # ============================================================
 
 
@@ -20,13 +23,13 @@ import numpy as np
 
 KP_SWING = np.array(
     [
-        8.0,    # hip yaw
-        8.0,    # hip roll
-        12.0,   # hip pitch
-        12.0,   # knee
-        8.0     # ankle
+        14.0,   # hip yaw
+        14.0,   # hip roll
+        16.0,   # hip pitch
+        16.0,   # knee
+        14.0,   # ankle
     ],
-    dtype=float
+    dtype=float,
 )
 
 
@@ -40,7 +43,7 @@ KD_SWING = np.array(
         0.15,   # hip roll
         0.25,   # hip pitch
         0.25,   # knee
-        0.15    # ankle
+        0.15,   # ankle
     ],
-    dtype=float
+    dtype=float,
 )
