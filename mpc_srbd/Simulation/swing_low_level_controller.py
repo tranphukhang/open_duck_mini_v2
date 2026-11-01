@@ -45,6 +45,62 @@ from Actuator.swing_joint_PD_params import (
 
 
 # ============================================================
+# SWING-FOOT ORIENTATION COMMAND
+#
+# Numerical IK now controls the 5D task:
+#
+#     [
+#         x
+#         y
+#         z
+#         roll
+#         pitch
+#     ]
+#
+# The newly introduced:
+#
+#     L6_IK
+#     R6_IK
+#
+# sites are World-aligned at the home configuration.
+#
+# Therefore, for flat-ground walking:
+#
+#     roll_des  = 0
+#     pitch_des = 0
+#
+# means:
+#
+#     keep the swing foot parallel to the flat ground.
+#
+# Yaw is deliberately not controlled by the numerical IK.
+# ============================================================
+
+SWING_ROLL_DES = 0.0
+
+SWING_PITCH_DES = 0.0
+
+
+# ============================================================
+# IK ORIENTATION CONVERGENCE TOLERANCE
+#
+# Position tolerance is imported from:
+#
+#     numerical_IK_params.py
+#
+# Orientation tolerance:
+#
+#     || e_orientation || <= IK_ORIENTATION_TOLERANCE
+#
+# Unit:
+#
+#     [rad]
+# ============================================================
+
+IK_ORIENTATION_TOLERANCE = 1e-3
+
+
+# ============================================================
 # SWING LEG JOINT CONFIGURATION
 #
 # Joint order:
@@ -121,31 +177,13 @@ def _get_swing_joint_state(
     swing_foot
 ):
     """
-    Read current joint position and velocity of one leg.
-
-    Parameters
-    ----------
-    model : mujoco.MjModel
-
-        MuJoCo model.
-
-
-    data : mujoco.MjData
-
-        Current MuJoCo simulation data.
-
-
-    swing_foot : str
-
-        "L" or "R".
-
+    Read current joint positions and velocities of one leg.
 
     Returns
     -------
     q_swing : np.ndarray, shape (5,)
 
         Current swing-leg joint positions [rad].
-
 
     q_dot_swing : np.ndarray, shape (5,)
 
@@ -345,13 +383,24 @@ def compute_swing_low_level_control(
 
             -> W_p_foothold
 
+
         Cubic Bezier trajectory
 
             -> W_p_swing_des
 
-        Hybrid numerical IK
+
+        5D Hybrid numerical IK
+
+            [
+                x
+                y
+                z
+                roll
+                pitch
+            ]
 
             -> q_swing_des
+
 
         Joint-space PD
 
@@ -361,7 +410,7 @@ def compute_swing_low_level_control(
     Important
     ---------
 
-    This function is only used when one foot is in swing:
+    This function is only used when:
 
         swing_foot = "L"
 
@@ -373,85 +422,53 @@ def compute_swing_low_level_control(
     simulation run file.
 
 
-    Parameters
-    ----------
-    model : mujoco.MjModel
+    Foot position
+    -------------
 
-        MuJoCo model.
+    Raibert and Bezier still use the physical:
 
+        L6
+        R6
 
-    data : mujoco.MjData
+    positions.
 
-        Current MuJoCo simulation data.
+    Since:
 
+        L6_IK
 
-    swing_trajectory : CubicBezierSwingTrajectory
+    is located at the same position as:
 
-        Persistent online swing-foot trajectory generator.
+        L6
 
+    and:
 
-    swing_foot : str
+        R6_IK
 
-        Current swing foot:
+    is located at the same position as:
 
-            "L"
-            "R"
+        R6
 
-
-    delta_T : float
-
-        Remaining duration of the current swing phase [s].
-
-
-    W_p_L6_ref : array_like, shape (3,)
-
-        Nominal left-foot reference position in World frame.
+    the desired Bezier position can be passed directly to the
+    new 5D numerical IK.
 
 
-    W_p_R6_ref : array_like, shape (3,)
+    Foot orientation
+    ----------------
 
-        Nominal right-foot reference position in World frame.
+    The numerical IK internally uses:
 
+        L6_IK
+        R6_IK
 
-    W_p_L6 : array_like, shape (3,)
+    for both position and orientation.
 
-        Current physical L6 position in World frame.
+    For flat-ground walking:
 
+        roll_swing_des  = 0
 
-    W_p_R6 : array_like, shape (3,)
+        pitch_swing_des = 0
 
-        Current physical R6 position in World frame.
-
-
-    W_p_dot_CoM : array_like, shape (3,)
-
-        Current whole-body CoM velocity in World frame.
-
-
-    W_p_dot_CoM_ref : array_like, shape (3,)
-
-        Reference whole-body CoM velocity in World frame.
-
-
-    k_d : float
-
-        Raibert velocity-feedback gain.
-
-
-    ground_height : float, optional
-
-        Desired foothold height in World frame.
-
-        Default:
-
-            0.0 m
-
-
-    Returns
-    -------
-    result : SwingLowLevelResult
-
-        Complete result of the current swing low-level cycle.
+    Yaw is not controlled.
     """
 
 
@@ -513,6 +530,7 @@ def compute_swing_low_level_control(
     #         W_p_dot_CoM_ref
     #     )
     #
+    #
     # Flat terrain:
     #
     #     z_foothold = ground_height
@@ -558,14 +576,26 @@ def compute_swing_low_level_control(
     #     current foothold
     #     swing foot
     #
+    #
     # Output:
     #
     #     W_p_swing_des
     #
     # =
     #
-    #     desired physical swing-foot position
+    #     desired swing-foot position
     #     expressed in World frame
+    #
+    #
+    # Because:
+    #
+    #     p_L6_IK = p_L6
+    #
+    # and:
+    #
+    #     p_R6_IK = p_R6
+    #
+    # this position target can be passed directly to the 5D IK.
     # ========================================================
 
     W_p_swing_des = (
@@ -590,10 +620,37 @@ def compute_swing_low_level_control(
         )
 
 
+    W_p_swing_des = np.asarray(
+        W_p_swing_des,
+        dtype=float
+    ).reshape(-1)
+
+
+    if W_p_swing_des.shape != (
+        3,
+    ):
+
+        raise RuntimeError(
+            "W_p_swing_des phải có shape (3,), "
+            f"nhưng nhận được {W_p_swing_des.shape}."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            W_p_swing_des
+        )
+    ):
+
+        raise RuntimeError(
+            "W_p_swing_des chứa NaN hoặc Inf."
+        )
+
+
     # ========================================================
     # 5. READ CURRENT SWING-LEG JOINT STATE
     #
-    # These values are used by the joint-space PD controller.
+    # These values are used by the joint-space PD controller:
     #
     #     q_swing
     #
@@ -612,21 +669,36 @@ def compute_swing_low_level_control(
 
 
     # ========================================================
-    # 6. HYBRID NUMERICAL IK
+    # 6. 5D HYBRID NUMERICAL IK
     #
-    # Desired Cartesian foot position:
+    # Desired task:
     #
-    #     W_p_swing_des
+    #     [
+    #         W_p_swing_des_x
+    #         W_p_swing_des_y
+    #         W_p_swing_des_z
+    #         SWING_ROLL_DES
+    #         SWING_PITCH_DES
+    #     ]
     #
-    #         ↓
     #
-    # Hybrid numerical IK
+    # Flat ground:
     #
-    #         ↓
+    #     SWING_ROLL_DES  = 0
     #
-    #     q_swing_des
+    #     SWING_PITCH_DES = 0
     #
-    # Method:
+    #
+    # The Hybrid solver internally uses:
+    #
+    #     L6_IK
+    #
+    # or:
+    #
+    #     R6_IK
+    #
+    #
+    # Method selection:
     #
     #     sigma_min > SIGMA_THRESHOLD
     #
@@ -651,6 +723,10 @@ def compute_swing_low_level_control(
 
         swing_foot=swing_foot,
 
+        roll_swing_des=SWING_ROLL_DES,
+
+        pitch_swing_des=SWING_PITCH_DES,
+
         sigma_threshold=SIGMA_THRESHOLD,
 
         alpha_newton=ALPHA_NEWTON,
@@ -658,6 +734,10 @@ def compute_swing_low_level_control(
         eta_gradient=ETA_GRADIENT,
 
         tolerance=IK_TOLERANCE,
+
+        orientation_tolerance=(
+            IK_ORIENTATION_TOLERANCE
+        ),
 
         max_iterations=IK_MAX_ITERATIONS
     )
@@ -706,6 +786,7 @@ def compute_swing_low_level_control(
     # =
     #
     #     KP_SWING
+    #
     #     (
     #         q_swing_des
     #         -
@@ -715,6 +796,7 @@ def compute_swing_low_level_control(
     #     -
     #
     #     KD_SWING
+    #
     #     q_dot_swing
     #
     #
@@ -771,8 +853,6 @@ def compute_swing_low_level_control(
     # ========================================================
     # 9. CURRENT TRAJECTORY INTERNAL PHASE
     #
-    # Note:
-    #
     # CubicBezierSwingTrajectory.update() already advances:
     #
     #     phi_(k+1)
@@ -819,10 +899,7 @@ def compute_swing_low_level_control(
         ),
 
         W_p_swing_des=(
-            np.asarray(
-                W_p_swing_des,
-                dtype=float
-            ).copy()
+            W_p_swing_des.copy()
         ),
 
         q_swing_des=(

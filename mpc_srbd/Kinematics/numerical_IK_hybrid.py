@@ -30,6 +30,25 @@ except ImportError:
 # ============================================================
 # LEG CONFIGURATION
 #
+# Numerical IK uses:
+#
+#     L6_IK
+#     R6_IK
+#
+# These sites:
+#
+#     - are located at the same physical positions as L6/R6
+#     - are World-aligned at the home configuration
+#
+# Therefore:
+#
+#     position task
+#         -> L6_IK / R6_IK position
+#
+#     orientation task
+#         -> L6_IK / R6_IK orientation
+#
+#
 # Joint order:
 #
 #     0. hip yaw
@@ -43,7 +62,7 @@ LEG_CONFIG = {
 
     "L": {
 
-        "site_name": "L6",
+        "site_name": "L6_IK",
 
         "joint_names": [
             "L_hip_yaw",
@@ -57,7 +76,7 @@ LEG_CONFIG = {
 
     "R": {
 
-        "site_name": "R6",
+        "site_name": "R6_IK",
 
         "joint_names": [
             "R_hip_yaw",
@@ -135,7 +154,7 @@ def _get_leg_joint_information(
 
 
     # --------------------------------------------------------
-    # Site ID
+    # IK site
     # --------------------------------------------------------
 
     site_id = mujoco.mj_name2id(
@@ -153,7 +172,7 @@ def _get_leg_joint_information(
 
 
     # --------------------------------------------------------
-    # Joint information
+    # Swing-leg joint information
     # --------------------------------------------------------
 
     joint_ids = []
@@ -184,14 +203,15 @@ def _get_leg_joint_information(
         )
 
 
-        # ----------------------------------------------------
-        # qpos address
-        #
-        # Used to read/write joint angles.
-        # ----------------------------------------------------
-
         qpos_address = int(
             model.jnt_qposadr[
+                joint_id
+            ]
+        )
+
+
+        dof_address = int(
+            model.jnt_dofadr[
                 joint_id
             ]
         )
@@ -202,19 +222,6 @@ def _get_leg_joint_information(
         )
 
 
-        # ----------------------------------------------------
-        # DOF address
-        #
-        # Used to extract the corresponding Jacobian column.
-        # ----------------------------------------------------
-
-        dof_address = int(
-            model.jnt_dofadr[
-                joint_id
-            ]
-        )
-
-
         dof_addresses.append(
             dof_address
         )
@@ -222,15 +229,19 @@ def _get_leg_joint_information(
 
     return (
         site_id,
+        site_name,
         joint_names,
+
         np.asarray(
             joint_ids,
             dtype=int
         ),
+
         np.asarray(
             qpos_addresses,
             dtype=int
         ),
+
         np.asarray(
             dof_addresses,
             dtype=int
@@ -256,10 +267,6 @@ def _apply_joint_limits(
     for i, joint_id in enumerate(
         joint_ids
     ):
-
-        # ----------------------------------------------------
-        # Only clamp if this MuJoCo joint is limited.
-        # ----------------------------------------------------
 
         if model.jnt_limited[
             joint_id
@@ -296,30 +303,462 @@ def _apply_joint_limits(
 
 
 # ============================================================
-# COMPUTE LEG POSITION JACOBIAN
+# ROTATION MATRIX FROM ROLL-PITCH-YAW
+#
+# Convention:
+#
+#     R = Rz(yaw) Ry(pitch) Rx(roll)
+#
+# This is used only to construct the desired World-frame
+# orientation of L6_IK / R6_IK.
+#
+# Since the IK sites are World-aligned at home:
+#
+#     roll_des  = 0
+#     pitch_des = 0
+#
+# corresponds naturally to a flat foot.
 # ============================================================
 
-def _compute_leg_position_jacobian(
+def _rotation_matrix_from_rpy(
+    roll,
+    pitch,
+    yaw
+):
+
+    roll = float(
+        roll
+    )
+
+    pitch = float(
+        pitch
+    )
+
+    yaw = float(
+        yaw
+    )
+
+
+    c_r = np.cos(
+        roll
+    )
+
+    s_r = np.sin(
+        roll
+    )
+
+
+    c_p = np.cos(
+        pitch
+    )
+
+    s_p = np.sin(
+        pitch
+    )
+
+
+    c_y = np.cos(
+        yaw
+    )
+
+    s_y = np.sin(
+        yaw
+    )
+
+
+    R_x = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, c_r, -s_r],
+            [0.0, s_r, c_r]
+        ],
+        dtype=float
+    )
+
+
+    R_y = np.array(
+        [
+            [c_p, 0.0, s_p],
+            [0.0, 1.0, 0.0],
+            [-s_p, 0.0, c_p]
+        ],
+        dtype=float
+    )
+
+
+    R_z = np.array(
+        [
+            [c_y, -s_y, 0.0],
+            [s_y, c_y, 0.0],
+            [0.0, 0.0, 1.0]
+        ],
+        dtype=float
+    )
+
+
+    R = (
+        R_z
+        @
+        R_y
+        @
+        R_x
+    )
+
+
+    return R
+
+
+# ============================================================
+# GET YAW FROM ROTATION MATRIX
+#
+# Because L6_IK / R6_IK are near the flat-foot configuration,
+# the yaw extraction below no longer suffers from the
+# pitch = +/- pi/2 singular configuration that existed for
+# the original L6/R6 site frames.
+#
+# ZYX convention:
+#
+#     yaw = atan2(R[1,0], R[0,0])
+# ============================================================
+
+def _get_yaw_from_rotation_matrix(
+    R
+):
+
+    R = np.asarray(
+        R,
+        dtype=float
+    )
+
+
+    if R.shape != (
+        3,
+        3
+    ):
+
+        raise ValueError(
+            "R phải có shape (3, 3)."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            R
+        )
+    ):
+
+        raise ValueError(
+            "R chứa NaN hoặc Inf."
+        )
+
+
+    yaw = np.arctan2(
+        R[
+            1,
+            0
+        ],
+        R[
+            0,
+            0
+        ]
+    )
+
+
+    return float(
+        yaw
+    )
+
+
+# ============================================================
+# COMPUTE ROLL-PITCH ORIENTATION ERROR
+#
+# Only:
+#
+#     roll
+#     pitch
+#
+# are controlled.
+#
+# Yaw is deliberately left free.
+#
+#
+# At each IK iteration:
+#
+#     yaw_des = yaw_current
+#
+# while:
+#
+#     roll_des
+#     pitch_des
+#
+# are commanded.
+#
+#
+# Desired orientation:
+#
+#     R_des
+#
+# =
+#
+#     Rz(yaw_current)
+#     Ry(pitch_des)
+#     Rx(roll_des)
+#
+#
+# Orientation error:
+#
+#     e_R
+#
+# =
+#
+#     1/2 vee(
+#
+#         R_des R_current^T
+#
+#         -
+#
+#         R_current R_des^T
+#
+#     )
+#
+#
+# e_R is expressed in the World frame.
+#
+# Only:
+#
+#     e_R_x
+#     e_R_y
+#
+# are used for the 5D IK task.
+# ============================================================
+
+def _compute_roll_pitch_orientation_error(
+    R_current,
+    roll_des,
+    pitch_des
+):
+
+    R_current = np.asarray(
+        R_current,
+        dtype=float
+    )
+
+
+    if R_current.shape != (
+        3,
+        3
+    ):
+
+        raise ValueError(
+            "R_current phải có shape (3, 3)."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            R_current
+        )
+    ):
+
+        raise ValueError(
+            "R_current chứa NaN hoặc Inf."
+        )
+
+
+    roll_des = float(
+        roll_des
+    )
+
+
+    pitch_des = float(
+        pitch_des
+    )
+
+
+    if not np.isfinite(
+        roll_des
+    ):
+
+        raise ValueError(
+            "roll_des phải hữu hạn."
+        )
+
+
+    if not np.isfinite(
+        pitch_des
+    ):
+
+        raise ValueError(
+            "pitch_des phải hữu hạn."
+        )
+
+
+    # --------------------------------------------------------
+    # Current yaw
+    #
+    # Yaw is deliberately not controlled.
+    # --------------------------------------------------------
+
+    yaw_current = (
+        _get_yaw_from_rotation_matrix(
+            R_current
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Desired orientation
+    # --------------------------------------------------------
+
+    R_des = (
+        _rotation_matrix_from_rpy(
+
+            roll=roll_des,
+
+            pitch=pitch_des,
+
+            yaw=yaw_current
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Rotation error matrix
+    # --------------------------------------------------------
+
+    error_matrix = (
+
+        R_des
+        @
+        R_current.T
+
+        -
+
+        R_current
+        @
+        R_des.T
+    )
+
+
+    # --------------------------------------------------------
+    # vee(.) operator
+    #
+    #     [  0  -z   y ]
+    #     [  z   0  -x ]
+    #     [ -y   x   0 ]
+    #
+    #             |
+    #             v
+    #
+    #         [x y z]^T
+    # --------------------------------------------------------
+
+    e_rotation = (
+        0.5
+        *
+        np.array(
+            [
+                error_matrix[
+                    2,
+                    1
+                ],
+
+                error_matrix[
+                    0,
+                    2
+                ],
+
+                error_matrix[
+                    1,
+                    0
+                ]
+            ],
+            dtype=float
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # 2D orientation task:
+    #
+    #     roll correction
+    #     pitch correction
+    #
+    # Yaw correction is excluded.
+    # --------------------------------------------------------
+
+    e_roll_pitch = (
+        e_rotation[
+            0:2
+        ].copy()
+    )
+
+
+    if e_roll_pitch.shape != (
+        2,
+    ):
+
+        raise RuntimeError(
+            "e_roll_pitch phải có shape (2,)."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            e_roll_pitch
+        )
+    ):
+
+        raise RuntimeError(
+            "e_roll_pitch chứa NaN hoặc Inf."
+        )
+
+
+    return e_roll_pitch
+
+
+# ============================================================
+# COMPUTE LEG 5D TASK JACOBIAN
+#
+# Task:
+#
+#     x
+#     y
+#     z
+#     roll
+#     pitch
+#
+#
+# Therefore:
+#
+#     J_task in R^(5x5)
+#
+#
+# mj_jacSite gives:
+#
+#     J_position_full
+#
+#     J_rotation_full
+#
+# expressed in the World frame.
+#
+#
+# Since L6_IK / R6_IK are rigidly attached to the foot:
+#
+#     first 3 rows:
+#         Cartesian position Jacobian
+#
+#     last 2 rows:
+#         World omega_x
+#         World omega_y
+# ============================================================
+
+def _compute_leg_task_jacobian(
     model,
     data,
     site_id,
     dof_addresses
 ):
-
-    # --------------------------------------------------------
-    # Full site translational Jacobian:
-    #
-    #     J_full in R^(3 x nv)
-    #
-    # This contains:
-    #
-    #     floating-base DOFs
-    #     left-leg DOFs
-    #     right-leg DOFs
-    #
-    # We later select only the 5 columns belonging to the
-    # current swing leg.
-    # --------------------------------------------------------
 
     J_position_full = np.zeros(
         (
@@ -349,12 +788,10 @@ def _compute_leg_position_jacobian(
 
 
     # --------------------------------------------------------
-    # Extract only the 5 swing-leg joint columns.
-    #
-    #     J_leg in R^(3 x 5)
+    # Select only the five swing-leg joint columns
     # --------------------------------------------------------
 
-    J_leg = (
+    J_position = (
         J_position_full[
             :,
             dof_addresses
@@ -362,29 +799,245 @@ def _compute_leg_position_jacobian(
     )
 
 
-    if J_leg.shape != (
+    J_rotation = (
+        J_rotation_full[
+            :,
+            dof_addresses
+        ].copy()
+    )
+
+
+    if J_position.shape != (
         3,
         5
     ):
 
         raise RuntimeError(
-            "J_leg phải có shape (3, 5), "
-            f"nhưng nhận được {J_leg.shape}."
+            "J_position phải có shape (3, 5), "
+            f"nhưng nhận được {J_position.shape}."
+        )
+
+
+    if J_rotation.shape != (
+        3,
+        5
+    ):
+
+        raise RuntimeError(
+            "J_rotation phải có shape (3, 5), "
+            f"nhưng nhận được {J_rotation.shape}."
         )
 
 
     if not np.all(
         np.isfinite(
-            J_leg
+            J_position
         )
     ):
 
         raise RuntimeError(
-            "J_leg chứa NaN hoặc Inf."
+            "J_position chứa NaN hoặc Inf."
         )
 
 
-    return J_leg
+    if not np.all(
+        np.isfinite(
+            J_rotation
+        )
+    ):
+
+        raise RuntimeError(
+            "J_rotation chứa NaN hoặc Inf."
+        )
+
+
+    # --------------------------------------------------------
+    # Only World-frame omega_x and omega_y
+    # --------------------------------------------------------
+
+    J_roll_pitch = (
+        J_rotation[
+            0:2,
+            :
+        ].copy()
+    )
+
+
+    # --------------------------------------------------------
+    # Complete 5D task Jacobian
+    # --------------------------------------------------------
+
+    J_task = np.vstack(
+        (
+            J_position,
+            J_roll_pitch
+        )
+    )
+
+
+    if J_task.shape != (
+        5,
+        5
+    ):
+
+        raise RuntimeError(
+            "J_task phải có shape (5, 5), "
+            f"nhưng nhận được {J_task.shape}."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            J_task
+        )
+    ):
+
+        raise RuntimeError(
+            "J_task chứa NaN hoặc Inf."
+        )
+
+
+    return J_task
+
+
+# ============================================================
+# COMPUTE CURRENT 5D TASK ERROR
+#
+#     e
+#
+# =
+#
+#     [
+#         e_x
+#         e_y
+#         e_z
+#         e_roll
+#         e_pitch
+#     ]
+# ============================================================
+
+def _compute_task_error(
+    data,
+    site_id,
+    W_p_swing_des,
+    roll_swing_des,
+    pitch_swing_des
+):
+
+    # --------------------------------------------------------
+    # Current IK-site position
+    # --------------------------------------------------------
+
+    W_p_current = (
+        data.site_xpos[
+            site_id
+        ].copy()
+    )
+
+
+    # --------------------------------------------------------
+    # Position error
+    # --------------------------------------------------------
+
+    position_error = (
+
+        W_p_swing_des
+
+        -
+
+        W_p_current
+    )
+
+
+    # --------------------------------------------------------
+    # Current IK-site orientation
+    #
+    # site_xmat:
+    #
+    #     local site frame -> World frame
+    # --------------------------------------------------------
+
+    R_current = (
+        data.site_xmat[
+            site_id
+        ].reshape(
+            3,
+            3
+        ).copy()
+    )
+
+
+    # --------------------------------------------------------
+    # Roll/pitch orientation error
+    # --------------------------------------------------------
+
+    orientation_error = (
+        _compute_roll_pitch_orientation_error(
+
+            R_current=R_current,
+
+            roll_des=roll_swing_des,
+
+            pitch_des=pitch_swing_des
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Complete 5D error
+    # --------------------------------------------------------
+
+    task_error = np.concatenate(
+        (
+            position_error,
+            orientation_error
+        )
+    )
+
+
+    if position_error.shape != (
+        3,
+    ):
+
+        raise RuntimeError(
+            "position_error phải có shape (3,)."
+        )
+
+
+    if orientation_error.shape != (
+        2,
+    ):
+
+        raise RuntimeError(
+            "orientation_error phải có shape (2,)."
+        )
+
+
+    if task_error.shape != (
+        5,
+    ):
+
+        raise RuntimeError(
+            "task_error phải có shape (5,)."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            task_error
+        )
+    ):
+
+        raise RuntimeError(
+            "task_error chứa NaN hoặc Inf."
+        )
+
+
+    return (
+        task_error,
+        position_error,
+        orientation_error
+    )
 
 
 # ============================================================
@@ -396,205 +1049,83 @@ def solve_numerical_IK_hybrid(
     data,
     W_p_swing_des,
     swing_foot,
+    roll_swing_des=0.0,
+    pitch_swing_des=0.0,
     sigma_threshold=1e-4,
     alpha_newton=1.0,
     eta_gradient=1.0,
     tolerance=1e-4,
+    orientation_tolerance=1e-3,
     max_iterations=50
 ):
     """
-    Solve swing-leg position inverse kinematics using a hybrid
-    numerical method.
+    Solve the 5D swing-leg numerical inverse kinematics.
 
-    Method selection
-    ----------------
+    Controlled task:
 
-    At every IK iteration, compute:
+        [
+            foot x
+            foot y
+            foot z
+            foot roll
+            foot pitch
+        ]
 
-        sigma_min = minimum singular value of J
+    IK sites:
 
-    If:
+        Left:
+            L6_IK
+
+        Right:
+            R6_IK
+
+    These sites are World-aligned at the home configuration.
+
+    Therefore for flat-ground walking:
+
+        roll_swing_des  = 0
+
+        pitch_swing_des = 0
+
+    is the natural flat-foot orientation command.
+
+
+    Yaw is deliberately not controlled.
+
+    At every iteration:
+
+        yaw_des = yaw_current
+
+
+    Hybrid method:
 
         sigma_min > sigma_threshold
 
-    use pseudo-Newton:
+            -> pseudo-Newton
 
-        delta_q
-            =
-        alpha_newton
-        *
-        pinv(J)
-        *
-        error
+    otherwise:
 
-    Otherwise use Jacobian-transpose Gradient Descent:
+            -> Jacobian-transpose Gradient Descent
 
-        delta_q
-            =
-        eta_gradient
-        *
-        J^T
-        *
-        error
 
+    Position convergence:
 
-    Cartesian error
-    ---------------
+        ||e_position|| <= tolerance
 
-        error
-            =
-        W_p_swing_des
-            -
-        W_p_i6
 
+    Orientation convergence:
 
-    Position task
-    -------------
+        ||e_orientation|| <= orientation_tolerance
 
-    Only the 3D physical foot position is controlled:
 
-        W_p_i6 =
-        [
-            x_i6,
-            y_i6,
-            z_i6
-        ]
+    Important:
 
-    Therefore:
+    The function temporarily writes candidate joint positions
+    to MuJoCo data in order to evaluate forward kinematics.
 
-        J_leg in R^(3x5)
+    Before returning, the original simulation state is restored.
 
-
-    Important
-    ---------
-
-    During the iterative solution, this function temporarily
-    changes the swing-leg joint values inside MuJoCo data in
-    order to evaluate forward kinematics.
-
-    Before returning, the original MuJoCo simulation state is
-    restored.
-
-    Therefore this IK function does NOT directly move the
-    simulated robot.
-
-    It only returns:
-
-        q_swing_des
-
-
-    Parameters
-    ----------
-    model : mujoco.MjModel
-
-        MuJoCo model.
-
-
-    data : mujoco.MjData
-
-        Current MuJoCo simulation data.
-
-
-    W_p_swing_des : array_like, shape (3,)
-
-        Desired physical swing-foot position in World frame:
-
-            {}^W p_i6^des
-
-
-    swing_foot : str or None
-
-        Current swing foot:
-
-            "L"
-            "R"
-
-        During Double Support:
-
-            None
-
-
-    sigma_threshold : float, optional
-
-        Minimum-singular-value threshold used to switch
-        between pseudo-Newton and Gradient Descent.
-
-        Default:
-
-            1e-4
-
-
-    alpha_newton : float, optional
-
-        Step scaling used by pseudo-Newton.
-
-        Default:
-
-            1.0
-
-
-    eta_gradient : float, optional
-
-        Step size used by Gradient Descent.
-
-        Default:
-
-            1.0
-
-
-    tolerance : float, optional
-
-        Cartesian position-error tolerance [m].
-
-        Default:
-
-            1e-4 m
-
-
-    max_iterations : int, optional
-
-        Maximum number of IK iterations.
-
-        Default:
-
-            50
-
-
-    Returns
-    -------
-    q_swing_des : np.ndarray, shape (5,), or None
-
-        Desired joint positions for the current swing leg:
-
-            [
-                q_hip_yaw,
-                q_hip_roll,
-                q_hip_pitch,
-                q_knee,
-                q_ankle
-            ]
-
-        Unit:
-
-            [rad]
-
-        Returns None during Double Support.
-
-
-    diagnostics : dict
-
-        Diagnostic information:
-
-            converged
-            iterations
-            final_error
-            final_error_norm
-            method_used
-            newton_iterations
-            gradient_iterations
-            sigma_min
-            swing_foot
-            joint_names
+    Therefore this function does NOT directly move the robot.
     """
 
 
@@ -615,8 +1146,6 @@ def solve_numerical_IK_hybrid(
 
     # ========================================================
     # 2. DOUBLE SUPPORT
-    #
-    # No swing-foot IK is required.
     # ========================================================
 
     if swing_foot is None:
@@ -631,6 +1160,14 @@ def solve_numerical_IK_hybrid(
 
             "final_error_norm": 0.0,
 
+            "final_position_error": None,
+
+            "final_position_error_norm": 0.0,
+
+            "final_orientation_error": None,
+
+            "final_orientation_error_norm": 0.0,
+
             "method_used": None,
 
             "newton_iterations": 0,
@@ -641,7 +1178,13 @@ def solve_numerical_IK_hybrid(
 
             "swing_foot": None,
 
-            "joint_names": None
+            "site_name": None,
+
+            "joint_names": None,
+
+            "roll_swing_des": None,
+
+            "pitch_swing_des": None
 
         }
 
@@ -650,7 +1193,7 @@ def solve_numerical_IK_hybrid(
 
 
     # ========================================================
-    # 3. VALIDATE TARGET POSITION
+    # 3. VALIDATE DESIRED POSITION
     # ========================================================
 
     if W_p_swing_des is None:
@@ -671,7 +1214,39 @@ def solve_numerical_IK_hybrid(
 
 
     # ========================================================
-    # 4. VALIDATE PARAMETERS
+    # 4. VALIDATE DESIRED ORIENTATION
+    # ========================================================
+
+    roll_swing_des = float(
+        roll_swing_des
+    )
+
+
+    pitch_swing_des = float(
+        pitch_swing_des
+    )
+
+
+    if not np.isfinite(
+        roll_swing_des
+    ):
+
+        raise ValueError(
+            "roll_swing_des phải hữu hạn."
+        )
+
+
+    if not np.isfinite(
+        pitch_swing_des
+    ):
+
+        raise ValueError(
+            "pitch_swing_des phải hữu hạn."
+        )
+
+
+    # ========================================================
+    # 5. VALIDATE NUMERICAL PARAMETERS
     # ========================================================
 
     sigma_threshold = float(
@@ -691,6 +1266,11 @@ def solve_numerical_IK_hybrid(
 
     tolerance = float(
         tolerance
+    )
+
+
+    orientation_tolerance = float(
+        orientation_tolerance
     )
 
 
@@ -746,6 +1326,19 @@ def solve_numerical_IK_hybrid(
         )
 
 
+    if (
+        not np.isfinite(
+            orientation_tolerance
+        )
+        or
+        orientation_tolerance <= 0.0
+    ):
+
+        raise ValueError(
+            "orientation_tolerance phải hữu hạn và > 0."
+        )
+
+
     if not isinstance(
         max_iterations,
         (int, np.integer)
@@ -764,11 +1357,12 @@ def solve_numerical_IK_hybrid(
 
 
     # ========================================================
-    # 5. GET CURRENT SWING-LEG INFORMATION
+    # 6. GET SWING-LEG INFORMATION
     # ========================================================
 
     (
         site_id,
+        site_name,
         joint_names,
         joint_ids,
         qpos_addresses,
@@ -781,18 +1375,7 @@ def solve_numerical_IK_hybrid(
 
 
     # ========================================================
-    # 6. SAVE ORIGINAL MUJOCO STATE
-    #
-    # IMPORTANT:
-    #
-    # IK must NOT directly modify the actual simulation state.
-    #
-    # Therefore save:
-    #
-    #     qpos
-    #     qvel
-    #
-    # before starting the iterative numerical solution.
+    # 7. SAVE ORIGINAL MUJOCO STATE
     # ========================================================
 
     qpos_original = (
@@ -806,9 +1389,7 @@ def solve_numerical_IK_hybrid(
 
 
     # ========================================================
-    # 7. INITIAL GUESS
-    #
-    # Use current swing-leg joint configuration:
+    # 8. INITIAL GUESS
     #
     #     q^(0) = q_current
     # ========================================================
@@ -821,7 +1402,7 @@ def solve_numerical_IK_hybrid(
 
 
     # ========================================================
-    # 8. DIAGNOSTIC INITIALIZATION
+    # 9. DIAGNOSTIC INITIALIZATION
     # ========================================================
 
     converged = False
@@ -836,19 +1417,30 @@ def solve_numerical_IK_hybrid(
 
     sigma_min = None
 
+
     final_error = None
 
     final_error_norm = np.inf
 
 
+    final_position_error = None
+
+    final_position_error_norm = np.inf
+
+
+    final_orientation_error = None
+
+    final_orientation_error_norm = np.inf
+
+
     # ========================================================
-    # 9. ITERATIVE IK
+    # 10. ITERATIVE IK
     # ========================================================
 
     try:
 
         # ----------------------------------------------------
-        # Ensure initial MuJoCo kinematics are up to date.
+        # Make sure MuJoCo kinematics are up to date
         # ----------------------------------------------------
 
         mujoco.mj_forward(
@@ -862,94 +1454,146 @@ def solve_numerical_IK_hybrid(
         ):
 
             # =================================================
-            # 9.1 CURRENT PHYSICAL FOOT POSITION
-            #
-            #     {}^W p_i6
+            # 10.1 CURRENT 5D TASK ERROR
             # =================================================
 
-            W_p_current = (
-                data.site_xpos[
-                    site_id
-                ].copy()
+            (
+                task_error,
+                position_error,
+                orientation_error
+
+            ) = _compute_task_error(
+
+                data=data,
+
+                site_id=site_id,
+
+                W_p_swing_des=W_p_swing_des,
+
+                roll_swing_des=roll_swing_des,
+
+                pitch_swing_des=pitch_swing_des
             )
 
 
             # =================================================
-            # 9.2 CARTESIAN POSITION ERROR
-            #
-            #     e
-            #
-            # =
-            #
-            #     W_p_swing_des
-            #
-            # -
-            #
-            #     W_p_current
+            # 10.2 ERROR NORMS
             # =================================================
 
-            error = (
-                W_p_swing_des
-                -
-                W_p_current
-            )
-
-
-            error_norm = float(
+            position_error_norm = float(
                 np.linalg.norm(
-                    error
+                    position_error
+                )
+            )
+
+
+            orientation_error_norm = float(
+                np.linalg.norm(
+                    orientation_error
+                )
+            )
+
+
+            task_error_norm = float(
+                np.linalg.norm(
+                    task_error
                 )
             )
 
 
             # =================================================
-            # 9.3 CONVERGENCE CHECK
+            # 10.3 CONVERGENCE CHECK
+            #
+            # Position:
+            #
+            #     [m]
+            #
+            # Orientation:
+            #
+            #     [rad]
+            #
+            # are checked separately.
             # =================================================
 
-            if error_norm <= tolerance:
+            if (
+
+                position_error_norm
+                <=
+                tolerance
+
+                and
+
+                orientation_error_norm
+                <=
+                orientation_tolerance
+
+            ):
 
                 converged = True
 
+
                 final_error = (
-                    error.copy()
+                    task_error.copy()
                 )
 
+
                 final_error_norm = (
-                    error_norm
+                    task_error_norm
                 )
+
+
+                final_position_error = (
+                    position_error.copy()
+                )
+
+
+                final_position_error_norm = (
+                    position_error_norm
+                )
+
+
+                final_orientation_error = (
+                    orientation_error.copy()
+                )
+
+
+                final_orientation_error_norm = (
+                    orientation_error_norm
+                )
+
 
                 break
 
 
             # =================================================
-            # 9.4 POSITION JACOBIAN
-            #
-            #     J_leg in R^(3x5)
+            # 10.4 COMPLETE 5D TASK JACOBIAN
             # =================================================
 
-            J_leg = _compute_leg_position_jacobian(
-                model=model,
-                data=data,
-                site_id=site_id,
-                dof_addresses=dof_addresses
+            J_task = (
+                _compute_leg_task_jacobian(
+
+                    model=model,
+
+                    data=data,
+
+                    site_id=site_id,
+
+                    dof_addresses=dof_addresses
+                )
             )
 
 
             # =================================================
-            # 9.5 SINGULAR VALUES
-            #
-            #     J = U Sigma V^T
-            #
-            # Use:
-            #
-            #     sigma_min
-            #
-            # to select numerical IK method.
+            # 10.5 MINIMUM SINGULAR VALUE
             # =================================================
 
-            singular_values = np.linalg.svd(
-                J_leg,
-                compute_uv=False
+            singular_values = (
+                np.linalg.svd(
+
+                    J_task,
+
+                    compute_uv=False
+                )
             )
 
 
@@ -961,7 +1605,7 @@ def solve_numerical_IK_hybrid(
 
 
             # =================================================
-            # 9.6 METHOD SELECTION
+            # 10.6 METHOD SELECTION
             # =================================================
 
             if sigma_min > sigma_threshold:
@@ -970,10 +1614,15 @@ def solve_numerical_IK_hybrid(
                 # PSEUDO-NEWTON
                 # ---------------------------------------------
 
-                delta_q = compute_newton_step(
-                    J=J_leg,
-                    error=error,
-                    alpha_newton=alpha_newton
+                delta_q = (
+                    compute_newton_step(
+
+                        J=J_task,
+
+                        error=task_error,
+
+                        alpha_newton=alpha_newton
+                    )
                 )
 
 
@@ -993,8 +1642,11 @@ def solve_numerical_IK_hybrid(
 
                 delta_q = (
                     compute_gradient_descent_step(
-                        J=J_leg,
-                        error=error,
+
+                        J=J_task,
+
+                        error=task_error,
+
                         eta_gradient=eta_gradient
                     )
                 )
@@ -1009,41 +1661,37 @@ def solve_numerical_IK_hybrid(
 
 
             # =================================================
-            # 9.7 UPDATE JOINT CONFIGURATION
-            #
-            #     q^(k+1)
-            #
-            # =
-            #
-            #     q^(k)
-            #
-            # +
-            #
-            #     delta_q
+            # 10.7 UPDATE CANDIDATE JOINT CONFIGURATION
             # =================================================
 
             q_candidate = (
+
                 q_candidate
+
                 +
+
                 delta_q
             )
 
 
             # =================================================
-            # 9.8 APPLY JOINT LIMITS
+            # 10.8 APPLY JOINT LIMITS
             # =================================================
 
-            q_candidate = _apply_joint_limits(
-                model=model,
-                joint_ids=joint_ids,
-                q_candidate=q_candidate
+            q_candidate = (
+                _apply_joint_limits(
+
+                    model=model,
+
+                    joint_ids=joint_ids,
+
+                    q_candidate=q_candidate
+                )
             )
 
 
             # =================================================
-            # 9.9 TEMPORARILY WRITE CANDIDATE TO MUJOCO
-            #
-            # This is only used to evaluate forward kinematics.
+            # 10.9 TEMPORARILY WRITE CANDIDATE TO MUJOCO
             # =================================================
 
             data.qpos[
@@ -1052,7 +1700,7 @@ def solve_numerical_IK_hybrid(
 
 
             # =================================================
-            # 9.10 UPDATE FORWARD KINEMATICS
+            # 10.10 UPDATE FORWARD KINEMATICS
             # =================================================
 
             mujoco.mj_forward(
@@ -1065,22 +1713,25 @@ def solve_numerical_IK_hybrid(
 
 
         # ====================================================
-        # 10. FINAL ERROR AFTER LAST ITERATION
-        #
-        # This is also evaluated if max_iterations is reached.
+        # 11. FINAL ERROR
         # ====================================================
 
-        W_p_final = (
-            data.site_xpos[
-                site_id
-            ].copy()
-        )
+        (
+            final_error,
+            final_position_error,
+            final_orientation_error
 
+        ) = _compute_task_error(
 
-        final_error = (
-            W_p_swing_des
-            -
-            W_p_final
+            data=data,
+
+            site_id=site_id,
+
+            W_p_swing_des=W_p_swing_des,
+
+            roll_swing_des=roll_swing_des,
+
+            pitch_swing_des=pitch_swing_des
         )
 
 
@@ -1091,13 +1742,39 @@ def solve_numerical_IK_hybrid(
         )
 
 
-        if final_error_norm <= tolerance:
+        final_position_error_norm = float(
+            np.linalg.norm(
+                final_position_error
+            )
+        )
+
+
+        final_orientation_error_norm = float(
+            np.linalg.norm(
+                final_orientation_error
+            )
+        )
+
+
+        if (
+
+            final_position_error_norm
+            <=
+            tolerance
+
+            and
+
+            final_orientation_error_norm
+            <=
+            orientation_tolerance
+
+        ):
 
             converged = True
 
 
         # ====================================================
-        # 11. FINAL JOINT SOLUTION
+        # 12. FINAL JOINT SOLUTION
         # ====================================================
 
         q_swing_des = (
@@ -1127,10 +1804,7 @@ def solve_numerical_IK_hybrid(
 
 
     # ========================================================
-    # 12. RESTORE REAL MUJOCO SIMULATION STATE
-    #
-    # This block is ALWAYS executed, even if the IK solver
-    # raises an exception.
+    # 13. RESTORE REAL MUJOCO SIMULATION STATE
     # ========================================================
 
     finally:
@@ -1152,7 +1826,7 @@ def solve_numerical_IK_hybrid(
 
 
     # ========================================================
-    # 13. DIAGNOSTICS
+    # 14. DIAGNOSTICS
     # ========================================================
 
     diagnostics = {
@@ -1161,53 +1835,124 @@ def solve_numerical_IK_hybrid(
             converged
         ),
 
+
         "iterations": int(
             iterations
         ),
+
+
+        # ----------------------------------------------------
+        # Complete 5D error
+        # ----------------------------------------------------
 
         "final_error": (
             final_error.copy()
         ),
 
+
         "final_error_norm": float(
             final_error_norm
         ),
+
+
+        # ----------------------------------------------------
+        # Position error
+        # ----------------------------------------------------
+
+        "final_position_error": (
+            final_position_error.copy()
+        ),
+
+
+        "final_position_error_norm": float(
+            final_position_error_norm
+        ),
+
+
+        # ----------------------------------------------------
+        # Roll/pitch orientation error
+        # ----------------------------------------------------
+
+        "final_orientation_error": (
+            final_orientation_error.copy()
+        ),
+
+
+        "final_orientation_error_norm": float(
+            final_orientation_error_norm
+        ),
+
+
+        # ----------------------------------------------------
+        # Numerical method
+        # ----------------------------------------------------
 
         "method_used": (
             method_used
         ),
 
+
         "newton_iterations": int(
             newton_iterations
         ),
+
 
         "gradient_iterations": int(
             gradient_iterations
         ),
 
+
         "sigma_min": (
+
             None
+
             if sigma_min is None
+
             else float(
                 sigma_min
             )
         ),
 
+
+        # ----------------------------------------------------
+        # Swing-leg information
+        # ----------------------------------------------------
+
         "swing_foot": (
             swing_foot
         ),
+
+
+        "site_name": (
+            site_name
+        ),
+
 
         "joint_names": (
             list(
                 joint_names
             )
+        ),
+
+
+        # ----------------------------------------------------
+        # Desired IK-site orientation
+        # ----------------------------------------------------
+
+        "roll_swing_des": float(
+            roll_swing_des
+        ),
+
+
+        "pitch_swing_des": float(
+            pitch_swing_des
         )
 
     }
 
 
     # ========================================================
-    # 14. RETURN
+    # 15. RETURN
     # ========================================================
 
     return (
