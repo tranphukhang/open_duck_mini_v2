@@ -11,104 +11,36 @@ import numpy as np
 # PATH SETUP
 # ============================================================
 
-SIMULATION_DIR = Path(
-    __file__
-).resolve().parent
+SIMULATION_DIR = Path(__file__).resolve().parent
+MPC_SRBD_DIR = SIMULATION_DIR.parent
+REPO_ROOT = MPC_SRBD_DIR.parent
 
-
-MPC_SRBD_DIR = (
-    SIMULATION_DIR.parent
-)
-
-
-REPO_ROOT = (
-    MPC_SRBD_DIR.parent
-)
-
-
-STATE_DIR = (
-    MPC_SRBD_DIR
-    /
-    "State"
-)
-
-
-SRBD_DIR = (
-    MPC_SRBD_DIR
-    /
-    "SRBD"
-)
-
-
-QP_DIR = (
-    MPC_SRBD_DIR
-    /
-    "QP"
-)
-
-
-KINEMATICS_DIR = (
-    MPC_SRBD_DIR
-    /
-    "Kinematics"
-)
-
-
-ACTUATOR_DIR = (
-    MPC_SRBD_DIR
-    /
-    "Actuator"
-)
-
-
-COMMAND_DIR = (
-    MPC_SRBD_DIR
-    /
-    "Command"
-)
-
-
-FOOTHOLD_PLANNER_DIR = (
-    MPC_SRBD_DIR
-    /
-    "Foothold_Planner"
-)
-
-
-TRAJECTORY_PLANNER_DIR = (
-    MPC_SRBD_DIR
-    /
-    "Trajectory_Planner"
-)
-
+STATE_DIR = MPC_SRBD_DIR / "State"
+SRBD_DIR = MPC_SRBD_DIR / "SRBD"
+QP_DIR = MPC_SRBD_DIR / "QP"
+KINEMATICS_DIR = MPC_SRBD_DIR / "Kinematics"
+ACTUATOR_DIR = MPC_SRBD_DIR / "Actuator"
+COMMAND_DIR = MPC_SRBD_DIR / "Command"
+FOOTHOLD_PLANNER_DIR = MPC_SRBD_DIR / "Foothold_Planner"
+TRAJECTORY_PLANNER_DIR = MPC_SRBD_DIR / "Trajectory_Planner"
 
 for directory in (
-
     MPC_SRBD_DIR,
-
     STATE_DIR,
-
     SRBD_DIR,
-
     QP_DIR,
-
     KINEMATICS_DIR,
-
     ACTUATOR_DIR,
-
     COMMAND_DIR,
-
     FOOTHOLD_PLANNER_DIR,
-
-    TRAJECTORY_PLANNER_DIR
-
+    TRAJECTORY_PLANNER_DIR,
 ):
+    directory_str = str(directory)
 
-    if str(directory) not in sys.path:
-
+    if directory_str not in sys.path:
         sys.path.insert(
             0,
-            str(directory)
+            directory_str
         )
 
 
@@ -122,10 +54,6 @@ from simulation_setup import (
 
 from simulation_logger import (
     SimulationLogger
-)
-
-from initial_standing import (
-    get_initial_standing_info
 )
 
 from swing_low_level_controller import (
@@ -242,15 +170,24 @@ np.set_printoptions(
 # WALKING SCENARIO PARAMETERS
 # ============================================================
 
-# Low-level controller update period:
+# Debug mode:
 #
-#     400 Hz
+# Low-level controller is updated at every MuJoCo
+# physics step.
 #
-DT_LOW = 0.0025
-
-
-# Initial standing duration [s]
-T_STAND = 1.0
+# XML:
+#
+#     DT_SIM = 0.0005 s
+#
+# Therefore:
+#
+#     DT_LOW = DT_SIM
+#
+#     = 0.0005 s
+#
+#     = 2000 Hz
+#
+DT_LOW = 0.0005
 
 
 # Swing-foot clearance [m]
@@ -265,9 +202,15 @@ K_D_RAIBERT = 0.05
 GROUND_HEIGHT = 0.0
 
 
-# Initial bring-up test:
+# CoM velocity command in World frame [m/s].
 #
-#     stepping in place
+# Debug first with stepping in place:
+#
+#     [0.0, 0.0, 0.0]
+#
+# Later, for slow forward walking:
+#
+#     [0.02, 0.0, 0.0]
 #
 V_COM_CMD = np.array(
     [
@@ -280,24 +223,17 @@ V_COM_CMD = np.array(
 
 
 # Total simulation duration [s]
-#
-# 1 s standing
-#
-# +
-#
-# 2 s gait
-#
-# With current gait:
-#
-#     T_cycle = 0.5 s
-#
-# this gives approximately 4 gait cycles.
-#
 SIM_DURATION = 3.0
 
 
 # Print one status every this many MPC updates
 PRINT_EVERY_N_MPC = 10
+
+
+# Current QP needs more than the default 1000
+# iterations when the prediction horizon contains
+# mixed contact modes.
+QP_MAX_ITER = 10000
 
 
 # ============================================================
@@ -311,6 +247,224 @@ XML_PATH = (
     /
     "scene_flat_terrian_v3.xml"
 )
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def validate_timing_multiple(
+    larger_dt,
+    smaller_dt,
+    name
+):
+    """
+    Verify that larger_dt is an integer multiple
+    of smaller_dt.
+    """
+
+    steps = int(
+        round(
+            larger_dt
+            /
+            smaller_dt
+        )
+    )
+
+    if steps <= 0:
+
+        raise ValueError(
+            f"{name}: số step phải > 0."
+        )
+
+    if not np.isclose(
+        steps
+        *
+        smaller_dt,
+        larger_dt,
+        atol=1e-12
+    ):
+
+        raise ValueError(
+            f"{name}: {larger_dt} phải là bội số nguyên "
+            f"của {smaller_dt}."
+        )
+
+    return steps
+
+
+# ============================================================
+# PRINT STATUS
+# ============================================================
+
+def print_status(
+    mpc_iteration,
+    control_time,
+    current,
+    current_contact,
+    swing_foot,
+    delta_T,
+    held_u0_MPC,
+    tau_command,
+    last_swing_result,
+    last_solver_info,
+    last_post_diagnostics,
+    last_mpc_compute_time,
+    last_contact_schedule,
+    reference_generator
+):
+    """
+    Print one compact simulation status block.
+    """
+
+    print("\n")
+    print("-" * 70)
+
+    print(
+        "MPC iteration =",
+        mpc_iteration
+    )
+
+    print(
+        "control_time =",
+        f"{control_time:.4f}",
+        "s"
+    )
+
+    print(
+        "mode = WALKING"
+    )
+
+    print(
+        "t_gait =",
+        f"{control_time:.4f}",
+        "s"
+    )
+
+    print(
+        "\ncurrent_contact =",
+        current_contact
+    )
+
+    print(
+        "swing_foot =",
+        swing_foot
+    )
+
+    print(
+        "delta_T =",
+        delta_T
+    )
+
+    print(
+        "\nCoM position =",
+        current.x[
+            0:3
+        ]
+    )
+
+    print(
+        "CoM velocity =",
+        current.x[
+            6:9
+        ]
+    )
+
+    print(
+        "CoM velocity reference =",
+        reference_generator.get_velocity_reference()
+    )
+
+    print(
+        "\nu0_MPC ="
+    )
+
+    print(
+        held_u0_MPC
+    )
+
+    print(
+        "\ntau_command ="
+    )
+
+    print(
+        tau_command
+    )
+
+    if last_swing_result is not None:
+
+        print(
+            "\nfoothold =",
+            last_swing_result.W_p_foothold
+        )
+
+        print(
+            "swing foot target =",
+            last_swing_result.W_p_swing_des
+        )
+
+        print(
+            "Bezier phase next =",
+            last_swing_result.phase_next
+        )
+
+        print(
+            "IK converged =",
+            last_swing_result.ik_diagnostics[
+                "converged"
+            ]
+        )
+
+        print(
+            "IK final error norm =",
+            last_swing_result.ik_diagnostics[
+                "final_error_norm"
+            ]
+        )
+
+    print(
+        "\nOSQP status =",
+        last_solver_info[
+            "status"
+        ]
+    )
+
+    print(
+        "OSQP iterations =",
+        last_solver_info[
+            "iterations"
+        ]
+    )
+
+    print(
+        "OSQP solve time =",
+        last_solver_info[
+            "solve_time"
+        ],
+        "s"
+    )
+
+    if last_post_diagnostics is not None:
+
+        print(
+            "Constraint max violation =",
+            last_post_diagnostics[
+                "max_violation"
+            ]
+        )
+
+    print(
+        "MPC compute time =",
+        last_mpc_compute_time,
+        "s"
+    )
+
+    print(
+        "\nMPC horizon first contact =",
+        last_contact_schedule[
+            0
+        ]
+    )
 
 
 # ============================================================
@@ -331,7 +485,9 @@ def main():
 
         dt_mpc=dt_mpc,
 
-        dt_mpc_update=dt_mpc_update
+        dt_mpc_update=dt_mpc_update,
+
+        qp_max_iter=QP_MAX_ITER
     )
 
 
@@ -350,9 +506,13 @@ def main():
 
 
     # --------------------------------------------------------
-    # Swing duration
+    # Single-support duration is also swing duration:
     #
-    #     T_SWING = N_SS * dt_mpc
+    #     T_SWING
+    #
+    # =
+    #
+    #     N_SS * dt_mpc
     # --------------------------------------------------------
 
     T_SWING = (
@@ -363,108 +523,37 @@ def main():
 
 
     # --------------------------------------------------------
-    # Number of MuJoCo physics steps per low-level update
+    # Number of physics steps per low-level update
     # --------------------------------------------------------
 
-    LOW_LEVEL_EVERY = int(
-        round(
-            DT_LOW
-            /
-            DT_SIM
-        )
+    LOW_LEVEL_EVERY = validate_timing_multiple(
+
+        larger_dt=DT_LOW,
+
+        smaller_dt=DT_SIM,
+
+        name="DT_LOW / DT_SIM"
     )
 
 
     # --------------------------------------------------------
-    # Number of MuJoCo physics steps per MPC update
+    # Number of physics steps per MPC update
     # --------------------------------------------------------
 
-    MPC_EVERY = int(
-        round(
-            dt_mpc_update
-            /
-            DT_SIM
-        )
+    MPC_EVERY = validate_timing_multiple(
+
+        larger_dt=dt_mpc_update,
+
+        smaller_dt=DT_SIM,
+
+        name="dt_mpc_update / DT_SIM"
     )
 
 
     # --------------------------------------------------------
-    # Number of physics steps during initial standing
+    # Every MPC tick must also be a low-level tick
     # --------------------------------------------------------
 
-    STAND_STEPS = int(
-        round(
-            T_STAND
-            /
-            DT_SIM
-        )
-    )
-
-
-    # ========================================================
-    # 3. TIMING VALIDATION
-    # ========================================================
-
-    if not np.isclose(
-
-        LOW_LEVEL_EVERY
-        *
-        DT_SIM,
-
-        DT_LOW,
-
-        atol=1e-12
-
-    ):
-
-        raise ValueError(
-            "DT_LOW phải là bội số nguyên của DT_SIM."
-        )
-
-
-    if not np.isclose(
-
-        MPC_EVERY
-        *
-        DT_SIM,
-
-        dt_mpc_update,
-
-        atol=1e-12
-
-    ):
-
-        raise ValueError(
-            "dt_mpc_update phải là bội số nguyên "
-            "của DT_SIM."
-        )
-
-
-    if not np.isclose(
-
-        STAND_STEPS
-        *
-        DT_SIM,
-
-        T_STAND,
-
-        atol=1e-12
-
-    ):
-
-        raise ValueError(
-            "T_STAND phải là bội số nguyên của DT_SIM."
-        )
-
-
-    # MPC tick should also be a low-level tick.
-    #
-    # Current system:
-    #
-    #     LOW_LEVEL_EVERY = 5
-    #
-    #     MPC_EVERY = 20
-    #
     if (
         MPC_EVERY
         %
@@ -479,67 +568,24 @@ def main():
         )
 
 
-    # Initial walking transition should occur exactly on
-    # both MPC and low-level update boundaries.
-    if (
-        STAND_STEPS
-        %
-        LOW_LEVEL_EVERY
-        !=
-        0
-    ):
-
-        raise ValueError(
-            "T_STAND phải kết thúc tại low-level tick."
-        )
-
-
-    if (
-        STAND_STEPS
-        %
-        MPC_EVERY
-        !=
-        0
-    ):
-
-        raise ValueError(
-            "T_STAND phải kết thúc tại MPC tick."
-        )
-
-
     # --------------------------------------------------------
-    # Swing duration should correspond to an integer number
-    # of low-level updates.
+    # Number of low-level updates during one swing
     # --------------------------------------------------------
 
-    SWING_LOW_LEVEL_UPDATES = int(
-        round(
-            T_SWING
-            /
-            DT_LOW
+    SWING_LOW_LEVEL_UPDATES = (
+        validate_timing_multiple(
+
+            larger_dt=T_SWING,
+
+            smaller_dt=DT_LOW,
+
+            name="T_SWING / DT_LOW"
         )
     )
 
 
-    if not np.isclose(
-
-        SWING_LOW_LEVEL_UPDATES
-        *
-        DT_LOW,
-
-        T_SWING,
-
-        atol=1e-12
-
-    ):
-
-        raise ValueError(
-            "T_SWING phải là bội số nguyên của DT_LOW."
-        )
-
-
     # ========================================================
-    # 4. INITIALIZE SWING TRAJECTORY
+    # 3. INITIALIZE SWING TRAJECTORY
     # ========================================================
 
     swing_trajectory = (
@@ -555,31 +601,35 @@ def main():
 
 
     # ========================================================
-    # 5. INITIAL HELD SIGNALS
+    # 4. HELD / CURRENT SIGNALS
     # ========================================================
 
-    # First MPC input held by ZOH:
-    #
-    # u =
+    # --------------------------------------------------------
+    # First MPC input:
     #
     # [
     #     W_L
     #     W_R
     # ]
     #
+    # held by ZOH between MPC updates.
+    # --------------------------------------------------------
+
     held_u0_MPC = np.zeros(
         12,
         dtype=float
     )
 
 
-    # Final joint torque command:
+    # --------------------------------------------------------
+    # Final joint torque:
     #
     # [
     #     tau_L
     #     tau_R
     # ]
-    #
+    # --------------------------------------------------------
+
     tau_command = np.zeros(
         10,
         dtype=float
@@ -587,7 +637,7 @@ def main():
 
 
     # --------------------------------------------------------
-    # Current low-level information
+    # Current contact information
     # --------------------------------------------------------
 
     current_contact = (
@@ -615,15 +665,11 @@ def main():
 
 
     # ========================================================
-    # 6. LOGGER
+    # 5. LOGGER / COUNTERS
     # ========================================================
 
     logger = SimulationLogger()
 
-
-    # ========================================================
-    # 7. COUNTERS
-    # ========================================================
 
     physics_step = 0
 
@@ -633,12 +679,17 @@ def main():
 
 
     # ========================================================
-    # 8. PRINT CONFIGURATION
+    # 6. PRINT CONFIGURATION
     # ========================================================
 
     print("\n")
+
     print("=" * 70)
-    print("WALKING SIMULATION")
+
+    print(
+        "WALKING SIMULATION"
+    )
+
     print("=" * 70)
 
 
@@ -657,9 +708,23 @@ def main():
 
 
     print(
+        "Low-level rate =",
+        1.0 / DT_LOW,
+        "Hz"
+    )
+
+
+    print(
         "dt_mpc_update =",
         dt_mpc_update,
         "s"
+    )
+
+
+    print(
+        "MPC update rate =",
+        1.0 / dt_mpc_update,
+        "Hz"
     )
 
 
@@ -671,8 +736,10 @@ def main():
 
 
     print(
-        "T_STAND =",
-        T_STAND,
+        "Prediction horizon =",
+        N
+        *
+        dt_mpc,
         "s"
     )
 
@@ -691,21 +758,29 @@ def main():
 
 
     print(
+        "QP max iterations =",
+        QP_MAX_ITER
+    )
+
+
+    print(
         "\nV_COM_CMD =",
         V_COM_CMD
     )
 
 
     print(
-        "\nInitial test:"
-        "\n    standing"
-        "\n        ->"
-        "\n    stepping in place"
+        "\nGait starts immediately at t = 0."
+    )
+
+
+    print(
+        "No separate initial-standing mode is used."
     )
 
 
     # ========================================================
-    # 9. MAIN SIMULATION LOOP
+    # 7. MAIN SIMULATION LOOP
     # ========================================================
 
     with mujoco.viewer.launch_passive(
@@ -720,16 +795,14 @@ def main():
 
             and
 
-            data.time < SIM_DURATION
+            data.time
+            <
+            SIM_DURATION
 
         ):
 
             # =================================================
             # CURRENT DETERMINISTIC CONTROL TIME
-            #
-            # Use integer physics-step count instead of
-            # accumulated floating-point time for controller
-            # scheduling.
             # =================================================
 
             control_time = (
@@ -739,7 +812,23 @@ def main():
             )
 
 
+            # -------------------------------------------------
+            # No separate standing mode:
+            #
+            #     t_gait = control_time
+            # -------------------------------------------------
+
+            t_gait = (
+                control_time
+            )
+
+
+            # -------------------------------------------------
+            # MPC tick
+            # -------------------------------------------------
+
             is_mpc_tick = (
+
                 physics_step
                 %
                 MPC_EVERY
@@ -748,7 +837,12 @@ def main():
             )
 
 
+            # -------------------------------------------------
+            # Low-level tick
+            # -------------------------------------------------
+
             is_low_level_tick = (
+
                 physics_step
                 %
                 LOW_LEVEL_EVERY
@@ -758,10 +852,10 @@ def main():
 
 
             # -------------------------------------------------
-            # Current state snapshot.
+            # Shared current-state snapshot.
             #
-            # If MPC and low-level updates occur at the same
-            # physics step, the same snapshot is reused.
+            # If MPC and low-level occur at the same physics
+            # step, the same state snapshot is reused.
             # -------------------------------------------------
 
             current = None
@@ -769,8 +863,6 @@ def main():
 
             # =================================================
             # A. MPC UPDATE
-            #
-            #     100 Hz
             # =================================================
 
             if is_mpc_tick:
@@ -798,90 +890,57 @@ def main():
 
 
                 # =============================================
-                # A2. INITIAL STANDING / WALKING MODE
+                # A2. WALKING CONTACT SCHEDULE
+                #
+                # Scheduler is active from t = 0.
+                #
+                # With:
+                #
+                #     N_DS = 2
+                #     N_SS = 8
+                #     dt_mpc = 0.025
+                #
+                # at t = 0:
+                #
+                #     k0 : DS
+                #     k1 : DS
+                #     k2...k9 : LSS
+                #
+                # Therefore the first MPC horizon already
+                # anticipates the DS -> LSS transition.
                 # =============================================
 
-                (
-                    is_standing,
-                    _,
-                    _,
-                    _,
-                    standing_contact_schedule
+                contact_schedule = (
+                    get_contact_schedule(
 
-                ) = get_initial_standing_info(
+                        current_time=t_gait,
 
-                    current_time=control_time,
+                        N=N,
 
-                    T_stand=T_STAND,
-
-                    N=N
+                        dt_mpc=dt_mpc
+                    )
                 )
-
-
-                # ---------------------------------------------
-                # Initial standing
-                # ---------------------------------------------
-
-                if is_standing:
-
-                    contact_schedule = (
-                        standing_contact_schedule
-                    )
-
-
-                    # During initial standing:
-                    #
-                    #     CoM velocity reference = 0
-                    #
-                    v_CoM_cmd_current = np.zeros(
-                        3,
-                        dtype=float
-                    )
-
-
-                # ---------------------------------------------
-                # Walking
-                # ---------------------------------------------
-
-                else:
-
-                    t_gait = (
-                        control_time
-                        -
-                        T_STAND
-                    )
-
-
-                    contact_schedule = (
-                        get_contact_schedule(
-
-                            current_time=t_gait,
-
-                            N=N,
-
-                            dt_mpc=dt_mpc
-                        )
-                    )
-
-
-                    v_CoM_cmd_current = (
-                        V_COM_CMD.copy()
-                    )
 
 
                 # =============================================
                 # A3. MPC REFERENCE
                 # =============================================
 
+                v_CoM_cmd_current = (
+                    V_COM_CMD.copy()
+                )
+
+
                 X_ref = (
                     setup.reference_generator.generate_reference(
+
                         v_CoM_cmd_current
                     )
                 )
 
 
                 # =============================================
-                # A4. BUILD CURRENT SRBD PREDICTION MODEL
+                # A4. BUILD SRBD PREDICTION MODEL
                 # =============================================
 
                 (
@@ -968,8 +1027,13 @@ def main():
 
 
                     print("\n")
+
                     print("=" * 70)
-                    print("MPC STOPPED")
+
+                    print(
+                        "MPC STOPPED"
+                    )
+
                     print("=" * 70)
 
 
@@ -981,8 +1045,25 @@ def main():
 
 
                     print(
+                        "t_gait =",
+                        t_gait,
+                        "s"
+                    )
+
+
+                    print(
                         "MPC iteration =",
                         mpc_iteration
+                    )
+
+
+                    print(
+                        "contact_schedule ="
+                    )
+
+
+                    print(
+                        contact_schedule
                     )
 
 
@@ -1003,6 +1084,30 @@ def main():
                         )
 
 
+                        print(
+                            "solver iterations =",
+                            solver_info.get(
+                                "iterations"
+                            )
+                        )
+
+
+                        print(
+                            "primal residual =",
+                            solver_info.get(
+                                "primal_residual"
+                            )
+                        )
+
+
+                        print(
+                            "dual residual =",
+                            solver_info.get(
+                                "dual_residual"
+                            )
+                        )
+
+
                     raise RuntimeError(
                         "Không có MPC input hợp lệ."
                     )
@@ -1010,14 +1115,6 @@ def main():
 
                 # =============================================
                 # A7. HOLD FIRST MPC INPUT
-                #
-                # ZOH between MPC updates:
-                #
-                #     100 Hz MPC
-                #
-                #         ↓
-                #
-                #     400 Hz low-level
                 # =============================================
 
                 held_u0_MPC = np.asarray(
@@ -1077,11 +1174,10 @@ def main():
 
             # =================================================
             # B. LOW-LEVEL UPDATE
-            #
-            #     400 Hz
             # =================================================
 
             if is_low_level_tick:
+
 
                 # =============================================
                 # B1. CURRENT STATE
@@ -1099,10 +1195,6 @@ def main():
 
                 # Current whole-body CoM velocity:
                 #
-                #     x[6:9]
-                #
-                # =
-                #
                 #     {}^W p_dot_CoM
                 #
                 W_p_dot_CoM = (
@@ -1112,9 +1204,9 @@ def main():
                 )
 
 
-                # Current reference CoM velocity:
+                # Current desired CoM velocity:
                 #
-                #     {}^W p_dot_CoM^ref
+                #     {}^W p_dot_CoM_ref
                 #
                 W_p_dot_CoM_ref = (
                     setup.reference_generator.get_velocity_reference()
@@ -1123,78 +1215,30 @@ def main():
 
                 # =============================================
                 # B2. CURRENT CONTACT MODE
+                #
+                # Same scheduler and same t_gait used by MPC.
                 # =============================================
 
                 (
-                    is_standing,
-                    standing_current_contact,
-                    standing_swing_foot,
-                    standing_delta_T,
-                    _
+                    current_contact,
+                    swing_foot,
+                    delta_T
 
-                ) = get_initial_standing_info(
+                ) = get_current_contact_info(
 
-                    current_time=control_time,
+                    current_time=t_gait,
 
-                    T_stand=T_STAND,
-
-                    N=N
+                    dt_mpc=dt_mpc
                 )
-
-
-                # ---------------------------------------------
-                # Initial standing
-                # ---------------------------------------------
-
-                if is_standing:
-
-                    current_contact = (
-                        standing_current_contact
-                    )
-
-
-                    swing_foot = (
-                        standing_swing_foot
-                    )
-
-
-                    delta_T = (
-                        standing_delta_T
-                    )
-
-
-                # ---------------------------------------------
-                # Walking
-                # ---------------------------------------------
-
-                else:
-
-                    t_gait = (
-                        control_time
-                        -
-                        T_STAND
-                    )
-
-
-                    (
-                        current_contact,
-                        swing_foot,
-                        delta_T
-
-                    ) = get_current_contact_info(
-
-                        current_time=t_gait,
-
-                        dt_mpc=dt_mpc
-                    )
 
 
                 # =============================================
                 # B3. MPC WRENCH -> CURRENT JOINT TORQUE
                 #
-                # MPC wrench is held from the latest 100-Hz
-                # solve, but Jacobian mapping is evaluated at
-                # the current 400-Hz robot configuration.
+                # MPC wrench is ZOH-held between MPC solves.
+                #
+                # Jacobian mapping is recomputed at every
+                # low-level / MuJoCo physics step.
                 # =============================================
 
                 (
@@ -1215,6 +1259,7 @@ def main():
                 # =============================================
                 # B4. CONTACT-BASED TORQUE ARBITRATION
                 # =============================================
+
 
                 # ---------------------------------------------
                 # DOUBLE SUPPORT
@@ -1250,9 +1295,9 @@ def main():
                     )
 
 
-                    # Reset swing trajectory so that the next
-                    # stance -> swing transition captures a new
-                    # physical liftoff position p0.
+                    # Reset swing trajectory so the next
+                    # stance -> swing transition captures a
+                    # fresh physical liftoff point.
                     swing_trajectory.reset()
 
 
@@ -1264,8 +1309,11 @@ def main():
                 #
                 #     [1, 0]
                 #
-                # Left  = stance -> MPC
-                # Right = swing  -> low-level controller
+                # Left:
+                #     stance -> MPC
+                #
+                # Right:
+                #     swing -> Raibert -> Bezier -> IK -> PD
                 # ---------------------------------------------
 
                 elif np.array_equal(
@@ -1380,11 +1428,13 @@ def main():
                     )
 
 
+                    # Left leg = stance
                     tau_L = (
                         tau_L_MPC.copy()
                     )
 
 
+                    # Right leg = swing
                     tau_R = (
                         swing_result.tau_swing.copy()
                     )
@@ -1400,8 +1450,11 @@ def main():
                 #
                 #     [0, 1]
                 #
-                # Left  = swing  -> low-level controller
-                # Right = stance -> MPC
+                # Left:
+                #     swing -> Raibert -> Bezier -> IK -> PD
+                #
+                # Right:
+                #     stance -> MPC
                 # ---------------------------------------------
 
                 elif np.array_equal(
@@ -1516,11 +1569,13 @@ def main():
                     )
 
 
+                    # Left leg = swing
                     tau_L = (
                         swing_result.tau_swing.copy()
                     )
 
 
+                    # Right leg = stance
                     tau_R = (
                         tau_R_MPC.copy()
                     )
@@ -1578,15 +1633,18 @@ def main():
                 # =============================================
                 # B6. APPLY TORQUE
                 #
-                # No manual clipping here.
+                # No manual clipping.
                 #
                 # MuJoCo actuator ctrlrange defined in XML
-                # handles actuator control limits.
+                # remains the actuator-limit source of truth.
                 # =============================================
 
                 apply_joint_torque(
+
                     model,
+
                     data,
+
                     tau_command
                 )
 
@@ -1595,14 +1653,15 @@ def main():
 
 
             # =================================================
-            # C. LOG CURRENT MPC CYCLE
-            #
-            # Every MPC tick is also a low-level tick, so
-            # tau_command here is the torque command obtained
-            # after current contact arbitration.
+            # C. LOG / PRINT CURRENT MPC CYCLE
             # =================================================
 
             if is_mpc_tick:
+
+
+                # ---------------------------------------------
+                # LOGGER
+                # ---------------------------------------------
 
                 logger.log_step(
 
@@ -1626,9 +1685,9 @@ def main():
                 )
 
 
-                # =============================================
+                # ---------------------------------------------
                 # STATUS PRINT
-                # =============================================
+                # ---------------------------------------------
 
                 if (
                     mpc_iteration
@@ -1638,187 +1697,63 @@ def main():
                     0
                 ):
 
-                    print("\n")
-                    print("-" * 70)
+                    print_status(
 
+                        mpc_iteration=(
+                            mpc_iteration
+                        ),
 
-                    print(
-                        "MPC iteration =",
-                        mpc_iteration
-                    )
+                        control_time=(
+                            control_time
+                        ),
 
+                        current=(
+                            current
+                        ),
 
-                    print(
-                        "control_time =",
-                        f"{control_time:.4f}",
-                        "s"
-                    )
+                        current_contact=(
+                            current_contact
+                        ),
 
+                        swing_foot=(
+                            swing_foot
+                        ),
 
-                    if control_time < T_STAND:
+                        delta_T=(
+                            delta_T
+                        ),
 
-                        print(
-                            "mode = INITIAL STANDING"
+                        held_u0_MPC=(
+                            held_u0_MPC
+                        ),
+
+                        tau_command=(
+                            tau_command
+                        ),
+
+                        last_swing_result=(
+                            last_swing_result
+                        ),
+
+                        last_solver_info=(
+                            last_solver_info
+                        ),
+
+                        last_post_diagnostics=(
+                            last_post_diagnostics
+                        ),
+
+                        last_mpc_compute_time=(
+                            last_mpc_compute_time
+                        ),
+
+                        last_contact_schedule=(
+                            last_contact_schedule
+                        ),
+
+                        reference_generator=(
+                            setup.reference_generator
                         )
-
-
-                    else:
-
-                        print(
-                            "mode = WALKING"
-                        )
-
-
-                        print(
-                            "t_gait =",
-                            f"{control_time - T_STAND:.4f}",
-                            "s"
-                        )
-
-
-                    print(
-                        "\ncurrent_contact =",
-                        current_contact
-                    )
-
-
-                    print(
-                        "swing_foot =",
-                        swing_foot
-                    )
-
-
-                    print(
-                        "delta_T =",
-                        delta_T
-                    )
-
-
-                    print(
-                        "\nCoM position =",
-                        current.x[
-                            0:3
-                        ]
-                    )
-
-
-                    print(
-                        "CoM velocity =",
-                        current.x[
-                            6:9
-                        ]
-                    )
-
-
-                    print(
-                        "CoM velocity reference =",
-                        setup.reference_generator.get_velocity_reference()
-                    )
-
-
-                    print(
-                        "\nu0_MPC ="
-                    )
-
-
-                    print(
-                        held_u0_MPC
-                    )
-
-
-                    print(
-                        "\ntau_command ="
-                    )
-
-
-                    print(
-                        tau_command
-                    )
-
-
-                    if last_swing_result is not None:
-
-                        print(
-                            "\nfoothold =",
-                            last_swing_result.W_p_foothold
-                        )
-
-
-                        print(
-                            "swing foot target =",
-                            last_swing_result.W_p_swing_des
-                        )
-
-
-                        print(
-                            "Bezier phase next =",
-                            last_swing_result.phase_next
-                        )
-
-
-                        print(
-                            "IK converged =",
-                            last_swing_result.ik_diagnostics[
-                                "converged"
-                            ]
-                        )
-
-
-                        print(
-                            "IK final error norm =",
-                            last_swing_result.ik_diagnostics[
-                                "final_error_norm"
-                            ]
-                        )
-
-
-                    print(
-                        "\nOSQP status =",
-                        last_solver_info[
-                            "status"
-                        ]
-                    )
-
-
-                    print(
-                        "OSQP iterations =",
-                        last_solver_info[
-                            "iterations"
-                        ]
-                    )
-
-
-                    print(
-                        "OSQP solve time =",
-                        last_solver_info[
-                            "solve_time"
-                        ],
-                        "s"
-                    )
-
-
-                    if last_post_diagnostics is not None:
-
-                        print(
-                            "Constraint max violation =",
-                            last_post_diagnostics[
-                                "max_violation"
-                            ]
-                        )
-
-
-                    print(
-                        "MPC compute time =",
-                        last_mpc_compute_time,
-                        "s"
-                    )
-
-
-                    print(
-                        "\nMPC horizon first contact =",
-                        last_contact_schedule[
-                            0
-                        ]
                     )
 
 
@@ -1828,10 +1763,7 @@ def main():
             # =================================================
             # D. MUJOCO PHYSICS STEP
             #
-            #     2000 Hz
-            #
-            # data.ctrl automatically holds the latest torque
-            # between low-level updates.
+            # 2000 Hz
             # =================================================
 
             mujoco.mj_step(
@@ -1861,19 +1793,32 @@ def main():
 
 
     # ========================================================
-    # 10. FINALIZE LOGGER
+    # 8. FINALIZE LOGGER
     # ========================================================
 
     logger.finalize()
 
 
     # ========================================================
-    # 11. FINAL SUMMARY
+    # 9. FINAL SUMMARY
     # ========================================================
 
+    final_state = (
+        get_current_state_mpc(
+            model,
+            data
+        )
+    )
+
+
     print("\n")
+
     print("=" * 70)
-    print("WALKING SIMULATION FINISHED")
+
+    print(
+        "WALKING SIMULATION FINISHED"
+    )
+
     print("=" * 70)
 
 
@@ -1904,10 +1849,7 @@ def main():
 
     print(
         "\nFinal CoM position =",
-        get_current_state_mpc(
-            model,
-            data
-        ).x[
+        final_state.x[
             0:3
         ]
     )
