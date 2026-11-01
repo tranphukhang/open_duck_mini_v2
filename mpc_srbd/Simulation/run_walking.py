@@ -77,14 +77,6 @@ from W_position_R6 import (
     get_W_position_R6
 )
 
-from W_position_L6_ref import (
-    get_W_position_L6_ref
-)
-
-from W_position_R6_ref import (
-    get_W_position_R6_ref
-)
-
 
 # ============================================================
 # SRBD
@@ -281,6 +273,79 @@ def validate_timing_multiple(
         )
 
     return steps
+
+
+# ============================================================
+# BASE ROTATION MATRIX
+# ============================================================
+
+def get_W_R_B(
+    model,
+    data,
+    site_name="base"
+):
+    """
+    Return the current Body-to-World rotation matrix:
+
+        W_R_B
+
+    using the same MuJoCo base site convention as
+    State/W_euler_base.py.
+
+    MuJoCo:
+
+        data.site_xmat
+
+    stores the site orientation in the World frame.
+    """
+
+    site_id = mujoco.mj_name2id(
+        model,
+        mujoco.mjtObj.mjOBJ_SITE,
+        site_name
+    )
+
+    if site_id < 0:
+
+        raise ValueError(
+            f"Không tìm thấy site '{site_name}' trong MuJoCo model."
+        )
+
+
+    W_R_B = (
+        data.site_xmat[
+            site_id
+        ]
+        .reshape(
+            3,
+            3
+        )
+        .copy()
+    )
+
+
+    if W_R_B.shape != (
+        3,
+        3
+    ):
+
+        raise RuntimeError(
+            "W_R_B phải có shape (3, 3)."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            W_R_B
+        )
+    ):
+
+        raise RuntimeError(
+            "W_R_B chứa NaN hoặc Inf."
+        )
+
+
+    return W_R_B
 
 
 # ============================================================
@@ -1004,6 +1069,23 @@ def main():
 
 
     # --------------------------------------------------------
+    # Stance duration used by the HECTOR-style Raibert term:
+    #
+    #     1/2 * v_CoM * T_stance
+    #
+    # For the current symmetric gait:
+    #
+    #     T_STANCE = T_SWING = N_SS * dt_mpc
+    # --------------------------------------------------------
+
+    T_STANCE = (
+        N_SS
+        *
+        dt_mpc
+    )
+
+
+    # --------------------------------------------------------
     # Physics steps per low-level update
     # --------------------------------------------------------
 
@@ -1198,6 +1280,119 @@ def main():
 
 
     # ========================================================
+    # 6A. HOME GEOMETRY FOR HECTOR-STYLE RAIBERT
+    #
+    # The new foothold planner does not use a fixed World-frame:
+    #
+    #     W_p_L6_ref
+    #     W_p_R6_ref
+    #
+    # as the nominal foothold base point.
+    #
+    # Instead it uses:
+    #
+    #     W_p_CoM + W_R_B @ B_p_foot_offset
+    #
+    # where the left/right nominal offsets are identified once
+    # from the home configuration:
+    #
+    #     B_p_foot_offset
+    #
+    #       =
+    #
+    #     W_R_B_home.T
+    #
+    #       @
+    #
+    #     (W_p_foot_home - W_p_CoM_home)
+    #
+    # ========================================================
+
+    W_p_CoM_home = (
+        initial_current.x[
+            0:3
+        ].copy()
+    )
+
+
+    W_R_B_home = (
+        get_W_R_B(
+            model,
+            data
+        )
+    )
+
+
+    W_p_L6_home = (
+        get_W_position_L6(
+            model,
+            data
+        )
+    )
+
+
+    W_p_R6_home = (
+        get_W_position_R6(
+            model,
+            data
+        )
+    )
+
+
+    B_p_L6_offset = (
+
+        W_R_B_home.T
+
+        @
+
+        (
+            W_p_L6_home
+            -
+            W_p_CoM_home
+        )
+
+    )
+
+
+    B_p_R6_offset = (
+
+        W_R_B_home.T
+
+        @
+
+        (
+            W_p_R6_home
+            -
+            W_p_CoM_home
+        )
+
+    )
+
+
+    # --------------------------------------------------------
+    # Physical touchdown heights of the L6/R6 sites.
+    #
+    # The terrain plane may be z = 0 while the physical L6/R6
+    # sites have a small geometric offset from that plane.
+    #
+    # Therefore preserve the actual home site heights.
+    # --------------------------------------------------------
+
+    L6_TOUCHDOWN_HEIGHT = float(
+        W_p_L6_home[
+            2
+        ]
+    )
+
+
+    R6_TOUCHDOWN_HEIGHT = float(
+        W_p_R6_home[
+            2
+        ]
+    )
+
+
+    # ========================================================
     # 7. PRINT CONFIGURATION
     # ========================================================
 
@@ -1258,6 +1453,12 @@ def main():
     )
 
     print(
+        "T_STANCE =",
+        T_STANCE,
+        "s"
+    )
+
+    print(
         "Low-level updates / swing =",
         SWING_LOW_LEVEL_UPDATES
     )
@@ -1291,6 +1492,52 @@ def main():
     # --------------------------------------------------------
     # Frame diagnostic
     # --------------------------------------------------------
+
+    print(
+        "\nW_p_CoM_home =",
+        W_p_CoM_home
+    )
+
+    print(
+        "W_p_L6_home =",
+        W_p_L6_home
+    )
+
+    print(
+        "W_p_R6_home =",
+        W_p_R6_home
+    )
+
+    print(
+        "\nW_R_B_home ="
+    )
+
+    print(
+        W_R_B_home
+    )
+
+    print(
+        "\nB_p_L6_offset =",
+        B_p_L6_offset
+    )
+
+    print(
+        "B_p_R6_offset =",
+        B_p_R6_offset
+    )
+
+    print(
+        "\nL6 touchdown height =",
+        L6_TOUCHDOWN_HEIGHT,
+        "m"
+    )
+
+    print(
+        "R6 touchdown height =",
+        R6_TOUCHDOWN_HEIGHT,
+        "m"
+    )
+
 
     print(
         "\nOriginal L6_R_W at home ="
@@ -1792,6 +2039,25 @@ def main():
 
 
                 # =============================================
+                # B1A. CURRENT BODY POSE FOR RAIBERT
+                # =============================================
+
+                W_p_CoM = (
+                    current.x[
+                        0:3
+                    ].copy()
+                )
+
+
+                W_R_B = (
+                    get_W_R_B(
+                        model,
+                        data
+                    )
+                )
+
+
+                # =============================================
                 # B2. CURRENT CONTACT MODE
                 #
                 # Same gait scheduler as MPC.
@@ -1944,26 +2210,18 @@ def main():
 
 
                     # -----------------------------------------
-                    # Nominal foot references
-                    # -----------------------------------------
-
-                    W_p_L6_ref = (
-                        get_W_position_L6_ref(
-                            model,
-                            data
-                        )
-                    )
-
-                    W_p_R6_ref = (
-                        get_W_position_R6_ref(
-                            model,
-                            data
-                        )
-                    )
-
-
-                    # -----------------------------------------
                     # Swing controller
+                    #
+                    # Right foot is swing.
+                    #
+                    # HECTOR-style Raibert uses:
+                    #
+                    #     current CoM position
+                    #     current body orientation
+                    #     nominal body-frame foot offsets
+                    #     remaining swing time
+                    #     stance duration
+                    #     CoM velocity feedback
                     # -----------------------------------------
 
                     swing_result = (
@@ -1981,12 +2239,20 @@ def main():
 
                             delta_T=delta_T,
 
-                            W_p_L6_ref=(
-                                W_p_L6_ref
+                            W_p_CoM=(
+                                W_p_CoM
                             ),
 
-                            W_p_R6_ref=(
-                                W_p_R6_ref
+                            W_R_B=(
+                                W_R_B
+                            ),
+
+                            B_p_L6_offset=(
+                                B_p_L6_offset
+                            ),
+
+                            B_p_R6_offset=(
+                                B_p_R6_offset
                             ),
 
                             W_p_L6=(
@@ -2005,12 +2271,16 @@ def main():
                                 W_p_dot_CoM_ref
                             ),
 
+                            T_stance=(
+                                T_STANCE
+                            ),
+
                             k_d=(
                                 K_D_RAIBERT
                             ),
 
                             ground_height=(
-                                GROUND_HEIGHT
+                                R6_TOUCHDOWN_HEIGHT
                             )
                         )
                     )
@@ -2078,26 +2348,9 @@ def main():
 
 
                     # -----------------------------------------
-                    # Nominal references
-                    # -----------------------------------------
-
-                    W_p_L6_ref = (
-                        get_W_position_L6_ref(
-                            model,
-                            data
-                        )
-                    )
-
-                    W_p_R6_ref = (
-                        get_W_position_R6_ref(
-                            model,
-                            data
-                        )
-                    )
-
-
-                    # -----------------------------------------
                     # Swing controller
+                    #
+                    # Left foot is swing.
                     # -----------------------------------------
 
                     swing_result = (
@@ -2115,12 +2368,20 @@ def main():
 
                             delta_T=delta_T,
 
-                            W_p_L6_ref=(
-                                W_p_L6_ref
+                            W_p_CoM=(
+                                W_p_CoM
                             ),
 
-                            W_p_R6_ref=(
-                                W_p_R6_ref
+                            W_R_B=(
+                                W_R_B
+                            ),
+
+                            B_p_L6_offset=(
+                                B_p_L6_offset
+                            ),
+
+                            B_p_R6_offset=(
+                                B_p_R6_offset
                             ),
 
                             W_p_L6=(
@@ -2139,12 +2400,16 @@ def main():
                                 W_p_dot_CoM_ref
                             ),
 
+                            T_stance=(
+                                T_STANCE
+                            ),
+
                             k_d=(
                                 K_D_RAIBERT
                             ),
 
                             ground_height=(
-                                GROUND_HEIGHT
+                                L6_TOUCHDOWN_HEIGHT
                             )
                         )
                     )
