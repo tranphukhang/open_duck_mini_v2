@@ -2,7 +2,84 @@ import numpy as np
 
 
 # ============================================================
+# GAIT PARAMETERS
+#
+# Contact-phase durations are expressed in units of dt_mpc.
+#
+# Therefore:
+#
+#     T_DS = N_DS * dt_mpc
+#
+#     T_SS = N_SS * dt_mpc
+#
+# One complete gait cycle:
+#
+#     DS
+#     ->
+#     LSS
+#     ->
+#     DS
+#     ->
+#     RSS
+#
+# has:
+#
+#     N_CYCLE
+#
+# =
+#
+#     2 * N_DS
+#     +
+#     2 * N_SS
+#
+# prediction intervals.
+#
+#
+# Current values:
+#
+#     N_DS = 2
+#
+#     N_SS = 8
+#
+# With:
+#
+#     dt_mpc = 0.025 s
+#
+# this gives:
+#
+#     T_DS = 0.05 s
+#
+#     T_SS = 0.20 s
+#
+#     T_cycle = 0.50 s
+# ============================================================
+
+N_DS = 2
+
+N_SS = 8
+
+
+N_CYCLE = (
+    2 * N_DS
+    +
+    2 * N_SS
+)
+
+
+# ============================================================
 # CONTACT STATES
+#
+# Convention:
+#
+#     [c_L, c_R]
+#
+# where:
+#
+#     c_i = 1
+#         -> stance / contact
+#
+#     c_i = 0
+#         -> swing / no contact
 # ============================================================
 
 DOUBLE_SUPPORT = np.array(
@@ -13,6 +90,7 @@ DOUBLE_SUPPORT = np.array(
     dtype=int
 )
 
+
 LEFT_SINGLE_SUPPORT = np.array(
     [
         1,
@@ -20,6 +98,7 @@ LEFT_SINGLE_SUPPORT = np.array(
     ],
     dtype=int
 )
+
 
 RIGHT_SINGLE_SUPPORT = np.array(
     [
@@ -43,7 +122,8 @@ def get_contact_schedule(
     Generate the open-loop contact schedule over the current
     MPC prediction horizon.
 
-    Gait sequence:
+    Gait sequence
+    -------------
 
         Double Support
             ↓
@@ -61,48 +141,54 @@ def get_contact_schedule(
 
         [c_L, c_R]
 
+
     Double Support:
 
         [1, 1]
+
 
     Left Single Support:
 
         [1, 0]
 
+    Left foot  = stance
+    Right foot = swing
+
+
     Right Single Support:
 
         [0, 1]
+
+    Right foot = stance
+    Left foot  = swing
 
 
     Contact durations
     -----------------
 
-        T_DS = 2 * dt_mpc
+        T_DS
+            =
+        N_DS * dt_mpc
 
-        T_SS = 8 * dt_mpc
+
+        T_SS
+            =
+        N_SS * dt_mpc
 
 
     Complete gait cycle
     -------------------
 
-        DS
-        +
-        LSS
-        +
-        DS
-        +
-        RSS
-
-    Therefore:
-
-        T_cycle = 20 * dt_mpc
+        T_cycle
+            =
+        N_CYCLE * dt_mpc
 
 
     Parameters
     ----------
     current_time : float
 
-        Current simulation / MPC time.
+        Current gait / MPC time [s].
 
 
     N : int
@@ -112,16 +198,14 @@ def get_contact_schedule(
 
     dt_mpc : float
 
-        MPC prediction discretization period.
+        MPC prediction discretization period [s].
 
 
     Returns
     -------
-    contact_schedule : np.ndarray
+    contact_schedule : np.ndarray, shape (N, 2)
 
-        Shape:
-
-            (N, 2)
+        Contact schedule over the prediction horizon.
 
         Columns:
 
@@ -195,42 +279,32 @@ def get_contact_schedule(
 
 
     # ========================================================
-    # 2. CONTACT PHASE LENGTHS
-    #
-    # Express the gait directly in units of dt_mpc.
-    #
-    # DS  = 2 prediction intervals
-    # SS  = 8 prediction intervals
-    # ========================================================
-
-    N_DS = 2
-
-    N_SS = 8
-
-
-    N_cycle = (
-        2 * N_DS
-        +
-        2 * N_SS
-    )
-
-
-    # ========================================================
-    # 3. PHASE BOUNDARIES
+    # 2. PHASE BOUNDARIES
     #
     # Dimensionless gait phase:
     #
-    #     0 <= phase < 20
+    #     0 <= phase < N_CYCLE
     #
-    # Phase definition:
     #
-    #     [0, 2)    -> DS
+    # With:
     #
-    #     [2, 10)   -> LSS
+    #     N_DS = 2
     #
-    #     [10, 12)  -> DS
+    #     N_SS = 8
     #
-    #     [12, 20)  -> RSS
+    # current phase definition becomes:
+    #
+    #     [0, 2)
+    #         -> DS
+    #
+    #     [2, 10)
+    #         -> LSS
+    #
+    #     [10, 12)
+    #         -> DS
+    #
+    #     [12, 20)
+    #         -> RSS
     # ========================================================
 
     phase_DS_1_end = (
@@ -253,7 +327,7 @@ def get_contact_schedule(
 
 
     # ========================================================
-    # 4. INITIALIZE CONTACT SCHEDULE
+    # 3. INITIALIZE CONTACT SCHEDULE
     # ========================================================
 
     contact_schedule = np.zeros(
@@ -266,7 +340,7 @@ def get_contact_schedule(
 
 
     # ========================================================
-    # 5. NUMERICAL TOLERANCE
+    # 4. NUMERICAL TOLERANCE
     #
     # Used only to remove floating-point errors very close
     # to exact gait-phase boundaries.
@@ -276,7 +350,7 @@ def get_contact_schedule(
 
 
     # ========================================================
-    # 6. BUILD CONTACT SCHEDULE
+    # 5. BUILD CONTACT SCHEDULE
     # ========================================================
 
     for k in range(
@@ -286,7 +360,15 @@ def get_contact_schedule(
         # ----------------------------------------------------
         # Prediction time
         #
-        #     t_k = current_time + k * dt_mpc
+        #     t_k
+        #
+        # =
+        #
+        #     current_time
+        #
+        # +
+        #
+        #     k * dt_mpc
         # ----------------------------------------------------
 
         prediction_time = (
@@ -299,25 +381,19 @@ def get_contact_schedule(
 
 
         # ----------------------------------------------------
-        # Convert time into dimensionless gait phase.
+        # Convert prediction time into dimensionless gait
+        # phase.
         #
-        # Example:
+        # One complete gait cycle:
         #
-        #     prediction_time = 0.30 s
-        #     dt_mpc = 0.025 s
-        #
-        #     phase = 12
-        #
-        # One full gait cycle:
-        #
-        #     phase in [0, 20)
+        #     0 <= phase < N_CYCLE
         # ----------------------------------------------------
 
         phase = np.mod(
             prediction_time
             /
             dt_mpc,
-            N_cycle
+            N_CYCLE
         )
 
 
@@ -348,16 +424,24 @@ def get_contact_schedule(
             phase = float(
                 nearest_integer
                 %
-                N_cycle
+                N_CYCLE
             )
 
 
         # ====================================================
-        # PHASE 1:
+        # PHASE 1
         #
         # DOUBLE SUPPORT
         #
-        # 0 <= phase < 2
+        #     0
+        #
+        # <=
+        #
+        #     phase
+        #
+        # <
+        #
+        #     N_DS
         # ====================================================
 
         if phase < phase_DS_1_end:
@@ -369,11 +453,17 @@ def get_contact_schedule(
 
 
         # ====================================================
-        # PHASE 2:
+        # PHASE 2
         #
         # LEFT SINGLE SUPPORT
         #
-        # 2 <= phase < 10
+        # Left foot:
+        #
+        #     stance
+        #
+        # Right foot:
+        #
+        #     swing
         # ====================================================
 
         elif phase < phase_LSS_end:
@@ -385,11 +475,9 @@ def get_contact_schedule(
 
 
         # ====================================================
-        # PHASE 3:
+        # PHASE 3
         #
         # DOUBLE SUPPORT
-        #
-        # 10 <= phase < 12
         # ====================================================
 
         elif phase < phase_DS_2_end:
@@ -401,11 +489,17 @@ def get_contact_schedule(
 
 
         # ====================================================
-        # PHASE 4:
+        # PHASE 4
         #
         # RIGHT SINGLE SUPPORT
         #
-        # 12 <= phase < 20
+        # Right foot:
+        #
+        #     stance
+        #
+        # Left foot:
+        #
+        #     swing
         # ====================================================
 
         else:
@@ -417,7 +511,7 @@ def get_contact_schedule(
 
 
     # ========================================================
-    # 7. FINAL VALIDATION
+    # 6. FINAL VALIDATION
     # ========================================================
 
     if contact_schedule.shape != (
@@ -446,7 +540,7 @@ def get_contact_schedule(
 
 
     # ========================================================
-    # 8. RETURN
+    # 7. RETURN
     # ========================================================
 
     return contact_schedule
@@ -462,18 +556,21 @@ def get_current_contact_info(
 ):
     """
     Get the current contact state and swing-foot information
-    required by the foothold planner.
+    required by the foothold planner and walking controller.
 
     Contact convention
     ------------------
 
         [c_L, c_R]
 
+
     where:
 
-        c_i = 1  -> stance / contact
+        c_i = 1
+            -> stance / contact
 
-        c_i = 0  -> swing / no contact
+        c_i = 0
+            -> swing / no contact
 
 
     Gait sequence
@@ -493,11 +590,14 @@ def get_current_contact_info(
     Swing-foot convention
     ---------------------
 
-        [1, 0] -> right foot is swing
+        [1, 0]
+            -> right foot is swing
 
-        [0, 1] -> left foot is swing
+        [0, 1]
+            -> left foot is swing
 
-        [1, 1] -> no swing foot
+        [1, 1]
+            -> no swing foot
 
 
     Remaining swing time
@@ -505,6 +605,8 @@ def get_current_contact_info(
 
     delta_T is the remaining time until the current
     single-support phase ends.
+
+    It is used by the Raibert foothold planner.
 
     During Double Support:
 
@@ -515,7 +617,7 @@ def get_current_contact_info(
     ----------
     current_time : float
 
-        Current simulation / control time [s].
+        Current gait / control time [s].
 
 
     dt_mpc : float
@@ -534,11 +636,14 @@ def get_current_contact_info(
 
     swing_foot : str or None
 
-        "L"  -> left foot is swing
+        "L"
+            -> left foot is swing
 
-        "R"  -> right foot is swing
+        "R"
+            -> right foot is swing
 
-        None -> Double Support
+        None
+            -> Double Support
 
 
     delta_T : float or None
@@ -548,6 +653,7 @@ def get_current_contact_info(
         None during Double Support.
     """
 
+
     # ========================================================
     # 1. INPUT VALIDATION
     # ========================================================
@@ -556,14 +662,18 @@ def get_current_contact_info(
         current_time
     )
 
+
     if not np.isfinite(
         current_time
     ):
+
         raise ValueError(
             "current_time phải finite."
         )
 
+
     if current_time < 0.0:
+
         raise ValueError(
             "current_time không được nhỏ hơn 0."
         )
@@ -573,14 +683,18 @@ def get_current_contact_info(
         dt_mpc
     )
 
+
     if not np.isfinite(
         dt_mpc
     ):
+
         raise ValueError(
             "dt_mpc phải finite."
         )
 
+
     if dt_mpc <= 0.0:
+
         raise ValueError(
             "dt_mpc phải lớn hơn 0."
         )
@@ -606,19 +720,8 @@ def get_current_contact_info(
 
 
     # ========================================================
-    # 3. GAIT PHASE PARAMETERS
+    # 3. GAIT PHASE BOUNDARIES
     # ========================================================
-
-    N_DS = 2
-
-    N_SS = 8
-
-    N_cycle = (
-        2 * N_DS
-        +
-        2 * N_SS
-    )
-
 
     phase_LSS_end = (
         N_DS
@@ -626,30 +729,38 @@ def get_current_contact_info(
         N_SS
     )
 
+
     phase_RSS_end = (
-        N_cycle
+        N_CYCLE
     )
 
 
     # ========================================================
     # 4. CURRENT DIMENSIONLESS GAIT PHASE
     #
-    #     0 <= phase < 20
+    #     0 <= phase < N_CYCLE
     #
-    #     [0, 2)   -> DS
     #
-    #     [2, 10)  -> LSS
+    # With current parameters:
     #
-    #     [10, 12) -> DS
+    #     [0, 2)
+    #         -> DS
     #
-    #     [12, 20) -> RSS
+    #     [2, 10)
+    #         -> LSS
+    #
+    #     [10, 12)
+    #         -> DS
+    #
+    #     [12, 20)
+    #         -> RSS
     # ========================================================
 
     phase = np.mod(
         current_time
         /
         dt_mpc,
-        N_cycle
+        N_CYCLE
     )
 
 
@@ -659,9 +770,11 @@ def get_current_contact_info(
 
     phase_tolerance = 1e-10
 
+
     nearest_integer = round(
         phase
     )
+
 
     if abs(
         phase
@@ -672,7 +785,7 @@ def get_current_contact_info(
         phase = float(
             nearest_integer
             %
-            N_cycle
+            N_CYCLE
         )
 
 
@@ -683,7 +796,7 @@ def get_current_contact_info(
     # --------------------------------------------------------
     # DOUBLE SUPPORT
     #
-    # [1, 1]
+    #     [1, 1]
     # --------------------------------------------------------
 
     if np.array_equal(
@@ -699,15 +812,34 @@ def get_current_contact_info(
     # --------------------------------------------------------
     # LEFT SINGLE SUPPORT
     #
-    # Left foot  = stance
-    # Right foot = swing
+    # Left foot:
     #
-    # [1, 0]
+    #     stance
     #
-    # Remaining time:
+    # Right foot:
     #
-    #     delta_T =
-    #         (phase_LSS_end - phase) * dt_mpc
+    #     swing
+    #
+    # Contact:
+    #
+    #     [1, 0]
+    #
+    #
+    # Remaining swing time:
+    #
+    #     delta_T
+    #
+    # =
+    #
+    #     (
+    #         phase_LSS_end
+    #         -
+    #         phase
+    #     )
+    #
+    #     *
+    #
+    #     dt_mpc
     # --------------------------------------------------------
 
     elif np.array_equal(
@@ -716,6 +848,7 @@ def get_current_contact_info(
     ):
 
         swing_foot = "R"
+
 
         delta_T = (
             phase_LSS_end
@@ -727,15 +860,34 @@ def get_current_contact_info(
     # --------------------------------------------------------
     # RIGHT SINGLE SUPPORT
     #
-    # Right foot = stance
-    # Left foot  = swing
+    # Right foot:
     #
-    # [0, 1]
+    #     stance
     #
-    # Remaining time:
+    # Left foot:
     #
-    #     delta_T =
-    #         (phase_RSS_end - phase) * dt_mpc
+    #     swing
+    #
+    # Contact:
+    #
+    #     [0, 1]
+    #
+    #
+    # Remaining swing time:
+    #
+    #     delta_T
+    #
+    # =
+    #
+    #     (
+    #         phase_RSS_end
+    #         -
+    #         phase
+    #     )
+    #
+    #     *
+    #
+    #     dt_mpc
     # --------------------------------------------------------
 
     elif np.array_equal(
@@ -745,6 +897,7 @@ def get_current_contact_info(
 
         swing_foot = "L"
 
+
         delta_T = (
             phase_RSS_end
             -
@@ -753,7 +906,7 @@ def get_current_contact_info(
 
 
     # --------------------------------------------------------
-    # Invalid contact state
+    # INVALID CONTACT STATE
     # --------------------------------------------------------
 
     else:
@@ -795,6 +948,7 @@ def get_current_contact_info(
             delta_T
         )
 
+
         if not np.isfinite(
             delta_T
         ):
@@ -803,10 +957,12 @@ def get_current_contact_info(
                 "delta_T phải finite."
             )
 
+
         if delta_T <= 0.0:
 
             raise RuntimeError(
-                "delta_T phải lớn hơn 0 khi đang ở Single Support."
+                "delta_T phải lớn hơn 0 "
+                "khi đang ở Single Support."
             )
 
 
