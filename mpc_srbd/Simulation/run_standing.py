@@ -2,9 +2,9 @@ from pathlib import Path
 import sys
 import time
 
-import numpy as np
 import mujoco
 import mujoco.viewer
+import numpy as np
 
 
 # ============================================================
@@ -12,44 +12,36 @@ import mujoco.viewer
 # ============================================================
 
 SIMULATION_DIR = Path(__file__).resolve().parent
-
 MPC_SRBD_DIR = SIMULATION_DIR.parent
-
 REPO_ROOT = MPC_SRBD_DIR.parent
 
-
 STATE_DIR = MPC_SRBD_DIR / "State"
-
 SRBD_DIR = MPC_SRBD_DIR / "SRBD"
-
 QP_DIR = MPC_SRBD_DIR / "QP"
-
 KINEMATICS_DIR = MPC_SRBD_DIR / "Kinematics"
-
 ACTUATOR_DIR = MPC_SRBD_DIR / "Actuator"
-
 COMMAND_DIR = MPC_SRBD_DIR / "Command"
 
-
 for directory in (
+    MPC_SRBD_DIR,
     STATE_DIR,
     SRBD_DIR,
     QP_DIR,
     KINEMATICS_DIR,
     ACTUATOR_DIR,
-    COMMAND_DIR
+    COMMAND_DIR,
 ):
+    directory_str = str(directory)
 
-    if str(directory) not in sys.path:
-
+    if directory_str not in sys.path:
         sys.path.insert(
             0,
-            str(directory)
+            directory_str
         )
 
 
 # ============================================================
-# SIMULATION SETUP
+# SIMULATION
 # ============================================================
 
 from simulation_setup import (
@@ -99,6 +91,15 @@ from QP_diagnostics import (
 
 
 # ============================================================
+# CONTACT
+# ============================================================
+
+from Command.contact_schedule import (
+    DOUBLE_SUPPORT
+)
+
+
+# ============================================================
 # KINEMATICS
 # ============================================================
 
@@ -128,12 +129,60 @@ np.set_printoptions(
 
 
 # ============================================================
-# SIMULATION PARAMETERS
+# STANDING PARAMETERS
 # ============================================================
 
-SIM_DURATION = 30.0
+# Low-level control / wrench-to-torque mapping rate.
+#
+# XML:
+#
+#     dt_sim = 0.0005 s
+#
+# Therefore:
+#
+#     DT_LOW = 0.0005 s
+#
+#     2000 Hz
+#
+DT_LOW = 0.0005
 
+
+# Standing command:
+#
+#     desired CoM linear velocity = 0
+#
+# Therefore the CoM position reference remains fixed at
+# its initial value.
+V_COM_CMD = np.array(
+    [
+        0.0,
+        0.0,
+        0.0
+    ],
+    dtype=float
+)
+
+
+# Total simulation duration [s]
+SIM_DURATION = 3.0
+
+
+# Print one status block every this many MPC updates
 PRINT_EVERY_N_MPC = 10
+
+
+# Same generous solver iteration limit used during current
+# walking development.
+QP_MAX_ITER = 10000
+
+
+# Standing has only one fixed contact mode, so use the normal
+# stricter post-solve constraint tolerance.
+QP_CONSTRAINT_TOLERANCE = 1e-4
+
+
+# Gravity used only for diagnostic printing.
+GRAVITY = 9.81
 
 
 # ============================================================
@@ -142,139 +191,112 @@ PRINT_EVERY_N_MPC = 10
 
 XML_PATH = (
     REPO_ROOT
-    / "xmls"
-    / "scene_flat_terrian_v3.xml"
+    /
+    "xmls"
+    /
+    "scene_flat_terrian_v3.xml"
 )
 
 
 # ============================================================
-# MAIN
+# TIMING HELPER
 # ============================================================
 
-def main():
+def validate_timing_multiple(
+    larger_dt,
+    smaller_dt,
+    name
+):
+    """
+    Verify that larger_dt is an integer multiple
+    of smaller_dt.
+    """
 
-    # ========================================================
-    # 1. COMMON SIMULATION SETUP
-    # ========================================================
-
-    setup = initialize_simulation(
-        xml_path=XML_PATH,
-        horizon=N,
-        dt_mpc=dt_mpc,
-        dt_mpc_update=dt_mpc_update
+    steps = int(
+        round(
+            larger_dt
+            /
+            smaller_dt
+        )
     )
 
 
-    # ========================================================
-    # 2. STANDING COMMAND
-    #
-    # Standing:
-    #
-    #     v_CoM_cmd = 0
-    #
-    # nên CoM reference position được giữ cố định.
-    # ========================================================
+    if steps <= 0:
 
-    v_CoM_cmd = np.array(
-        [
-            0.0,
-            0.0,
-            0.0
-        ],
-        dtype=float
+        raise ValueError(
+            f"{name}: số step phải > 0."
+        )
+
+
+    if not np.isclose(
+        steps
+        *
+        smaller_dt,
+        larger_dt,
+        atol=1e-12
+    ):
+
+        raise ValueError(
+            f"{name}: {larger_dt} phải là bội số nguyên "
+            f"của {smaller_dt}."
+        )
+
+
+    return steps
+
+
+# ============================================================
+# STANDING CONTACT SCHEDULE
+# ============================================================
+
+def build_standing_contact_schedule(
+    horizon
+):
+    """
+    Standing uses Double Support for the entire MPC horizon:
+
+        [1, 1]
+        [1, 1]
+        ...
+        [1, 1]
+    """
+
+    horizon = int(
+        horizon
     )
 
 
-    print("\n")
-    print("=" * 70)
-    print("STANDING COMMAND")
-    print("=" * 70)
+    if horizon <= 0:
 
+        raise ValueError(
+            "horizon phải > 0."
+        )
 
-    print(
-        "v_CoM_cmd [m/s] ="
-    )
-
-
-    print(
-        v_CoM_cmd
-    )
-
-
-    # ========================================================
-    # 3. STANDING CONTACT SCHEDULE
-    #
-    # Standing test luôn sử dụng DOUBLE SUPPORT.
-    #
-    # Contact convention:
-    #
-    #     1 = stance / contact
-    #
-    #     0 = swing / non-contact
-    #
-    #
-    # Vì cả hai chân luôn stance:
-    #
-    #     [c_L, c_R] = [1, 1]
-    #
-    #
-    # Contact schedule trên toàn prediction horizon:
-    #
-    #     contact_schedule =
-    #
-    #     [
-    #         [1, 1],
-    #         [1, 1],
-    #         ...
-    #         [1, 1]
-    #     ]
-    #
-    # Shape:
-    #
-    #     (N, 2)
-    #
-    #
-    # Lưu ý:
-    #
-    # Standing test không sử dụng open-loop walking contact
-    # schedule trong Command/contact_schedule.py.
-    #
-    # Walking contact schedule sẽ được dùng sau khi bổ sung:
-    #
-    #     footstep planner
-    #
-    #     swing-foot trajectory planner
-    # ========================================================
 
     contact_schedule = np.tile(
 
-        np.array(
-            [
-                1,
-                1
-            ],
+        np.asarray(
+            DOUBLE_SUPPORT,
             dtype=int
+        ).reshape(
+            1,
+            2
         ),
 
         (
-            N,
+            horizon,
             1
         )
     )
 
 
-    # --------------------------------------------------------
-    # Validate standing contact schedule
-    # --------------------------------------------------------
-
     if contact_schedule.shape != (
-        N,
+        horizon,
         2
     ):
 
         raise RuntimeError(
-            "Standing contact_schedule phải có "
-            f"shape ({N}, 2)."
+            "Standing contact_schedule sai kích thước."
         )
 
 
@@ -285,25 +307,655 @@ def main():
     ):
 
         raise RuntimeError(
-            "Standing contact_schedule phải luôn là "
-            "[1, 1] cho toàn prediction horizon."
+            "Standing contact_schedule phải luôn là [1, 1]."
         )
 
 
+    return contact_schedule
+
+
+# ============================================================
+# CONTACT-FRAME WRENCH DIAGNOSTIC
+# ============================================================
+
+def get_contact_frame_wrench(
+    u0_MPC,
+    L6_IK_R_W,
+    R6_IK_R_W
+):
+    """
+    Transform the current World-frame MPC wrenches into the
+    corrected L6_IK / R6_IK contact frames.
+
+    This function is used only for diagnostics.
+
+    MPC input order:
+
+        u =
+        [
+            W_F_L,
+            W_M_L,
+            W_F_R,
+            W_M_R
+        ]
+    """
+
+    u0_MPC = np.asarray(
+        u0_MPC,
+        dtype=float
+    ).reshape(-1)
+
+
+    if u0_MPC.shape != (
+        12,
+    ):
+
+        raise ValueError(
+            "u0_MPC phải có shape (12,)."
+        )
+
+
+    W_F_L = (
+        u0_MPC[
+            0:3
+        ]
+    )
+
+
+    W_M_L = (
+        u0_MPC[
+            3:6
+        ]
+    )
+
+
+    W_F_R = (
+        u0_MPC[
+            6:9
+        ]
+    )
+
+
+    W_M_R = (
+        u0_MPC[
+            9:12
+        ]
+    )
+
+
+    L_F = (
+        L6_IK_R_W
+        @
+        W_F_L
+    )
+
+
+    L_M = (
+        L6_IK_R_W
+        @
+        W_M_L
+    )
+
+
+    R_F = (
+        R6_IK_R_W
+        @
+        W_F_R
+    )
+
+
+    R_M = (
+        R6_IK_R_W
+        @
+        W_M_R
+    )
+
+
+    return (
+        L_F,
+        L_M,
+        R_F,
+        R_M
+    )
+
+
+# ============================================================
+# PRINT STATUS
+# ============================================================
+
+def print_status(
+    mpc_iteration,
+    control_time,
+    current,
+    held_u0_MPC,
+    tau_command,
+    last_solver_info,
+    last_post_diagnostics,
+    last_mpc_compute_time,
+    reference_generator,
+    mass_CoM
+):
+    """
+    Print one compact standing status block.
+    """
+
+
+    (
+        L_F,
+        L_M,
+        R_F,
+        R_M
+
+    ) = get_contact_frame_wrench(
+
+        u0_MPC=(
+            held_u0_MPC
+        ),
+
+        L6_IK_R_W=(
+            current.L6_IK_R_W
+        ),
+
+        R6_IK_R_W=(
+            current.R6_IK_R_W
+        )
+    )
+
+
+    total_Fz = float(
+
+        held_u0_MPC[
+            2
+        ]
+
+        +
+
+        held_u0_MPC[
+            8
+        ]
+    )
+
+
+    expected_mg = float(
+        mass_CoM
+        *
+        GRAVITY
+    )
+
+
     print("\n")
-    print("=" * 70)
-    print("STANDING CONTACT SCHEDULE")
-    print("=" * 70)
+
+    print("-" * 70)
 
 
     print(
-        "contact_schedule shape =",
-        contact_schedule.shape
+        "MPC iteration =",
+        mpc_iteration
     )
 
 
     print(
-        "\ncontact_schedule ="
+        "control_time =",
+        f"{control_time:.4f}",
+        "s"
+    )
+
+
+    print(
+        "mode = STANDING"
+    )
+
+
+    print(
+        "\ncurrent_contact =",
+        DOUBLE_SUPPORT
+    )
+
+
+    # --------------------------------------------------------
+    # CURRENT STATE
+    # --------------------------------------------------------
+
+    print(
+        "\nCoM position =",
+        current.x[
+            0:3
+        ]
+    )
+
+
+    print(
+        "CoM position reference =",
+        reference_generator.get_position_reference()
+    )
+
+
+    print(
+        "\nBase Euler [rad] =",
+        current.x[
+            3:6
+        ]
+    )
+
+
+    print(
+        "\nCoM velocity =",
+        current.x[
+            6:9
+        ]
+    )
+
+
+    print(
+        "CoM velocity reference =",
+        reference_generator.get_velocity_reference()
+    )
+
+
+    print(
+        "\nBase angular velocity =",
+        current.x[
+            9:12
+        ]
+    )
+
+
+    # --------------------------------------------------------
+    # MPC WRENCH
+    # --------------------------------------------------------
+
+    print(
+        "\nu0_MPC [World frame] ="
+    )
+
+
+    print(
+        held_u0_MPC
+    )
+
+
+    print(
+        "\nLeft wrench [L6_IK frame]:"
+    )
+
+
+    print(
+        "F_L =",
+        L_F
+    )
+
+
+    print(
+        "M_L =",
+        L_M
+    )
+
+
+    print(
+        "\nRight wrench [R6_IK frame]:"
+    )
+
+
+    print(
+        "F_R =",
+        R_F
+    )
+
+
+    print(
+        "M_R =",
+        R_M
+    )
+
+
+    # --------------------------------------------------------
+    # VERTICAL FORCE BALANCE
+    # --------------------------------------------------------
+
+    print(
+        "\nFz_L + Fz_R [World] =",
+        total_Fz,
+        "N"
+    )
+
+
+    print(
+        "m*g =",
+        expected_mg,
+        "N"
+    )
+
+
+    print(
+        "vertical force error =",
+        total_Fz
+        -
+        expected_mg,
+        "N"
+    )
+
+
+    # --------------------------------------------------------
+    # JOINT TORQUE
+    # --------------------------------------------------------
+
+    print(
+        "\ntau_command ="
+    )
+
+
+    print(
+        tau_command
+    )
+
+
+    # --------------------------------------------------------
+    # QP
+    # --------------------------------------------------------
+
+    print(
+        "\nOSQP status =",
+        last_solver_info[
+            "status"
+        ]
+    )
+
+
+    print(
+        "OSQP iterations =",
+        last_solver_info[
+            "iterations"
+        ]
+    )
+
+
+    print(
+        "OSQP solve time =",
+        last_solver_info[
+            "solve_time"
+        ],
+        "s"
+    )
+
+
+    if last_post_diagnostics is not None:
+
+        print(
+            "Constraint max violation =",
+            last_post_diagnostics[
+                "max_violation"
+            ]
+        )
+
+
+    print(
+        "MPC compute time =",
+        last_mpc_compute_time,
+        "s"
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    # ========================================================
+    # 1. INITIALIZE COMMON SIMULATION
+    # ========================================================
+
+    setup = initialize_simulation(
+
+        xml_path=XML_PATH,
+
+        horizon=N,
+
+        dt_mpc=dt_mpc,
+
+        dt_mpc_update=dt_mpc_update,
+
+        qp_max_iter=QP_MAX_ITER,
+
+        qp_constraint_tolerance=(
+            QP_CONSTRAINT_TOLERANCE
+        )
+    )
+
+
+    model = (
+        setup.model
+    )
+
+
+    data = (
+        setup.data
+    )
+
+
+    # ========================================================
+    # 2. SIMULATION TIMING
+    # ========================================================
+
+    DT_SIM = float(
+        model.opt.timestep
+    )
+
+
+    # --------------------------------------------------------
+    # Number of MuJoCo physics steps per low-level update
+    # --------------------------------------------------------
+
+    LOW_LEVEL_EVERY = (
+        validate_timing_multiple(
+
+            larger_dt=DT_LOW,
+
+            smaller_dt=DT_SIM,
+
+            name="DT_LOW / DT_SIM"
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Number of MuJoCo physics steps per MPC update
+    # --------------------------------------------------------
+
+    MPC_EVERY = (
+        validate_timing_multiple(
+
+            larger_dt=dt_mpc_update,
+
+            smaller_dt=DT_SIM,
+
+            name="dt_mpc_update / DT_SIM"
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Every MPC tick must also be a low-level tick
+    # --------------------------------------------------------
+
+    if (
+        MPC_EVERY
+        %
+        LOW_LEVEL_EVERY
+        !=
+        0
+    ):
+
+        raise ValueError(
+            "MPC update phải trùng với một "
+            "low-level update."
+        )
+
+
+    # ========================================================
+    # 3. STANDING CONTACT SCHEDULE
+    # ========================================================
+
+    contact_schedule = (
+        build_standing_contact_schedule(
+            horizon=N
+        )
+    )
+
+
+    # ========================================================
+    # 4. HELD / CURRENT SIGNALS
+    # ========================================================
+
+    # --------------------------------------------------------
+    # MPC wrench:
+    #
+    # [
+    #     W_L
+    #     W_R
+    # ]
+    #
+    # Held by ZOH between MPC updates.
+    # --------------------------------------------------------
+
+    held_u0_MPC = np.zeros(
+        12,
+        dtype=float
+    )
+
+
+    # --------------------------------------------------------
+    # Final actuator torque:
+    #
+    # [
+    #     tau_L
+    #     tau_R
+    # ]
+    # --------------------------------------------------------
+
+    tau_command = np.zeros(
+        10,
+        dtype=float
+    )
+
+
+    last_solver_info = None
+
+    last_post_diagnostics = None
+
+    last_mpc_compute_time = 0.0
+
+
+    # ========================================================
+    # 5. LOGGER / COUNTERS
+    # ========================================================
+
+    logger = (
+        SimulationLogger()
+    )
+
+
+    physics_step = 0
+
+    mpc_iteration = 0
+
+    low_level_iteration = 0
+
+
+    # ========================================================
+    # 6. PRINT CONFIGURATION
+    # ========================================================
+
+    initial_current = (
+        get_current_state_mpc(
+            model,
+            data
+        )
+    )
+
+
+    print("\n")
+
+    print("=" * 70)
+
+    print(
+        "STANDING SIMULATION - SRBD MPC"
+    )
+
+    print("=" * 70)
+
+
+    print(
+        "DT_SIM =",
+        DT_SIM,
+        "s"
+    )
+
+
+    print(
+        "DT_LOW =",
+        DT_LOW,
+        "s"
+    )
+
+
+    print(
+        "Low-level rate =",
+        1.0 / DT_LOW,
+        "Hz"
+    )
+
+
+    print(
+        "dt_mpc_update =",
+        dt_mpc_update,
+        "s"
+    )
+
+
+    print(
+        "MPC update rate =",
+        1.0 / dt_mpc_update,
+        "Hz"
+    )
+
+
+    print(
+        "dt_mpc =",
+        dt_mpc,
+        "s"
+    )
+
+
+    print(
+        "Prediction horizon =",
+        N
+        *
+        dt_mpc,
+        "s"
+    )
+
+
+    print(
+        "QP max iterations =",
+        QP_MAX_ITER
+    )
+
+
+    print(
+        "QP post-check tolerance =",
+        QP_CONSTRAINT_TOLERANCE
+    )
+
+
+    print(
+        "\nV_COM_CMD =",
+        V_COM_CMD
+    )
+
+
+    print(
+        "\nStanding contact schedule ="
     )
 
 
@@ -312,614 +964,690 @@ def main():
     )
 
 
+    # --------------------------------------------------------
+    # FRAME DIAGNOSTIC
+    # --------------------------------------------------------
+
+    print(
+        "\nOriginal L6_R_W at home ="
+    )
+
+
+    print(
+        initial_current.L6_R_W
+    )
+
+
+    print(
+        "\nOriginal R6_R_W at home ="
+    )
+
+
+    print(
+        initial_current.R6_R_W
+    )
+
+
+    print(
+        "\nL6_IK_R_W used by QP moment/CoP constraint ="
+    )
+
+
+    print(
+        initial_current.L6_IK_R_W
+    )
+
+
+    print(
+        "\nR6_IK_R_W used by QP moment/CoP constraint ="
+    )
+
+
+    print(
+        initial_current.R6_IK_R_W
+    )
+
+
+    print(
+        "\nIMPORTANT:"
+    )
+
+
+    print(
+        "QP moment/CoP constraint uses "
+        "L6_IK/R6_IK frames."
+    )
+
+
+    print(
+        "Wrench -> joint torque mapping keeps the "
+        "physical L6/R6 Jacobians."
+    )
+
+
     # ========================================================
-    # 4. LOGGING
+    # 7. MAIN SIMULATION LOOP
     # ========================================================
-
-    logger = SimulationLogger()
-
-
-    # ========================================================
-    # 5. CLOSED-LOOP SIMULATION
-    # ========================================================
-
-    mpc_iteration = 0
-
-
-    print("\n")
-    print("=" * 70)
-    print("START CLOSED-LOOP MPC STANDING TEST")
-    print("=" * 70)
-
 
     with mujoco.viewer.launch_passive(
-        setup.model,
-        setup.data
+        model,
+        data
     ) as viewer:
 
 
         while (
+
             viewer.is_running()
+
             and
-            setup.data.time < SIM_DURATION
+
+            data.time
+            <
+            SIM_DURATION
+
         ):
 
-
             # =================================================
-            # CURRENT CONTROL CYCLE
+            # CURRENT DETERMINISTIC CONTROL TIME
             # =================================================
 
-            mpc_compute_start = (
-                time.perf_counter()
+            control_time = (
+                physics_step
+                *
+                DT_SIM
             )
 
 
-            # =================================================
-            # STEP 1:
-            #
-            # READ CURRENT MPC STATE
-            #
-            # All state/configuration-dependent quantities
-            # required by the current MPC cycle are updated here.
-            # =================================================
+            is_mpc_tick = (
 
-            current = get_current_state_mpc(
-                setup.model,
-                setup.data
+                physics_step
+                %
+                MPC_EVERY
+                ==
+                0
             )
 
 
-            x_k = current.x
+            is_low_level_tick = (
 
-
-            # =================================================
-            # STEP 2:
-            #
-            # GENERATE MPC REFERENCE
-            # =================================================
-
-            X_ref = (
-                setup.reference_generator.generate_reference(
-                    v_CoM_cmd
-                )
+                physics_step
+                %
+                LOW_LEVEL_EVERY
+                ==
+                0
             )
 
 
-            # =================================================
-            # STEP 3:
-            #
-            # BUILD SRBD PREDICTION MODEL
-            #
-            #     continuous
-            #         ↓
-            #     discretization
-            #         ↓
-            #     prediction
-            #
-            #     X = Phi x_k + Gamma U
-            # =================================================
-
-            (
-                Phi,
-                Gamma
-            ) = build_SRBD_model(
-
-                Ew_inverse=current.Ew_inverse,
-
-                mass_CoM=setup.mass_CoM,
-
-                W_inertia_CoM=(
-                    setup.W_inertia_CoM_q0
-                ),
-
-                W_r_L=current.W_r_L,
-
-                W_r_R=current.W_r_R,
-
-                dt_mpc=dt_mpc,
-
-                horizon=N
-            )
+            # Shared snapshot if both loops occur at the
+            # same physics step.
+            current = None
 
 
             # =================================================
-            # STEP 4:
-            #
-            # BUILD AND SOLVE QP
-            #
-            # Standing contact:
-            #
-            #     contact_schedule[k] = [1, 1]
-            #
-            # for every:
-            #
-            #     k = 0, ..., N-1
-            #
-            # Therefore Eq. (2b):
-            #
-            #     (1 - c_k,i) u_k,i = 0
-            #
-            # becomes:
-            #
-            #     0 * u_k,i = 0
-            #
-            # for both feet.
-            #
-            # Both feet are therefore allowed to generate
-            # contact wrench during standing.
+            # A. MPC UPDATE
             # =================================================
 
-            (
-                U_opt,
-                u0_opt,
-                solver_info,
-                post_diagnostics
-            ) = build_and_solve_QP(
+            if is_mpc_tick:
 
-                qp_solver=setup.qp_solver,
-
-                Phi=Phi,
-
-                Gamma=Gamma,
-
-                x_current=x_k,
-
-                X_ref=X_ref,
-
-                N=N,
-
-                L6_R_W=current.L6_R_W,
-
-                R6_R_W=current.R6_R_W,
-
-                contact_schedule=contact_schedule,
-
-                print_diagnostics=False
-            )
-
-
-            # =================================================
-            # STEP 5:
-            #
-            # HANDLE INVALID MPC SOLUTION
-            # =================================================
-
-            if u0_opt is None:
-
-                setup.data.ctrl[:] = 0.0
-
-
-                print("\n")
-                print("=" * 70)
-                print("MPC STOPPED")
-                print("=" * 70)
-
-
-                print(
-                    "simulation time =",
-                    setup.data.time,
-                    "s"
+                mpc_compute_start = (
+                    time.perf_counter()
                 )
 
 
-                print(
-                    "MPC iteration =",
-                    mpc_iteration
+                # =============================================
+                # A1. CURRENT STATE
+                # =============================================
+
+                current = (
+                    get_current_state_mpc(
+                        model,
+                        data
+                    )
                 )
 
 
-                if post_diagnostics is not None:
+                x_k = (
+                    current.x.copy()
+                )
 
-                    print_QP_diagnostics(
-                        post_diagnostics
+
+                # =============================================
+                # A2. STANDING REFERENCE
+                # =============================================
+
+                X_ref = (
+                    setup.reference_generator.generate_reference(
+
+                        V_COM_CMD.copy()
                     )
+                )
 
 
-                else:
+                # =============================================
+                # A3. BUILD SRBD PREDICTION MODEL
+                # =============================================
+
+                (
+                    Phi,
+                    Gamma
+
+                ) = build_SRBD_model(
+
+                    Ew_inverse=(
+                        current.Ew_inverse
+                    ),
+
+                    mass_CoM=(
+                        setup.mass_CoM
+                    ),
+
+                    W_inertia_CoM=(
+                        setup.W_inertia_CoM_q0
+                    ),
+
+                    W_r_L=(
+                        current.W_r_L
+                    ),
+
+                    W_r_R=(
+                        current.W_r_R
+                    ),
+
+                    dt_mpc=(
+                        dt_mpc
+                    ),
+
+                    horizon=N
+                )
+
+
+                # =============================================
+                # A4. BUILD AND SOLVE QP
+                #
+                # IMPORTANT
+                # ---------
+                #
+                # Current QP API argument names remain:
+                #
+                #     L6_R_W
+                #     R6_R_W
+                #
+                # but the actual matrices passed are:
+                #
+                #     current.L6_IK_R_W
+                #     current.R6_IK_R_W
+                #
+                # Therefore moment / CoP constraints now use
+                # the corrected contact orientation frames.
+                # =============================================
+
+                (
+                    U_opt,
+                    u0_opt,
+                    solver_info,
+                    post_diagnostics
+
+                ) = build_and_solve_QP(
+
+                    qp_solver=(
+                        setup.qp_solver
+                    ),
+
+                    Phi=(
+                        Phi
+                    ),
+
+                    Gamma=(
+                        Gamma
+                    ),
+
+                    x_current=(
+                        x_k
+                    ),
+
+                    X_ref=(
+                        X_ref
+                    ),
+
+                    N=N,
+
+                    L6_R_W=(
+                        current.L6_IK_R_W
+                    ),
+
+                    R6_R_W=(
+                        current.R6_IK_R_W
+                    ),
+
+                    contact_schedule=(
+                        contact_schedule
+                    ),
+
+                    print_diagnostics=False
+                )
+
+
+                # =============================================
+                # A5. INVALID MPC SOLUTION
+                # =============================================
+
+                if u0_opt is None:
+
+                    data.ctrl[
+                        :
+                    ] = 0.0
+
+
+                    print("\n")
+
+                    print("=" * 70)
 
                     print(
-                        "\nOSQP solver information:"
+                        "MPC STOPPED"
                     )
+
+                    print("=" * 70)
 
 
                     print(
-                        "status =",
-                        solver_info.get(
-                            "status"
-                        )
-                    )
-
-
-                    print(
-                        "status_val =",
-                        solver_info.get(
-                            "status_val"
-                        )
-                    )
-
-
-                    print(
-                        "iterations =",
-                        solver_info.get(
-                            "iterations"
-                        )
-                    )
-
-
-                    print(
-                        "primal_residual =",
-                        solver_info.get(
-                            "primal_residual"
-                        )
-                    )
-
-
-                    print(
-                        "dual_residual =",
-                        solver_info.get(
-                            "dual_residual"
-                        )
-                    )
-
-
-                    print(
-                        "solve_time =",
-                        solver_info.get(
-                            "solve_time"
-                        ),
+                        "control_time =",
+                        control_time,
                         "s"
                     )
 
 
-                raise RuntimeError(
-                    "Không có MPC input hợp lệ để áp dụng."
+                    print(
+                        "MPC iteration =",
+                        mpc_iteration
+                    )
+
+
+                    print(
+                        "contact_schedule ="
+                    )
+
+
+                    print(
+                        contact_schedule
+                    )
+
+
+                    if post_diagnostics is not None:
+
+                        print_QP_diagnostics(
+                            post_diagnostics
+                        )
+
+
+                    else:
+
+                        print(
+                            "solver status =",
+                            solver_info.get(
+                                "status"
+                            )
+                        )
+
+
+                        print(
+                            "solver iterations =",
+                            solver_info.get(
+                                "iterations"
+                            )
+                        )
+
+
+                        print(
+                            "primal residual =",
+                            solver_info.get(
+                                "primal_residual"
+                            )
+                        )
+
+
+                        print(
+                            "dual residual =",
+                            solver_info.get(
+                                "dual_residual"
+                            )
+                        )
+
+
+                    raise RuntimeError(
+                        "Không có MPC input hợp lệ."
+                    )
+
+
+                # =============================================
+                # A6. HOLD FIRST MPC WRENCH
+                # =============================================
+
+                held_u0_MPC = np.asarray(
+                    u0_opt,
+                    dtype=float
+                ).reshape(-1)
+
+
+                if held_u0_MPC.shape != (
+                    12,
+                ):
+
+                    raise RuntimeError(
+                        "u0_MPC phải có shape (12,)."
+                    )
+
+
+                if not np.all(
+                    np.isfinite(
+                        held_u0_MPC
+                    )
+                ):
+
+                    raise RuntimeError(
+                        "u0_MPC chứa NaN hoặc Inf."
+                    )
+
+
+                # =============================================
+                # A7. STORE MPC INFORMATION
+                # =============================================
+
+                last_solver_info = (
+                    solver_info
+                )
+
+
+                last_post_diagnostics = (
+                    post_diagnostics
+                )
+
+
+                last_mpc_compute_time = (
+
+                    time.perf_counter()
+
+                    -
+
+                    mpc_compute_start
                 )
 
 
             # =================================================
-            # STEP 6:
+            # B. LOW-LEVEL UPDATE
             #
-            # CURRENT MPC INPUT
-            # =================================================
-
-            u_k = u0_opt.copy()
-
-
-            # =================================================
-            # STEP 7:
+            # Standing:
             #
-            # WRENCH -> JOINT TORQUE
-            # =================================================
-
-            (
-                tau_k,
-                tau_L,
-                tau_R
-            ) = get_joint_torque_from_MPC_wrench(
-                setup.model,
-                setup.data,
-                u_k
-            )
-
-
-            # =================================================
-            # STEP 8:
+            # both legs are stance.
             #
-            # APPLY JOINT TORQUE
-            # =================================================
-
-            apply_joint_torque(
-                setup.model,
-                setup.data,
-                tau_k
-            )
-
-
-            # =================================================
-            # MPC COMPUTATION TIME
-            # =================================================
-
-            mpc_compute_time = (
-                time.perf_counter()
-                -
-                mpc_compute_start
-            )
-
-
-            # =================================================
-            # LOG CURRENT CONTROL CYCLE
-            # =================================================
-
-            logger.log_step(
-                time=setup.data.time,
-                x=x_k,
-                u0=u_k,
-                tau=tau_k,
-                mpc_compute_time=mpc_compute_time,
-                qp_solve_time=solver_info[
-                    "solve_time"
-                ]
-            )
-
-
-            # =================================================
-            # STEP 9:
+            # The MPC wrench is ZOH-held between solves,
+            # while:
             #
-            # PROPAGATE MUJOCO PLANT
+            #     tau = -J(q)^T W
+            #
+            # is recomputed at every low-level step.
             # =================================================
 
-            for _ in range(
-                setup.steps_per_mpc_update
-            ):
-
-                if setup.data.time >= SIM_DURATION:
-
-                    break
+            if is_low_level_tick:
 
 
-                mujoco.mj_step(
-                    setup.model,
-                    setup.data
+                if current is None:
+
+                    current = (
+                        get_current_state_mpc(
+                            model,
+                            data
+                        )
+                    )
+
+
+                (
+                    tau_command,
+                    _,
+                    _
+
+                ) = get_joint_torque_from_MPC_wrench(
+
+                    model,
+
+                    data,
+
+                    held_u0_MPC
                 )
 
 
+                tau_command = np.asarray(
+                    tau_command,
+                    dtype=float
+                ).reshape(-1)
+
+
+                if tau_command.shape != (
+                    10,
+                ):
+
+                    raise RuntimeError(
+                        "tau_command phải có shape (10,)."
+                    )
+
+
+                if not np.all(
+                    np.isfinite(
+                        tau_command
+                    )
+                ):
+
+                    raise RuntimeError(
+                        "tau_command chứa NaN hoặc Inf."
+                    )
+
+
+                # No manual clipping.
+                #
+                # MuJoCo actuator ctrlrange remains the
+                # actuator-limit source of truth.
+                apply_joint_torque(
+
+                    model,
+
+                    data,
+
+                    tau_command
+                )
+
+
+                low_level_iteration += 1
+
+
             # =================================================
-            # STEP 10:
-            #
-            # MEASURE x_k+1
+            # C. LOG / PRINT CURRENT MPC CYCLE
             # =================================================
 
-            current_next = get_current_state_mpc(
-                setup.model,
-                setup.data
+            if is_mpc_tick:
+
+
+                logger.log_step(
+
+                    time=(
+                        control_time
+                    ),
+
+                    x=(
+                        current.x
+                    ),
+
+                    u0=(
+                        held_u0_MPC
+                    ),
+
+                    tau=(
+                        tau_command
+                    ),
+
+                    mpc_compute_time=(
+                        last_mpc_compute_time
+                    ),
+
+                    qp_solve_time=(
+                        last_solver_info[
+                            "solve_time"
+                        ]
+                    )
+                )
+
+
+                if (
+                    mpc_iteration
+                    %
+                    PRINT_EVERY_N_MPC
+                    ==
+                    0
+                ):
+
+                    print_status(
+
+                        mpc_iteration=(
+                            mpc_iteration
+                        ),
+
+                        control_time=(
+                            control_time
+                        ),
+
+                        current=(
+                            current
+                        ),
+
+                        held_u0_MPC=(
+                            held_u0_MPC
+                        ),
+
+                        tau_command=(
+                            tau_command
+                        ),
+
+                        last_solver_info=(
+                            last_solver_info
+                        ),
+
+                        last_post_diagnostics=(
+                            last_post_diagnostics
+                        ),
+
+                        last_mpc_compute_time=(
+                            last_mpc_compute_time
+                        ),
+
+                        reference_generator=(
+                            setup.reference_generator
+                        ),
+
+                        mass_CoM=(
+                            setup.mass_CoM
+                        )
+                    )
+
+
+                mpc_iteration += 1
+
+
+            # =================================================
+            # D. MUJOCO PHYSICS STEP
+            # =================================================
+
+            mujoco.mj_step(
+                model,
+                data
             )
 
 
-            x_k_plus_1 = current_next.x
+            physics_step += 1
 
 
             # =================================================
-            # STATUS PRINT
+            # E. VIEWER
+            #
+            # Refresh display at MPC rate.
             # =================================================
 
             if (
-                mpc_iteration
+                physics_step
                 %
-                PRINT_EVERY_N_MPC
+                MPC_EVERY
                 ==
                 0
             ):
 
-                print("\n")
-                print("-" * 70)
-
-
-                print(
-                    "MPC iteration =",
-                    mpc_iteration
-                )
-
-
-                print(
-                    "simulation time =",
-                    f"{setup.data.time:.4f}",
-                    "s"
-                )
-
-
-                # ---------------------------------------------
-                # Current CoM reference
-                # ---------------------------------------------
-
-                print(
-                    "\nCoM position reference ="
-                )
-
-
-                print(
-                    setup.reference_generator.get_position_reference()
-                )
-
-
-                # ---------------------------------------------
-                # Current and next CoM position
-                # ---------------------------------------------
-
-                print(
-                    "\nx_k CoM position ="
-                )
-
-
-                print(
-                    x_k[
-                        0:3
-                    ]
-                )
-
-
-                print(
-                    "x_k+1 CoM position ="
-                )
-
-
-                print(
-                    x_k_plus_1[
-                        0:3
-                    ]
-                )
-
-
-                # ---------------------------------------------
-                # Current and next Euler orientation
-                # ---------------------------------------------
-
-                print(
-                    "\nx_k Euler [rad] ="
-                )
-
-
-                print(
-                    x_k[
-                        3:6
-                    ]
-                )
-
-
-                print(
-                    "x_k+1 Euler [rad] ="
-                )
-
-
-                print(
-                    x_k_plus_1[
-                        3:6
-                    ]
-                )
-
-
-                # ---------------------------------------------
-                # Current contact mode
-                # ---------------------------------------------
-
-                print(
-                    "\nStanding contact ="
-                )
-
-
-                print(
-                    contact_schedule[
-                        0
-                    ]
-                )
-
-
-                # ---------------------------------------------
-                # Current MPC wrench
-                # ---------------------------------------------
-
-                print(
-                    "\nu_k ="
-                )
-
-
-                print(
-                    u_k
-                )
-
-
-                # ---------------------------------------------
-                # Current joint torque
-                # ---------------------------------------------
-
-                print(
-                    "\ntau_k ="
-                )
-
-
-                print(
-                    tau_k
-                )
-
-
-                # ---------------------------------------------
-                # OSQP information
-                # ---------------------------------------------
-
-                print(
-                    "\nOSQP status =",
-                    solver_info[
-                        "status"
-                    ]
-                )
-
-
-                print(
-                    "OSQP iterations =",
-                    solver_info[
-                        "iterations"
-                    ]
-                )
-
-
-                print(
-                    "OSQP primal residual =",
-                    solver_info[
-                        "primal_residual"
-                    ]
-                )
-
-
-                print(
-                    "OSQP dual residual =",
-                    solver_info[
-                        "dual_residual"
-                    ]
-                )
-
-
-                print(
-                    "OSQP solve time =",
-                    solver_info[
-                        "solve_time"
-                    ],
-                    "s"
-                )
-
-
-                # ---------------------------------------------
-                # Post-solve constraint diagnostics
-                # ---------------------------------------------
-
-                if post_diagnostics is not None:
-
-                    print(
-                        "Constraint max violation =",
-                        post_diagnostics[
-                            "max_violation"
-                        ]
-                    )
-
-
-                # ---------------------------------------------
-                # Full MPC computation time
-                # ---------------------------------------------
-
-                print(
-                    "Full MPC compute time =",
-                    mpc_compute_time,
-                    "s"
-                )
-
-
-            # =================================================
-            # VIEWER
-            # =================================================
-
-            viewer.sync()
-
-
-            # =================================================
-            # NEXT MPC CYCLE
-            # =================================================
-
-            mpc_iteration += 1
+                viewer.sync()
 
 
     # ========================================================
-    # 6. FINALIZE LOG
+    # 8. FINALIZE LOGGER
     # ========================================================
 
     logger.finalize()
 
 
     # ========================================================
-    # 7. FINAL SUMMARY
+    # 9. FINAL SUMMARY
     # ========================================================
 
+    final_state = (
+        get_current_state_mpc(
+            model,
+            data
+        )
+    )
+
+
+    final_position_reference = (
+        setup.reference_generator.get_position_reference()
+    )
+
+
+    final_velocity_reference = (
+        setup.reference_generator.get_velocity_reference()
+    )
+
+
+    final_position_error = (
+
+        final_state.x[
+            0:3
+        ]
+
+        -
+
+        final_position_reference
+    )
+
+
+    final_velocity_error = (
+
+        final_state.x[
+            6:9
+        ]
+
+        -
+
+        final_velocity_reference
+    )
+
+
     print("\n")
+
     print("=" * 70)
-    print("SIMULATION FINISHED")
+
+    print(
+        "STANDING SIMULATION FINISHED"
+    )
+
     print("=" * 70)
+
+
+    print(
+        "physics steps =",
+        physics_step
+    )
 
 
     print(
@@ -928,49 +1656,80 @@ def main():
     )
 
 
+    print(
+        "low-level iterations =",
+        low_level_iteration
+    )
+
+
+    print(
+        "final simulation time =",
+        data.time,
+        "s"
+    )
+
+
+    print(
+        "\nFinal CoM position =",
+        final_state.x[
+            0:3
+        ]
+    )
+
+
+    print(
+        "Final CoM position reference =",
+        final_position_reference
+    )
+
+
+    print(
+        "Final CoM position error =",
+        final_position_error
+    )
+
+
+    print(
+        "Final CoM position error norm =",
+        np.linalg.norm(
+            final_position_error
+        ),
+        "m"
+    )
+
+
+    print(
+        "\nFinal CoM velocity =",
+        final_state.x[
+            6:9
+        ]
+    )
+
+
+    print(
+        "Final CoM velocity reference =",
+        final_velocity_reference
+    )
+
+
+    print(
+        "Final CoM velocity error norm =",
+        np.linalg.norm(
+            final_velocity_error
+        ),
+        "m/s"
+    )
+
+
+    print(
+        "\nFinal base Euler [rad] =",
+        final_state.x[
+            3:6
+        ]
+    )
+
+
     logger.print_summary()
-
-
-    if (
-        logger.x.ndim == 2
-        and
-        logger.x.shape[0] > 0
-    ):
-
-        print(
-            "\nInitial logged CoM ="
-        )
-
-
-        print(
-            logger.x[
-                0,
-                0:3
-            ]
-        )
-
-
-        print(
-            "Final logged CoM ="
-        )
-
-
-        print(
-            logger.x[
-                -1,
-                0:3
-            ]
-        )
-
-
-    print(
-        "\nFinal CoM position reference ="
-    )
-
-
-    print(
-        setup.reference_generator.get_position_reference()
-    )
 
 
 # ============================================================
