@@ -14,34 +14,65 @@ def compute_gradient_descent_step(
     Compute one numerical inverse-kinematics update step
     using the Jacobian-transpose gradient descent method.
 
-    The method is intended for the swing-leg position IK:
+    The method is intended for the 5D swing-foot task:
 
         error
             =
-        W_p_i6_des
-            -
-        W_p_i6
+        [
+            position error
+            roll error
+            pitch error
+        ]
+
+    More explicitly:
+
+        error
+            =
+        [
+            e_x
+            e_y
+            e_z
+            e_roll
+            e_pitch
+        ]
 
     where:
 
-        W_p_i6_des
+        e_x, e_y, e_z
 
-    is the desired swing-foot position in the World frame,
+    are the swing-foot Cartesian position errors,
 
     and:
 
-        W_p_i6
+        e_roll, e_pitch
 
-    is the current physical foot position in the World frame.
+    are the swing-foot orientation errors.
 
 
-    For the Cartesian position error cost:
+    The swing leg has 5 actuated joints:
+
+        q
+            =
+        [
+            q_hip_yaw
+            q_hip_roll
+            q_hip_pitch
+            q_knee
+            q_ankle
+        ]
+
+    Therefore the 5D task Jacobian has:
+
+        J in R^(5x5)
+
+
+    For the task-space error cost:
 
         V
             =
         1/2 * error^T * error
 
-    the Jacobian-transpose direction is used:
+    the Jacobian-transpose gradient direction is used:
 
         delta_q
             =
@@ -54,30 +85,35 @@ def compute_gradient_descent_step(
 
     Parameters
     ----------
-    J : array_like, shape (3, 5)
+    J : array_like, shape (5, 5)
 
-        Translational Jacobian of the current swing foot
-        with respect to the 5 joints of that leg.
+        Swing-leg task Jacobian.
 
-        The Jacobian maps joint velocity to Cartesian
-        foot velocity:
+        The first three rows correspond to translational
+        motion of the physical swing foot:
 
-            W_p_dot_i6 = J q_dot
+            x
+            y
+            z
+
+        The final two rows correspond to the selected
+        orientation task:
+
+            roll
+            pitch
 
 
-    error : array_like, shape (3,)
+    error : array_like, shape (5,)
 
-        Cartesian swing-foot position error:
+        Swing-foot task-space error:
 
-            error
-                =
-            W_p_i6_des
-                -
-            W_p_i6
-
-        Unit:
-
-            [m]
+            [
+                e_x,
+                e_y,
+                e_z,
+                e_roll,
+                e_pitch
+            ]
 
 
     eta_gradient : float, optional
@@ -135,12 +171,12 @@ def compute_gradient_descent_step(
     # ========================================================
 
     if J.shape != (
-        3,
+        5,
         5
     ):
 
         raise ValueError(
-            "J phải có shape (3, 5), "
+            "J phải có shape (5, 5), "
             f"nhưng nhận được {J.shape}."
         )
 
@@ -157,15 +193,15 @@ def compute_gradient_descent_step(
 
 
     # ========================================================
-    # 3. VALIDATE CARTESIAN ERROR
+    # 3. VALIDATE TASK ERROR
     # ========================================================
 
     if error.shape != (
-        3,
+        5,
     ):
 
         raise ValueError(
-            "error phải có shape (3,), "
+            "error phải có shape (5,), "
             f"nhưng nhận được {error.shape}."
         )
 

@@ -14,35 +14,59 @@ def compute_newton_step(
     Compute one numerical inverse-kinematics update step
     using the pseudo-Newton method.
 
-    The method is intended for the swing-leg position IK:
+    The method is intended for the 5D swing-foot task:
 
         error
             =
-        W_p_i6_des
-            -
-        W_p_i6
+        [
+            position error
+            roll error
+            pitch error
+        ]
+
+    More explicitly:
+
+        error
+            =
+        [
+            e_x
+            e_y
+            e_z
+            e_roll
+            e_pitch
+        ]
 
     where:
 
-        W_p_i6_des
+        e_x, e_y, e_z
 
-    is the desired swing-foot position in the World frame,
+    are the swing-foot Cartesian position errors,
 
     and:
 
-        W_p_i6
+        e_roll, e_pitch
 
-    is the current physical foot position in the World frame.
+    are the swing-foot orientation errors.
 
 
-    Since the swing leg has 5 joints while the Cartesian
-    position task has 3 dimensions:
+    The swing leg has 5 actuated joints:
 
-        J in R^(3x5)
+        q
+            =
+        [
+            q_hip_yaw
+            q_hip_roll
+            q_hip_pitch
+            q_knee
+            q_ankle
+        ]
 
-    the Jacobian is not square.
+    Therefore the 5D task Jacobian has:
 
-    Therefore, the Moore-Penrose pseudoinverse is used:
+        J in R^(5x5)
+
+
+    The Moore-Penrose pseudoinverse is used:
 
         delta_q
             =
@@ -53,32 +77,42 @@ def compute_newton_step(
         error
 
 
+    The pseudoinverse is retained instead of explicitly using
+    the matrix inverse because it is numerically safer when
+    the Jacobian is close to singular.
+
+
     Parameters
     ----------
-    J : array_like, shape (3, 5)
+    J : array_like, shape (5, 5)
 
-        Translational Jacobian of the current swing foot
-        with respect to the 5 joints of that leg.
+        Swing-leg task Jacobian.
 
-        The Jacobian maps joint velocity to Cartesian
-        foot velocity:
+        The first three rows correspond to translational
+        motion of the physical swing foot:
 
-            W_p_dot_i6 = J q_dot
+            x
+            y
+            z
+
+        The final two rows correspond to the selected
+        orientation task:
+
+            roll
+            pitch
 
 
-    error : array_like, shape (3,)
+    error : array_like, shape (5,)
 
-        Cartesian swing-foot position error:
+        Swing-foot task-space error:
 
-            error
-                =
-            W_p_i6_des
-                -
-            W_p_i6
-
-        Unit:
-
-            [m]
+            [
+                e_x,
+                e_y,
+                e_z,
+                e_roll,
+                e_pitch
+            ]
 
 
     alpha_newton : float, optional
@@ -136,12 +170,12 @@ def compute_newton_step(
     # ========================================================
 
     if J.shape != (
-        3,
+        5,
         5
     ):
 
         raise ValueError(
-            "J phải có shape (3, 5), "
+            "J phải có shape (5, 5), "
             f"nhưng nhận được {J.shape}."
         )
 
@@ -158,15 +192,15 @@ def compute_newton_step(
 
 
     # ========================================================
-    # 3. VALIDATE CARTESIAN ERROR
+    # 3. VALIDATE TASK ERROR
     # ========================================================
 
     if error.shape != (
-        3,
+        5,
     ):
 
         raise ValueError(
-            "error phải có shape (3,), "
+            "error phải có shape (5,), "
             f"nhưng nhận được {error.shape}."
         )
 
@@ -207,11 +241,15 @@ def compute_newton_step(
     #
     # For:
     #
-    #     J in R^(3x5)
+    #     J in R^(5x5)
     #
     # the pseudoinverse has:
     #
-    #     J_pinv in R^(5x3)
+    #     J_pinv in R^(5x5)
+    #
+    # Even though J is square, pinv(J) is retained because
+    # it is numerically more robust near singular
+    # configurations than explicitly computing inv(J).
     # ========================================================
 
     J_pinv = np.linalg.pinv(
@@ -220,7 +258,7 @@ def compute_newton_step(
 
 
     # ========================================================
-    # 6. NEWTON UPDATE
+    # 6. PSEUDO-NEWTON UPDATE
     #
     #     delta_q
     #

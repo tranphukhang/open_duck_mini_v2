@@ -487,7 +487,9 @@ def main():
 
         dt_mpc_update=dt_mpc_update,
 
-        qp_max_iter=QP_MAX_ITER
+        qp_max_iter=QP_MAX_ITER,
+
+        qp_constraint_tolerance=5e-4
     )
 
 
