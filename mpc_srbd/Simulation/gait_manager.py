@@ -16,22 +16,10 @@ from Command.contact_schedule import (
     get_phase_duration,
 )
 
-
-# ============================================================
-# EVENT / PHASE DEFINITIONS
-# ============================================================
-
 EVENT_TD_L = "TD_L"
 EVENT_LO_L = "LO_L"
 EVENT_TD_R = "TD_R"
 EVENT_LO_R = "LO_R"
-
-PHASE_EXPECTED_EVENT = {
-    PHASE_LSS: EVENT_TD_R,
-    PHASE_DS_L_TO_R: EVENT_LO_L,
-    PHASE_RSS: EVENT_TD_L,
-    PHASE_DS_R_TO_L: EVENT_LO_R,
-}
 
 PHASE_SWING_FOOT = {
     PHASE_LSS: "R",
@@ -41,68 +29,51 @@ PHASE_SWING_FOOT = {
 }
 
 
-# ============================================================
-# DATA STRUCTURES
-# ============================================================
-
 @dataclass
 class GaitManagerState:
-    """
-    Persistent physical gait/FSM state.
-
-    IMPORTANT RATE ARCHITECTURE
-    ---------------------------
-    update_gait_manager() is intended to be called at the HIGH-LEVEL
-    control rate (100 Hz in the current project), not at MuJoCo's
-    2000-Hz physics rate.
-
-    current_phase
-        Physical phase accepted by the FSM.
-
-    t_phase
-        Phase cursor. It advances with high-level control time and is
-        clamped at the nominal phase boundary while waiting for contact
-        feedback to authorize the next phase.
-
-    c_L_prev, c_R_prev
-        Previous 100-Hz sampled contact state. These are used only for
-        TD/LO diagnostics.
-
-    W_p_liftoff_L/R
-        Realized liftoff positions latched when DS -> SS is accepted.
-
-    W_p_foothold_L/R
-        Current swing targets latched from the support-plan input.
-    """
+    # COMMAND state
     current_phase: str
     t_phase: float
 
+    # measured-contact memory
     c_L_prev: int
     c_R_prev: int
 
-    W_p_liftoff_L: Optional[np.ndarray] = None
-    W_p_liftoff_R: Optional[np.ndarray] = None
+    # commanded swing start, latched at DS -> SS
+    W_p_swing_start_L: Optional[np.ndarray] = None
+    W_p_swing_start_R: Optional[np.ndarray] = None
 
+    # latest foothold targets from foot planner
     W_p_foothold_L: Optional[np.ndarray] = None
     W_p_foothold_R: Optional[np.ndarray] = None
+
+    @property
+    def phase_cmd(self) -> str:
+        return self.current_phase
+
+    @property
+    def t_phase_cmd(self) -> float:
+        return float(self.t_phase)
 
 
 @dataclass
 class GaitManagerOutput:
-    """
-    Read-only snapshot returned by update_gait_manager().
-    """
     current_phase: str
     t_phase: float
+    phase_cmd: str
+    t_phase_cmd: float
 
     transitioned: bool
-    transition_event: Optional[str]
-    expected_event: str
+    transition_reason: Optional[str]
+    previous_phase_cmd: str
 
     events: Tuple[str, ...]
-
     c_L: int
     c_R: int
+    contact_meas: np.ndarray
+
+    contact_cmd: np.ndarray
+    contact_cmd_achieved: bool
 
     phase_contact_consistent: bool
     contact_matches_current_phase: bool
@@ -111,24 +82,26 @@ class GaitManagerOutput:
     boundary_reached: bool
     waiting_for_contact: bool
 
+    pending_liftoff_confirmation: bool
+    expected_liftoff_event: Optional[str]
+    expected_touchdown_event: Optional[str]
+
     swing_foot: Optional[str]
     swing_phase: Optional[float]
 
-    W_p_liftoff: Optional[np.ndarray]
+    W_p_swing_start: Optional[np.ndarray]
     W_p_foothold: Optional[np.ndarray]
 
+    # backward-compatible alias
+    W_p_liftoff: Optional[np.ndarray]
 
-# ============================================================
-# BASIC VALIDATION
-# ============================================================
 
 def _validate_phase(phase: str) -> str:
     phase = str(phase)
 
     if phase not in VALID_PHASES:
         raise ValueError(
-            f"Unsupported gait phase: {phase!r}. "
-            f"Expected one of {VALID_PHASES}."
+            f"Unsupported phase {phase!r}; expected one of {VALID_PHASES}."
         )
 
     return phase
@@ -145,104 +118,38 @@ def _validate_contact(value, name: str) -> int:
     return value
 
 
-def _validate_nonnegative_scalar(value, name: str) -> float:
+def _validate_nonnegative(value, name: str) -> float:
     value = float(value)
 
-    if not np.isfinite(value):
+    if not np.isfinite(value) or value < 0.0:
         raise ValueError(
-            f"{name} phải hữu hạn."
-        )
-
-    if value < 0.0:
-        raise ValueError(
-            f"{name} phải >= 0."
+            f"{name} phải hữu hạn và >= 0."
         )
 
     return value
 
 
-def _copy_optional_vector(value):
+def _vec3(value, name: str) -> Optional[np.ndarray]:
     if value is None:
         return None
 
-    vector = np.asarray(
+    value = np.asarray(
         value,
         dtype=float,
-    ).reshape(3).copy()
+    ).reshape(-1)
 
-    if not np.all(np.isfinite(vector)):
+    if value.shape != (3,):
         raise ValueError(
-            "Foot position/foothold chứa NaN hoặc Inf."
+            f"{name} phải có shape (3,)."
         )
 
-    return vector
-
-
-# ============================================================
-# CONTACT EVENT DETECTION
-# ============================================================
-
-def detect_contact_events(
-    c_L_prev: int,
-    c_R_prev: int,
-    c_L: int,
-    c_R: int,
-) -> Tuple[str, ...]:
-    """
-    Detect TD/LO edges between TWO HIGH-LEVEL contact samples.
-
-    This is diagnostic/event information only.
-
-    Phase transition authorization does not require that the edge occur
-    exactly at the boundary sample. Instead, at the boundary the current
-    physical contact state is compared with the nominal next phase.
-
-    This is important because an expected TD/LO can occur slightly before
-    the nominal boundary and remain physically valid until the boundary.
-    """
-    c_L_prev = _validate_contact(
-        c_L_prev,
-        "c_L_prev",
-    )
-    c_R_prev = _validate_contact(
-        c_R_prev,
-        "c_R_prev",
-    )
-    c_L = _validate_contact(
-        c_L,
-        "c_L",
-    )
-    c_R = _validate_contact(
-        c_R,
-        "c_R",
-    )
-
-    events = []
-
-    if c_L_prev == 0 and c_L == 1:
-        events.append(
-            EVENT_TD_L
-        )
-    elif c_L_prev == 1 and c_L == 0:
-        events.append(
-            EVENT_LO_L
+    if not np.all(np.isfinite(value)):
+        raise ValueError(
+            f"{name} chứa NaN/Inf."
         )
 
-    if c_R_prev == 0 and c_R == 1:
-        events.append(
-            EVENT_TD_R
-        )
-    elif c_R_prev == 1 and c_R == 0:
-        events.append(
-            EVENT_LO_R
-        )
+    return value.copy()
 
-    return tuple(events)
-
-
-# ============================================================
-# PHYSICAL CONTACT / FSM RELATION
-# ============================================================
 
 def _contact_vector(
     c_L: int,
@@ -257,6 +164,62 @@ def _contact_vector(
     )
 
 
+def detect_contact_events(
+    c_L_prev: int,
+    c_R_prev: int,
+    c_L: int,
+    c_R: int,
+) -> Tuple[str, ...]:
+    """
+    Measured contact edge detector only.
+
+    These events are feedback, not MPC contact commands.
+    """
+    c_L_prev = _validate_contact(
+        c_L_prev,
+        "c_L_prev",
+    )
+
+    c_R_prev = _validate_contact(
+        c_R_prev,
+        "c_R_prev",
+    )
+
+    c_L = _validate_contact(
+        c_L,
+        "c_L",
+    )
+
+    c_R = _validate_contact(
+        c_R,
+        "c_R",
+    )
+
+    events = []
+
+    if c_L_prev == 0 and c_L == 1:
+        events.append(
+            EVENT_TD_L
+        )
+
+    elif c_L_prev == 1 and c_L == 0:
+        events.append(
+            EVENT_LO_L
+        )
+
+    if c_R_prev == 0 and c_R == 1:
+        events.append(
+            EVENT_TD_R
+        )
+
+    elif c_R_prev == 1 and c_R == 0:
+        events.append(
+            EVENT_LO_R
+        )
+
+    return tuple(events)
+
+
 def contact_matches_phase(
     phase: str,
     c_L: int,
@@ -268,147 +231,100 @@ def contact_matches_phase(
 
     return bool(
         np.array_equal(
-            _contact_vector(c_L, c_R),
-            get_phase_contact(phase),
+            _contact_vector(
+                c_L,
+                c_R,
+            ),
+            get_phase_contact(
+                phase
+            ),
         )
     )
 
 
-def contact_is_admissible_for_current_or_next_phase(
+def _expected_liftoff_event(
     phase: str,
-    c_L: int,
-    c_R: int,
-) -> bool:
-    """
-    Contact may match either:
+) -> Optional[str]:
+    if phase == PHASE_LSS:
+        return EVENT_LO_R
 
-        - current physical phase, or
-        - nominal next phase.
+    if phase == PHASE_RSS:
+        return EVENT_LO_L
 
-    Why allow next phase before the boundary?
-    -----------------------------------------
-    Contact feedback is allowed to become physically ready slightly before
-    the nominal phase cursor reaches its boundary.
-
-    Example:
-        current FSM = LSS  -> [1,0]
-        right foot touches early -> [1,1]
-
-    The FSM must NOT transition early, but [1,1] is still an admissible
-    physical contact because it is exactly the contact state of the
-    expected next phase DS_L_TO_R.
-    """
-    current_match = contact_matches_phase(
-        phase,
-        c_L,
-        c_R,
-    )
-
-    next_phase = get_next_phase(
-        phase
-    )
-
-    next_match = contact_matches_phase(
-        next_phase,
-        c_L,
-        c_R,
-    )
-
-    return bool(
-        current_match or next_match
-    )
+    return None
 
 
-# ============================================================
-# SWING OUTPUT HELPERS
-# ============================================================
+def _expected_touchdown_event(
+    phase: str,
+) -> Optional[str]:
+    if phase == PHASE_LSS:
+        return EVENT_TD_R
 
-def _get_swing_phase(
+    if phase == PHASE_RSS:
+        return EVENT_TD_L
+
+    return None
+
+
+def _swing_phase(
     phase: str,
     t_phase: float,
     timing: dict,
 ) -> Optional[float]:
-    swing_foot = PHASE_SWING_FOOT[
+    if PHASE_SWING_FOOT[
         phase
-    ]
-
-    if swing_foot is None:
+    ] is None:
         return None
 
-    duration = get_phase_duration(
+    T_phase = get_phase_duration(
         phase,
         timing,
     )
 
     return float(
         np.clip(
-            float(t_phase) / duration,
+            t_phase / T_phase,
             0.0,
             1.0,
         )
     )
 
 
-def _get_active_liftoff(
+def _active_swing_start(
     state: GaitManagerState,
-):
+) -> Optional[np.ndarray]:
     if state.current_phase == PHASE_LSS:
-        return _copy_optional_vector(
-            state.W_p_liftoff_R
+        return _vec3(
+            state.W_p_swing_start_R,
+            "W_p_swing_start_R",
         )
 
     if state.current_phase == PHASE_RSS:
-        return _copy_optional_vector(
-            state.W_p_liftoff_L
+        return _vec3(
+            state.W_p_swing_start_L,
+            "W_p_swing_start_L",
         )
 
     return None
 
 
-def _get_active_foothold(
+def _active_foothold(
     state: GaitManagerState,
-):
+) -> Optional[np.ndarray]:
     if state.current_phase == PHASE_LSS:
-        return _copy_optional_vector(
-            state.W_p_foothold_R
+        return _vec3(
+            state.W_p_foothold_R,
+            "W_p_foothold_R",
         )
 
     if state.current_phase == PHASE_RSS:
-        return _copy_optional_vector(
-            state.W_p_foothold_L
+        return _vec3(
+            state.W_p_foothold_L,
+            "W_p_foothold_L",
         )
 
     return None
 
-
-def _latch_supplied_footholds(
-    state: GaitManagerState,
-    W_p_foothold_L,
-    W_p_foothold_R,
-):
-    """
-    Store whichever swing target is supplied by the higher-level support plan.
-
-    This keeps compatibility with the current run_walking.py API.
-    """
-    if W_p_foothold_L is not None:
-        state.W_p_foothold_L = (
-            _copy_optional_vector(
-                W_p_foothold_L
-            )
-        )
-
-    if W_p_foothold_R is not None:
-        state.W_p_foothold_R = (
-            _copy_optional_vector(
-                W_p_foothold_R
-            )
-        )
-
-
-# ============================================================
-# INITIALIZATION
-# ============================================================
 
 def initialize_gait_manager(
     initial_phase: str,
@@ -420,12 +336,11 @@ def initialize_gait_manager(
     strict_contact: bool = True,
 ):
     """
-    Initialize the physical gait FSM.
+    Initialize COMMAND gait state.
 
-    The initial phase must come from the startup/handoff logic.
+    Example direct DS start:
 
-    If strict_contact=True, the initial sampled contact must exactly match
-    the requested physical phase.
+        DS_R_TO_L + measured [1,1]
     """
     initial_phase = _validate_phase(
         initial_phase
@@ -435,117 +350,114 @@ def initialize_gait_manager(
         c_L,
         "c_L",
     )
+
     c_R = _validate_contact(
         c_R,
         "c_R",
     )
 
-    t_phase = _validate_nonnegative_scalar(
+    t_phase = _validate_nonnegative(
         t_phase,
         "t_phase",
     )
 
-    phase_duration = get_phase_duration(
-        initial_phase,
-        {
-            # This placeholder is not used here for the actual value.
-            # t_phase is bounded later in update_gait_manager(), where
-            # the real timing object is available.
-            "T_SS": max(t_phase, 1.0),
-            "T_DS": max(t_phase, 1.0),
-        },
+    _vec3(
+        W_p_L6,
+        "W_p_L6",
     )
 
-    del phase_duration
-
-    # Validate physical foot positions at initialization.
-    _copy_optional_vector(
-        W_p_L6
-    )
-    _copy_optional_vector(
-        W_p_R6
+    _vec3(
+        W_p_R6,
+        "W_p_R6",
     )
 
-    if strict_contact and not contact_matches_phase(
-        initial_phase,
-        c_L,
-        c_R,
+    if (
+        strict_contact
+        and
+        not contact_matches_phase(
+            initial_phase,
+            c_L,
+            c_R,
+        )
     ):
         raise RuntimeError(
-            "Initial gait/contact mismatch: "
-            f"phase={initial_phase}, "
-            f"contact=[{c_L},{c_R}], "
-            f"expected={get_phase_contact(initial_phase).tolist()}."
+            "Initial phase/contact mismatch: "
+            f"phase_cmd={initial_phase}, "
+            f"contact_meas=[{c_L},{c_R}], "
+            f"contact_cmd={get_phase_contact(initial_phase).tolist()}."
         )
 
-    state = GaitManagerState(
+    return GaitManagerState(
         current_phase=initial_phase,
-        t_phase=float(t_phase),
+        t_phase=t_phase,
         c_L_prev=c_L,
         c_R_prev=c_R,
     )
 
-    return state
 
-
-# ============================================================
-# PHASE TRANSITION
-# ============================================================
-
-def _apply_phase_transition(
+def _transition_command_phase(
     state: GaitManagerState,
     next_phase: str,
-    W_p_L6,
-    W_p_R6,
+    W_p_L6: np.ndarray,
+    W_p_R6: np.ndarray,
 ):
     """
-    Apply exactly ONE accepted physical phase transition.
+    Apply exactly one nominal command transition.
 
-    DS_L_TO_R -> RSS:
-        left foot physically lifts -> latch L liftoff.
-
-    DS_R_TO_L -> LSS:
-        right foot physically lifts -> latch R liftoff.
-
-    SS -> DS touchdown transitions do not create a new liftoff latch.
+    DS -> SS:
+        latch outgoing-foot measured position
+        as swing start.
     """
-    previous_phase = state.current_phase
+    previous_phase = (
+        state.current_phase
+    )
+
     next_phase = _validate_phase(
         next_phase
     )
 
-    if get_next_phase(previous_phase) != next_phase:
+    if (
+        get_next_phase(
+            previous_phase
+        )
+        !=
+        next_phase
+    ):
         raise RuntimeError(
-            "Illegal gait transition: "
+            f"Illegal command transition "
             f"{previous_phase} -> {next_phase}."
         )
 
     if (
-        previous_phase == PHASE_DS_L_TO_R
-        and next_phase == PHASE_RSS
+        previous_phase
+        ==
+        PHASE_DS_L_TO_R
+        and
+        next_phase
+        ==
+        PHASE_RSS
     ):
-        state.W_p_liftoff_L = (
-            _copy_optional_vector(
-                W_p_L6
-            )
+        state.W_p_swing_start_L = (
+            W_p_L6.copy()
         )
 
     elif (
-        previous_phase == PHASE_DS_R_TO_L
-        and next_phase == PHASE_LSS
+        previous_phase
+        ==
+        PHASE_DS_R_TO_L
+        and
+        next_phase
+        ==
+        PHASE_LSS
     ):
-        state.W_p_liftoff_R = (
-            _copy_optional_vector(
-                W_p_R6
-            )
+        state.W_p_swing_start_R = (
+            W_p_R6.copy()
         )
 
-    state.current_phase = next_phase
+    state.current_phase = (
+        next_phase
+    )
 
-
-# ============================================================
-# 100-HZ FSM UPDATE
-# ============================================================
 
 def update_gait_manager(
     state: GaitManagerState,
@@ -559,42 +471,32 @@ def update_gait_manager(
     W_p_foothold_R=None,
 ):
     """
-    Update the contact-synchronized gait FSM ONCE per high-level control tick.
+    100-Hz command/feedback gait update.
 
-    Intended project rate
-    ---------------------
-        100 Hz  -> dt_elapsed ~= 0.01 s
+    Command path:
 
-    MuJoCo physics and low-level joint PD/PID may run at 2000 Hz, but this
-    function should not be called at the physics rate.
+        timing
+          -> phase_cmd
+          -> contact_cmd
+          -> MPC
 
-    Core algorithm
-    --------------
-    1. Sample current physical contact.
-    2. Detect 100-Hz TD/LO edges for diagnostics.
-    3. Advance the phase cursor toward its nominal boundary.
-    4. NEVER transition before the boundary.
-    5. At the boundary:
-           if physical contact matches the nominal next phase:
-               accept exactly one FSM transition,
-               rebuild from the new physical phase on the next call.
-           else:
-               hold t_phase at the boundary.
-    6. Contact may become ready before the boundary, but it only gives
-       permission for the cursor to slide when the boundary is reached.
+    Feedback path:
 
-    This is the architecture:
+        MuJoCo
+          -> contact_meas
+          -> event / synchronization
 
-        contact feedback
-              |
-              v
-        permission / synchronization
-              |
-              v
-        FSM phase cursor
-              |
-              v
-        contact_schedule / DCM / MPC preview
+    Rules
+    -----
+
+    DS -> SS:
+        timing-driven at T_DS.
+
+    SS -> DS:
+        touchdown-confirmed at/after T_SS.
+
+    No timeout, debounce, CoM gate
+    or pre-liftoff heuristic.
     """
     if not isinstance(
         state,
@@ -608,88 +510,94 @@ def update_gait_manager(
         c_L,
         "c_L",
     )
+
     c_R = _validate_contact(
         c_R,
         "c_R",
     )
 
-    dt_elapsed = _validate_nonnegative_scalar(
+    dt_elapsed = _validate_nonnegative(
         dt_elapsed,
         "dt_elapsed",
     )
 
-    W_p_L6 = _copy_optional_vector(
-        W_p_L6
-    )
-    W_p_R6 = _copy_optional_vector(
-        W_p_R6
+    W_p_L6 = _vec3(
+        W_p_L6,
+        "W_p_L6",
     )
 
-    _latch_supplied_footholds(
-        state=state,
-        W_p_foothold_L=W_p_foothold_L,
-        W_p_foothold_R=W_p_foothold_R,
+    W_p_R6 = _vec3(
+        W_p_R6,
+        "W_p_R6",
     )
 
-    previous_phase = state.current_phase
+    if W_p_foothold_L is not None:
+        state.W_p_foothold_L = _vec3(
+            W_p_foothold_L,
+            "W_p_foothold_L",
+        )
+
+    if W_p_foothold_R is not None:
+        state.W_p_foothold_R = _vec3(
+            W_p_foothold_R,
+            "W_p_foothold_R",
+        )
+
+    previous_phase = (
+        state.current_phase
+    )
 
     events = detect_contact_events(
-        c_L_prev=state.c_L_prev,
-        c_R_prev=state.c_R_prev,
-        c_L=c_L,
-        c_R=c_R,
+        state.c_L_prev,
+        state.c_R_prev,
+        c_L,
+        c_R,
     )
 
-    duration = get_phase_duration(
+    T_phase = get_phase_duration(
         previous_phase,
         timing,
     )
 
-    old_t_phase = float(
-        state.t_phase
+    old_t = min(
+        float(
+            state.t_phase
+        ),
+        T_phase,
     )
 
-    if old_t_phase > duration + 1e-9:
-        raise RuntimeError(
-            "FSM t_phase vượt quá nominal duration. "
-            "Boundary phải được hold. "
-            f"phase={previous_phase}, "
-            f"t_phase={old_t_phase:.9f}, "
-            f"duration={duration:.9f}"
-        )
-
-    old_t_phase = min(
-        old_t_phase,
-        duration,
-    )
-
-    candidate_t_phase = (
-        old_t_phase
+    candidate_t = (
+        old_t
         +
         dt_elapsed
     )
 
     boundary_reached = bool(
-        candidate_t_phase
-        >= duration - 1e-12
+        candidate_t
+        >=
+        T_phase
+        -
+        1e-12
     )
 
-    # Overflow is retained ONLY if this control interval newly crosses
-    # the nominal boundary and contact is already ready.
-    #
-    # If the cursor was already held at the boundary from a previous
-    # control tick, transition happens "now", so the new phase starts at 0.
-    newly_crossed_boundary = bool(
-        old_t_phase < duration - 1e-12
-        and boundary_reached
+    newly_crossed = bool(
+        old_t
+        <
+        T_phase
+        -
+        1e-12
+        and
+        boundary_reached
     )
 
     overflow = (
         max(
-            candidate_t_phase - duration,
+            candidate_t
+            -
+            T_phase,
             0.0,
         )
-        if newly_crossed_boundary
+        if newly_crossed
         else 0.0
     )
 
@@ -697,55 +605,52 @@ def update_gait_manager(
         previous_phase
     )
 
-    contact_matches_current = (
-        contact_matches_phase(
-            previous_phase,
-            c_L,
-            c_R,
-        )
-    )
-
-    contact_matches_next = (
-        contact_matches_phase(
-            next_phase,
-            c_L,
-            c_R,
-        )
-    )
-
     transitioned = False
-    transition_event = None
+    transition_reason = None
+
+    # ========================================================
+    # BEFORE NOMINAL BOUNDARY
+    # ========================================================
 
     if not boundary_reached:
-        # Cursor slides normally.
         state.t_phase = float(
-            candidate_t_phase
+            candidate_t
         )
+
+    # ========================================================
+    # AT / AFTER NOMINAL BOUNDARY
+    # ========================================================
 
     else:
-        # Cursor reaches nominal end and is clamped there unless the
-        # physical contact already authorizes the nominal successor.
         state.t_phase = float(
-            duration
+            T_phase
         )
 
-        if contact_matches_next:
+        # ====================================================
+        # DS -> SS
+        #
+        # Command transition at nominal DS boundary.
+        # Do NOT wait for measured LO.
+        # ====================================================
+
+        if previous_phase in (
+            PHASE_DS_L_TO_R,
+            PHASE_DS_R_TO_L,
+        ):
             transitioned = True
 
-            transition_event = (
-                PHASE_EXPECTED_EVENT[
-                    previous_phase
-                ]
+            transition_reason = (
+                "DS_TIME_COMPLETE"
             )
 
-            _apply_phase_transition(
-                state=state,
-                next_phase=next_phase,
-                W_p_L6=W_p_L6,
-                W_p_R6=W_p_R6,
+            _transition_command_phase(
+                state,
+                next_phase,
+                W_p_L6,
+                W_p_R6,
             )
 
-            new_duration = get_phase_duration(
+            T_new = get_phase_duration(
                 state.current_phase,
                 timing,
             )
@@ -753,18 +658,102 @@ def update_gait_manager(
             state.t_phase = float(
                 min(
                     overflow,
-                    new_duration,
+                    T_new,
                 )
             )
 
-    # Update previous sampled contact ONLY after all logic for this
-    # 100-Hz sample has been evaluated.
+        # ====================================================
+        # SS -> DS
+        #
+        # Require measured touchdown.
+        # ====================================================
+
+        elif previous_phase in (
+            PHASE_LSS,
+            PHASE_RSS,
+        ):
+            touchdown_confirmed = (
+                contact_matches_phase(
+                    next_phase,
+                    c_L,
+                    c_R,
+                )
+            )
+
+            if touchdown_confirmed:
+                transitioned = True
+
+                transition_reason = (
+                    "TOUCHDOWN_CONFIRMED"
+                )
+
+                _transition_command_phase(
+                    state,
+                    next_phase,
+                    W_p_L6,
+                    W_p_R6,
+                )
+
+                T_new = (
+                    get_phase_duration(
+                        state.current_phase,
+                        timing,
+                    )
+                )
+
+                state.t_phase = float(
+                    min(
+                        overflow,
+                        T_new,
+                    )
+                )
+
+            # Else:
+            #
+            # hold current SS command at T_SS.
+
+        else:
+            raise RuntimeError(
+                f"Unhandled phase "
+                f"{previous_phase}."
+            )
+
+    # ========================================================
+    # SAVE MEASURED CONTACT HISTORY
+    # ========================================================
+
     state.c_L_prev = c_L
     state.c_R_prev = c_R
 
-    current_phase = state.current_phase
+    # ========================================================
+    # BUILD COMMAND + FEEDBACK OUTPUT
+    # ========================================================
 
-    current_match_after_transition = (
+    current_phase = (
+        state.current_phase
+    )
+
+    contact_meas = (
+        _contact_vector(
+            c_L,
+            c_R,
+        )
+    )
+
+    contact_cmd = (
+        get_phase_contact(
+            current_phase
+        )
+    )
+
+    contact_cmd_achieved = bool(
+        np.array_equal(
+            contact_meas,
+            contact_cmd,
+        )
+    )
+
+    current_match = (
         contact_matches_phase(
             current_phase,
             c_L,
@@ -772,38 +761,61 @@ def update_gait_manager(
         )
     )
 
-    next_phase_after_transition = (
+    next_phase_now = (
         get_next_phase(
             current_phase
         )
     )
 
-    next_match_after_transition = (
+    next_match = (
         contact_matches_phase(
-            next_phase_after_transition,
+            next_phase_now,
             c_L,
             c_R,
         )
     )
 
+    # Diagnostic only.
+    #
+    # Feedback may temporarily match the current
+    # or adjacent gait phase.
     phase_contact_consistent = bool(
-        current_match_after_transition
-        or next_match_after_transition
+        current_match
+        or
+        next_match
     )
 
-    current_duration = get_phase_duration(
-        current_phase,
-        timing,
+    T_current = (
+        get_phase_duration(
+            current_phase,
+            timing,
+        )
     )
 
-    current_boundary_reached = bool(
+    boundary_now = bool(
         state.t_phase
-        >= current_duration - 1e-12
+        >=
+        T_current
+        -
+        1e-12
     )
 
+    # Only SS -> DS waits for physical touchdown.
     waiting_for_contact = bool(
-        current_boundary_reached
-        and not next_match_after_transition
+        current_phase
+        in
+        (
+            PHASE_LSS,
+            PHASE_RSS,
+        )
+        and
+        boundary_now
+        and
+        not contact_matches_phase(
+            next_phase_now,
+            c_L,
+            c_R,
+        )
     )
 
     swing_foot = (
@@ -812,10 +824,67 @@ def update_gait_manager(
         ]
     )
 
-    swing_phase = _get_swing_phase(
-        phase=current_phase,
-        t_phase=state.t_phase,
-        timing=timing,
+    swing_phase = (
+        _swing_phase(
+            current_phase,
+            state.t_phase,
+            timing,
+        )
+    )
+
+    W_p_swing_start = (
+        _active_swing_start(
+            state
+        )
+    )
+
+    W_p_foothold = (
+        _active_foothold(
+            state
+        )
+    )
+
+    expected_lo = (
+        _expected_liftoff_event(
+            current_phase
+        )
+    )
+
+    expected_td = (
+        _expected_touchdown_event(
+            current_phase
+        )
+    )
+
+    # ========================================================
+    # DS -> SS TRANSIENT
+    #
+    # Example:
+    #
+    # contact_cmd  = [1,0]
+    # contact_meas = [1,1]
+    #
+    # command has already changed,
+    # physical LO is still pending.
+    # ========================================================
+
+    pending_liftoff_confirmation = bool(
+        current_phase
+        in
+        (
+            PHASE_LSS,
+            PHASE_RSS,
+        )
+        and
+        not contact_cmd_achieved
+        and
+        np.array_equal(
+            contact_meas,
+            np.array(
+                [1, 1],
+                dtype=int,
+            ),
+        )
     )
 
     output = GaitManagerOutput(
@@ -823,45 +892,91 @@ def update_gait_manager(
         t_phase=float(
             state.t_phase
         ),
-        transitioned=bool(
-            transitioned
+
+        phase_cmd=current_phase,
+        t_phase_cmd=float(
+            state.t_phase
         ),
-        transition_event=transition_event,
-        expected_event=(
-            PHASE_EXPECTED_EVENT[
-                current_phase
-            ]
+
+        transitioned=transitioned,
+        transition_reason=(
+            transition_reason
         ),
+        previous_phase_cmd=(
+            previous_phase
+        ),
+
         events=events,
+
         c_L=c_L,
         c_R=c_R,
+
+        contact_meas=(
+            contact_meas.copy()
+        ),
+
+        contact_cmd=(
+            contact_cmd.copy()
+        ),
+
+        contact_cmd_achieved=(
+            contact_cmd_achieved
+        ),
+
         phase_contact_consistent=(
             phase_contact_consistent
         ),
+
         contact_matches_current_phase=(
-            current_match_after_transition
+            current_match
         ),
+
         contact_matches_next_phase=(
-            next_match_after_transition
+            next_match
         ),
+
         boundary_reached=(
-            current_boundary_reached
+            boundary_now
         ),
+
         waiting_for_contact=(
             waiting_for_contact
         ),
-        swing_foot=swing_foot,
-        swing_phase=swing_phase,
-        W_p_liftoff=(
-            _get_active_liftoff(
-                state
-            )
+
+        pending_liftoff_confirmation=(
+            pending_liftoff_confirmation
         ),
+
+        expected_liftoff_event=(
+            expected_lo
+        ),
+
+        expected_touchdown_event=(
+            expected_td
+        ),
+
+        swing_foot=(
+            swing_foot
+        ),
+
+        swing_phase=(
+            swing_phase
+        ),
+
+        W_p_swing_start=(
+            W_p_swing_start
+        ),
+
         W_p_foothold=(
-            _get_active_foothold(
-                state
-            )
+            W_p_foothold
+        ),
+
+        W_p_liftoff=(
+            W_p_swing_start
         ),
     )
 
-    return state, output
+    return (
+        state,
+        output,
+    )
