@@ -133,7 +133,7 @@ l_h = 0.027
 N = 10
 
 # Prediction-model discretization step
-dt_mpc = 0.025   # [s]
+dt_mpc = 0.01   # [s]
 
 # MPC controller update period
 dt_mpc_update = 0.01   # [s]
