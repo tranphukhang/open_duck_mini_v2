@@ -7,279 +7,401 @@ import numpy as np
 # ============================================================
 
 try:
-
-    from .numerical_IK_newton import (
-        compute_newton_step
-    )
-
+    from .numerical_IK_newton import compute_newton_step
     from .numerical_IK_gradient_descent import (
-        compute_gradient_descent_step
+        compute_gradient_descent_step,
     )
-
 except ImportError:
-
-    from numerical_IK_newton import (
-        compute_newton_step
-    )
-
+    from numerical_IK_newton import compute_newton_step
     from numerical_IK_gradient_descent import (
-        compute_gradient_descent_step
+        compute_gradient_descent_step,
     )
 
 
 # ============================================================
 # LEG CONFIGURATION
-#
-# Numerical IK uses:
-#
-#     L6_IK
-#     R6_IK
-#
-# These sites:
-#
-#     - are located at the same physical positions as L6/R6
-#     - are World-aligned at the home configuration
-#
-# Controlled IK task:
-#
-#     x
-#     y
-#     z
-#     pitch
-#
-# Roll and yaw are deliberately left free.
-#
-#
-# Joint order:
-#
-#     0. hip yaw
-#     1. hip roll
-#     2. hip pitch
-#     3. knee
-#     4. ankle
 # ============================================================
 
 LEG_CONFIG = {
-
     "L": {
-
         "site_name": "L6_IK",
-
         "joint_names": [
             "L_hip_yaw",
             "L_hip_roll",
             "L_hip_pitch",
             "L_knee",
-            "L_ankle"
-        ]
-
+            "L_ankle",
+        ],
     },
-
     "R": {
-
         "site_name": "R6_IK",
-
         "joint_names": [
             "R_hip_yaw",
             "R_hip_roll",
             "R_hip_pitch",
             "R_knee",
-            "R_ankle"
-        ]
-
-    }
-
+            "R_ankle",
+        ],
+    },
 }
 
 
 # ============================================================
-# VECTOR VALIDATION
+# HIERARCHICAL IK DEFAULTS
+#
+# Priority:
+#
+#   Task 1:
+#       Cartesian foot position [x, y, z]
+#
+#   Task 2:
+#       Foot pitch stabilization
+#
+#   Task 3:
+#       Joint posture
+#
+# Roll is NOT imposed as a separate Cartesian task in this
+# version. Hip-roll is kept near its swing-start posture by the
+# tertiary posture objective.
+#
+# DEFAULT_K_ROLL is retained only so the current
+# swing_low_level_controller.py interface remains compatible.
+# It is not used by the hierarchical solver.
+# ============================================================
+
+DEFAULT_K_POSTURE = 0.10
+DEFAULT_K_PITCH = 0.25
+DEFAULT_K_ROLL = 0.0
+
+DEFAULT_PITCH_TOLERANCE = 2.0e-3
+
+
+# ============================================================
+# PITCH MOTION COST
+#
+# Joint order:
+#
+#   0  hip yaw
+#   1  hip roll
+#   2  hip pitch
+#   3  knee
+#   4  ankle
+#
+# Larger number = more expensive to move.
+#
+# Therefore the pitch task prefers:
+#
+#   hip pitch + knee
+#
+# while strongly discouraging:
+#
+#   hip yaw + hip roll
+#
+# The ankle is still available to counter-rotate the sole when
+# needed, but it is more expensive than hip pitch / knee.
+# ============================================================
+
+DEFAULT_PITCH_MOTION_COST = np.array(
+    [
+        30.0,   # hip yaw
+        8.0,    # hip roll
+        1.0,    # hip pitch
+        1.0,    # knee
+        3.0,    # ankle
+    ],
+    dtype=float,
+)
+
+
+# ============================================================
+# POSTURE WEIGHTS
+#
+# The tertiary task tries to return the leg toward the latched
+# swing-start posture without disturbing position or pitch.
+#
+# Hip yaw / hip roll receive larger restoration weights because
+# they should not drift unnecessarily during flat-ground swing.
+# ============================================================
+
+DEFAULT_POSTURE_JOINT_WEIGHTS = np.array(
+    [
+        2.0,    # hip yaw
+        1.5,    # hip roll
+        0.5,    # hip pitch
+        0.5,    # knee
+        0.25,   # ankle
+    ],
+    dtype=float,
+)
+
+
+# ============================================================
+# VALIDATION
 # ============================================================
 
 def _validate_vector(
     value,
     name,
-    expected_shape
+    expected_shape,
 ):
-
     value = np.asarray(
         value,
-        dtype=float
+        dtype=float,
     ).reshape(-1)
 
-
     if value.shape != expected_shape:
-
         raise ValueError(
             f"{name} phải có shape {expected_shape}, "
             f"nhưng nhận được {value.shape}."
         )
-
 
     if not np.all(
         np.isfinite(
             value
         )
     ):
-
         raise ValueError(
             f"{name} chứa NaN hoặc Inf."
         )
 
+    return value
+
+
+def _validate_matrix(
+    value,
+    name,
+    expected_shape,
+):
+    value = np.asarray(
+        value,
+        dtype=float,
+    )
+
+    if value.shape != expected_shape:
+        raise ValueError(
+            f"{name} phải có shape {expected_shape}, "
+            f"nhưng nhận được {value.shape}."
+        )
+
+    if not np.all(
+        np.isfinite(
+            value
+        )
+    ):
+        raise ValueError(
+            f"{name} chứa NaN hoặc Inf."
+        )
+
+    return value.copy()
+
+
+def _validate_nonnegative_scalar(
+    value,
+    name,
+):
+    value = float(
+        value
+    )
+
+    if (
+        not np.isfinite(
+            value
+        )
+        or
+        value < 0.0
+    ):
+        raise ValueError(
+            f"{name} phải hữu hạn và >= 0."
+        )
+
+    return value
+
+
+def _validate_positive_scalar(
+    value,
+    name,
+):
+    value = float(
+        value
+    )
+
+    if (
+        not np.isfinite(
+            value
+        )
+        or
+        value <= 0.0
+    ):
+        raise ValueError(
+            f"{name} phải hữu hạn và > 0."
+        )
+
+    return value
+
+
+def _validate_positive_weights(
+    value,
+    name,
+):
+    value = _validate_vector(
+        value,
+        name,
+        (5,),
+    )
+
+    if np.any(
+        value <= 0.0
+    ):
+        raise ValueError(
+            f"{name} phải chứa các giá trị > 0."
+        )
+
+    return value
+
+
+def _validate_nonnegative_weights(
+    value,
+    name,
+):
+    value = _validate_vector(
+        value,
+        name,
+        (5,),
+    )
+
+    if np.any(
+        value < 0.0
+    ):
+        raise ValueError(
+            f"{name} không được chứa trọng số âm."
+        )
 
     return value
 
 
 # ============================================================
-# GET LEG JOINT INFORMATION
+# LEG INFORMATION
 # ============================================================
 
 def _get_leg_joint_information(
     model,
-    swing_foot
+    swing_foot,
 ):
-
     config = LEG_CONFIG[
         swing_foot
     ]
-
 
     site_name = config[
         "site_name"
     ]
 
-
     joint_names = config[
         "joint_names"
     ]
 
-
-    # --------------------------------------------------------
-    # IK site
-    # --------------------------------------------------------
-
     site_id = mujoco.mj_name2id(
         model,
         mujoco.mjtObj.mjOBJ_SITE,
-        site_name
+        site_name,
     )
 
-
     if site_id < 0:
-
         raise ValueError(
             f"Không tìm thấy site '{site_name}'."
         )
 
-
-    # --------------------------------------------------------
-    # Swing-leg joint information
-    # --------------------------------------------------------
-
     joint_ids = []
-
     qpos_addresses = []
-
     dof_addresses = []
 
-
     for joint_name in joint_names:
-
         joint_id = mujoco.mj_name2id(
             model,
             mujoco.mjtObj.mjOBJ_JOINT,
-            joint_name
+            joint_name,
         )
 
-
         if joint_id < 0:
-
             raise ValueError(
                 f"Không tìm thấy joint '{joint_name}'."
             )
 
-
         joint_ids.append(
-            joint_id
-        )
-
-
-        qpos_address = int(
-            model.jnt_qposadr[
+            int(
                 joint_id
-            ]
+            )
         )
-
-
-        dof_address = int(
-            model.jnt_dofadr[
-                joint_id
-            ]
-        )
-
 
         qpos_addresses.append(
-            qpos_address
+            int(
+                model.jnt_qposadr[
+                    joint_id
+                ]
+            )
         )
-
 
         dof_addresses.append(
-            dof_address
+            int(
+                model.jnt_dofadr[
+                    joint_id
+                ]
+            )
         )
-
 
     return (
-        site_id,
-        site_name,
-        joint_names,
-
+        int(
+            site_id
+        ),
+        str(
+            site_name
+        ),
+        list(
+            joint_names
+        ),
         np.asarray(
             joint_ids,
-            dtype=int
+            dtype=int,
         ),
-
         np.asarray(
             qpos_addresses,
-            dtype=int
+            dtype=int,
         ),
-
         np.asarray(
             dof_addresses,
-            dtype=int
-        )
+            dtype=int,
+        ),
     )
 
 
 # ============================================================
-# APPLY JOINT LIMITS
+# JOINT LIMITS
 # ============================================================
 
 def _apply_joint_limits(
     model,
     joint_ids,
-    q_candidate
+    q_candidate,
 ):
-
-    q_limited = (
-        q_candidate.copy()
+    q_candidate = _validate_vector(
+        q_candidate,
+        "q_candidate",
+        (5,),
     )
 
+    q_limited = q_candidate.copy()
 
     for i, joint_id in enumerate(
         joint_ids
     ):
-
         if model.jnt_limited[
             joint_id
         ]:
-
             q_min = float(
                 model.jnt_range[
                     joint_id,
                     0
                 ]
             )
-
 
             q_max = float(
                 model.jnt_range[
@@ -288,7 +410,6 @@ def _apply_joint_limits(
                 ]
             )
 
-
             q_limited[
                 i
             ] = np.clip(
@@ -296,343 +417,67 @@ def _apply_joint_limits(
                     i
                 ],
                 q_min,
-                q_max
+                q_max,
             )
-
 
     return q_limited
 
 
 # ============================================================
-# GET PITCH FROM ROTATION MATRIX
-#
-# ZYX convention:
-#
-#     R = Rz(yaw) Ry(pitch) Rx(roll)
-#
-# For a rotation matrix:
-#
-#     pitch
-#         =
-#     atan2(
-#         -R[2,0],
-#         sqrt(R[0,0]^2 + R[1,0]^2)
-#     )
-#
-# The IK sites are close to a flat-foot configuration, so the
-# pitch extraction is well away from the +/- pi/2 singularity
-# during normal walking.
+# SITE KINEMATICS
 # ============================================================
 
-def _get_pitch_from_rotation_matrix(
-    R
+def _get_site_rotation_matrix(
+    data,
+    site_id,
 ):
-
-    R = np.asarray(
-        R,
-        dtype=float
+    return _validate_matrix(
+        np.asarray(
+            data.site_xmat[
+                site_id
+            ],
+            dtype=float,
+        ).reshape(
+            3,
+            3,
+        ),
+        "R_site",
+        (
+            3,
+            3,
+        ),
     )
 
 
-    if R.shape != (
-        3,
-        3
-    ):
-
-        raise ValueError(
-            "R phải có shape (3, 3)."
-        )
-
-
-    if not np.all(
-        np.isfinite(
-            R
-        )
-    ):
-
-        raise ValueError(
-            "R chứa NaN hoặc Inf."
-        )
-
-
-    denominator = np.sqrt(
-
-        R[
-            0,
-            0
-        ] ** 2
-
-        +
-
-        R[
-            1,
-            0
-        ] ** 2
-    )
-
-
-    pitch = np.arctan2(
-
-        -R[
-            2,
-            0
-        ],
-
-        denominator
-    )
-
-
-    return float(
-        pitch
-    )
-
-
-# ============================================================
-# WRAP ANGLE TO [-pi, pi]
-# ============================================================
-
-def _wrap_to_pi(
-    angle
-):
-
-    angle = float(
-        angle
-    )
-
-
-    wrapped = (
-
-        angle
-        +
-        np.pi
-
-    ) % (
-
-        2.0
-        *
-        np.pi
-
-    ) - np.pi
-
-
-    return float(
-        wrapped
-    )
-
-
-# ============================================================
-# COMPUTE PITCH-ONLY ORIENTATION ERROR
-#
-# Only pitch is constrained.
-#
-# Roll:
-#     free
-#
-# Yaw:
-#     free
-#
-#
-# Current pitch:
-#
-#     pitch_current
-#
-#
-# Desired pitch:
-#
-#     pitch_des
-#
-#
-# Scalar pitch error:
-#
-#     e_pitch
-#
-# =
-#
-#     wrap_to_pi(
-#         pitch_des - pitch_current
-#     )
-#
-#
-# The error is represented as a 1D vector so that it can be
-# concatenated directly with the 3D Cartesian position error:
-#
-#     [e_x, e_y, e_z, e_pitch]^T
-# ============================================================
-
-def _compute_pitch_orientation_error(
-    R_current,
-    pitch_des
-):
-
-    R_current = np.asarray(
-        R_current,
-        dtype=float
-    )
-
-
-    if R_current.shape != (
-        3,
-        3
-    ):
-
-        raise ValueError(
-            "R_current phải có shape (3, 3)."
-        )
-
-
-    if not np.all(
-        np.isfinite(
-            R_current
-        )
-    ):
-
-        raise ValueError(
-            "R_current chứa NaN hoặc Inf."
-        )
-
-
-    pitch_des = float(
-        pitch_des
-    )
-
-
-    if not np.isfinite(
-        pitch_des
-    ):
-
-        raise ValueError(
-            "pitch_des phải hữu hạn."
-        )
-
-
-    pitch_current = (
-        _get_pitch_from_rotation_matrix(
-            R_current
-        )
-    )
-
-
-    pitch_error_scalar = (
-        _wrap_to_pi(
-
-            pitch_des
-
-            -
-
-            pitch_current
-        )
-    )
-
-
-    pitch_error = np.array(
-        [
-            pitch_error_scalar
-        ],
-        dtype=float
-    )
-
-
-    if pitch_error.shape != (
-        1,
-    ):
-
-        raise RuntimeError(
-            "pitch_error phải có shape (1,)."
-        )
-
-
-    if not np.all(
-        np.isfinite(
-            pitch_error
-        )
-    ):
-
-        raise RuntimeError(
-            "pitch_error chứa NaN hoặc Inf."
-        )
-
-
-    return pitch_error
-
-
-# ============================================================
-# COMPUTE LEG 4D TASK JACOBIAN
-#
-# Task:
-#
-#     x
-#     y
-#     z
-#     pitch
-#
-#
-# Therefore:
-#
-#     J_task in R^(4x5)
-#
-#
-# mj_jacSite gives:
-#
-#     J_position_full
-#
-#     J_rotation_full
-#
-# expressed in the World frame.
-#
-#
-# Since L6_IK / R6_IK are rigidly attached to the foot:
-#
-#     first 3 rows:
-#         Cartesian position Jacobian
-#
-#     final row:
-#         World omega_y
-#
-#
-# Roll row:
-#     NOT included
-#
-# Yaw row:
-#     NOT included
-# ============================================================
-
-def _compute_leg_task_jacobian(
+def _compute_leg_jacobians(
     model,
     data,
     site_id,
-    dof_addresses
+    dof_addresses,
 ):
-
     J_position_full = np.zeros(
         (
             3,
-            model.nv
+            model.nv,
         ),
-        dtype=float
+        dtype=float,
     )
-
 
     J_rotation_full = np.zeros(
         (
             3,
-            model.nv
+            model.nv,
         ),
-        dtype=float
+        dtype=float,
     )
-
 
     mujoco.mj_jacSite(
         model,
         data,
         J_position_full,
         J_rotation_full,
-        site_id
+        site_id,
     )
-
-
-    # --------------------------------------------------------
-    # Select only the five swing-leg joint columns
-    # --------------------------------------------------------
 
     J_position = (
         J_position_full[
@@ -641,7 +486,6 @@ def _compute_leg_task_jacobian(
         ].copy()
     )
 
-
     J_rotation = (
         J_rotation_full[
             :,
@@ -649,250 +493,611 @@ def _compute_leg_task_jacobian(
         ].copy()
     )
 
-
-    if J_position.shape != (
-        3,
-        5
-    ):
-
-        raise RuntimeError(
-            "J_position phải có shape (3, 5), "
-            f"nhưng nhận được {J_position.shape}."
-        )
-
-
-    if J_rotation.shape != (
-        3,
-        5
-    ):
-
-        raise RuntimeError(
-            "J_rotation phải có shape (3, 5), "
-            f"nhưng nhận được {J_rotation.shape}."
-        )
-
-
-    if not np.all(
-        np.isfinite(
-            J_position
-        )
-    ):
-
-        raise RuntimeError(
-            "J_position chứa NaN hoặc Inf."
-        )
-
-
-    if not np.all(
-        np.isfinite(
-            J_rotation
-        )
-    ):
-
-        raise RuntimeError(
-            "J_rotation chứa NaN hoặc Inf."
-        )
-
-
-    # --------------------------------------------------------
-    # Pitch-only angular Jacobian
-    #
-    # World-frame omega_y is row index 1.
-    # Shape:
-    #
-    #     (1, 5)
-    # --------------------------------------------------------
-
-    J_pitch = (
-        J_rotation[
-            1:2,
-            :
-        ].copy()
-    )
-
-
-    if J_pitch.shape != (
-        1,
-        5
-    ):
-
-        raise RuntimeError(
-            "J_pitch phải có shape (1, 5), "
-            f"nhưng nhận được {J_pitch.shape}."
-        )
-
-
-    # --------------------------------------------------------
-    # Complete 4D task Jacobian
-    # --------------------------------------------------------
-
-    J_task = np.vstack(
+    J_position = _validate_matrix(
+        J_position,
+        "J_position",
         (
-            J_position,
-            J_pitch
-        )
+            3,
+            5,
+        ),
+    )
+
+    J_rotation = _validate_matrix(
+        J_rotation,
+        "J_rotation",
+        (
+            3,
+            5,
+        ),
+    )
+
+    return (
+        J_position,
+        J_rotation,
     )
 
 
-    if J_task.shape != (
-        4,
-        5
-    ):
-
-        raise RuntimeError(
-            "J_task phải có shape (4, 5), "
-            f"nhưng nhận được {J_task.shape}."
-        )
-
-
-    if not np.all(
-        np.isfinite(
-            J_task
-        )
-    ):
-
-        raise RuntimeError(
-            "J_task chứa NaN hoặc Inf."
-        )
-
-
-    return J_task
-
-
 # ============================================================
-# COMPUTE CURRENT 4D TASK ERROR
-#
-#     e
-#
-# =
-#
-#     [
-#         e_x
-#         e_y
-#         e_z
-#         e_pitch
-#     ]
+# PRIMARY POSITION ERROR
 # ============================================================
 
-def _compute_task_error(
+def _compute_position_error(
     data,
     site_id,
     W_p_swing_des,
-    pitch_swing_des
 ):
+    W_p_swing_des = _validate_vector(
+        W_p_swing_des,
+        "W_p_swing_des",
+        (3,),
+    )
 
-    # --------------------------------------------------------
-    # Current IK-site position
-    # --------------------------------------------------------
-
-    W_p_current = (
+    W_p_current = np.asarray(
         data.site_xpos[
             site_id
-        ].copy()
-    )
-
-
-    # --------------------------------------------------------
-    # Position error
-    # --------------------------------------------------------
-
-    position_error = (
-
-        W_p_swing_des
-
-        -
-
-        W_p_current
-    )
-
-
-    # --------------------------------------------------------
-    # Current IK-site orientation
-    #
-    # site_xmat:
-    #
-    #     local site frame -> World frame
-    # --------------------------------------------------------
-
-    R_current = (
-        data.site_xmat[
-            site_id
-        ].reshape(
-            3,
-            3
-        ).copy()
-    )
-
-
-    # --------------------------------------------------------
-    # Pitch-only orientation error
-    # --------------------------------------------------------
-
-    orientation_error = (
-        _compute_pitch_orientation_error(
-
-            R_current=R_current,
-
-            pitch_des=pitch_swing_des
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # Complete 4D error
-    # --------------------------------------------------------
-
-    task_error = np.concatenate(
-        (
-            position_error,
-            orientation_error
-        )
-    )
-
-
-    if position_error.shape != (
+        ],
+        dtype=float,
+    ).reshape(
         3,
-    ):
-
-        raise RuntimeError(
-            "position_error phải có shape (3,)."
-        )
-
-
-    if orientation_error.shape != (
-        1,
-    ):
-
-        raise RuntimeError(
-            "orientation_error phải có shape (1,)."
-        )
-
-
-    if task_error.shape != (
-        4,
-    ):
-
-        raise RuntimeError(
-            "task_error phải có shape (4,)."
-        )
-
+    )
 
     if not np.all(
         np.isfinite(
-            task_error
+            W_p_current
         )
     ):
-
         raise RuntimeError(
-            "task_error chứa NaN hoặc Inf."
+            "W_p_current chứa NaN hoặc Inf."
         )
 
+    position_error = (
+        W_p_swing_des
+        -
+        W_p_current
+    )
+
+    return _validate_vector(
+        position_error,
+        "position_error",
+        (3,),
+    )
+
+
+# ============================================================
+# ORIENTATION ERROR
+#
+# R_error maps CURRENT site orientation toward REFERENCE:
+#
+#     R_error = R_ref * R_current^T
+#
+# Small-angle world-frame orientation error:
+#
+#     e_R = vee(
+#              0.5 * (R_error - R_error^T)
+#          )
+#
+# We only use:
+#
+#     e_pitch = e_R[y]
+#
+# Roll and yaw are NOT Cartesian tasks in this hierarchy.
+# ============================================================
+
+def compute_world_orientation_error(
+    R_current,
+    R_reference,
+):
+    R_current = _validate_matrix(
+        R_current,
+        "R_current",
+        (
+            3,
+            3,
+        ),
+    )
+
+    R_reference = _validate_matrix(
+        R_reference,
+        "R_reference",
+        (
+            3,
+            3,
+        ),
+    )
+
+    R_error = (
+        R_reference
+        @
+        R_current.T
+    )
+
+    e_rotation = 0.5 * np.array(
+        [
+            R_error[2, 1] - R_error[1, 2],
+            R_error[0, 2] - R_error[2, 0],
+            R_error[1, 0] - R_error[0, 1],
+        ],
+        dtype=float,
+    )
+
+    return _validate_vector(
+        e_rotation,
+        "e_rotation",
+        (3,),
+    )
+
+
+def compute_world_pitch_error(
+    R_current,
+    R_reference,
+):
+    e_rotation = compute_world_orientation_error(
+        R_current=R_current,
+        R_reference=R_reference,
+    )
+
+    return float(
+        e_rotation[
+            1
+        ]
+    )
+
+
+# ============================================================
+# NULL-SPACE PROJECTORS
+# ============================================================
+
+def compute_null_space_projector(
+    J,
+):
+    J = _validate_matrix(
+        J,
+        "J",
+        (
+            3,
+            5,
+        ),
+    )
+
+    J_pinv = np.linalg.pinv(
+        J
+    )
 
     return (
-        task_error,
-        position_error,
-        orientation_error
+        np.eye(
+            5,
+            dtype=float,
+        )
+        -
+        J_pinv
+        @
+        J
     )
+
+
+def compute_augmented_null_space_projector(
+    J_position,
+    J_pitch,
+):
+    J_position = _validate_matrix(
+        J_position,
+        "J_position",
+        (
+            3,
+            5,
+        ),
+    )
+
+    J_pitch = np.asarray(
+        J_pitch,
+        dtype=float,
+    ).reshape(
+        1,
+        5,
+    )
+
+    J_pitch = _validate_matrix(
+        J_pitch,
+        "J_pitch",
+        (
+            1,
+            5,
+        ),
+    )
+
+    J_augmented = np.vstack(
+        (
+            J_position,
+            J_pitch,
+        )
+    )
+
+    J_augmented_pinv = np.linalg.pinv(
+        J_augmented
+    )
+
+    N_augmented = (
+        np.eye(
+            5,
+            dtype=float,
+        )
+        -
+        J_augmented_pinv
+        @
+        J_augmented
+    )
+
+    return (
+        N_augmented,
+        J_augmented,
+    )
+
+
+# ============================================================
+# LEGACY POSTURE-ONLY NULL-SPACE STEP
+#
+# Retained for compatibility with earlier unit tests.
+# ============================================================
+
+def compute_null_space_posture_step(
+    J,
+    q_candidate,
+    q_posture_ref,
+    k_posture,
+):
+    q_candidate = _validate_vector(
+        q_candidate,
+        "q_candidate",
+        (5,),
+    )
+
+    q_posture_ref = _validate_vector(
+        q_posture_ref,
+        "q_posture_ref",
+        (5,),
+    )
+
+    k_posture = _validate_nonnegative_scalar(
+        k_posture,
+        "k_posture",
+    )
+
+    N = compute_null_space_projector(
+        J
+    )
+
+    posture_error = (
+        q_posture_ref
+        -
+        q_candidate
+    )
+
+    delta_q_posture = (
+        k_posture
+        *
+        (
+            N
+            @
+            posture_error
+        )
+    )
+
+    return (
+        delta_q_posture,
+        N,
+    )
+
+
+# ============================================================
+# TASK 2:
+# WEIGHTED PITCH CORRECTION
+#
+# We solve:
+#
+#     minimize
+#
+#         1/2 * delta_q^T W delta_q
+#
+#     subject to
+#
+#         J_position delta_q = 0
+#
+#         J_pitch delta_q
+#             = k_pitch * e_pitch
+#
+#
+# Closed-form weighted minimum-norm solution:
+#
+#     delta_q
+#       =
+#     W^-1 C^T
+#     (C W^-1 C^T)^+
+#     b
+#
+# where:
+#
+#     C = [ J_position
+#           J_pitch    ]
+#
+#     b = [0,0,0,k_pitch*e_pitch]^T
+#
+#
+# This gives pitch correction without disturbing the primary
+# position task.
+# ============================================================
+
+def compute_weighted_pitch_step(
+    J_position,
+    J_pitch,
+    pitch_error,
+    k_pitch=DEFAULT_K_PITCH,
+    pitch_motion_cost=DEFAULT_PITCH_MOTION_COST,
+):
+    J_position = _validate_matrix(
+        J_position,
+        "J_position",
+        (
+            3,
+            5,
+        ),
+    )
+
+    J_pitch = np.asarray(
+        J_pitch,
+        dtype=float,
+    ).reshape(
+        1,
+        5,
+    )
+
+    J_pitch = _validate_matrix(
+        J_pitch,
+        "J_pitch",
+        (
+            1,
+            5,
+        ),
+    )
+
+    pitch_error = float(
+        pitch_error
+    )
+
+    if not np.isfinite(
+        pitch_error
+    ):
+        raise ValueError(
+            "pitch_error phải hữu hạn."
+        )
+
+    k_pitch = _validate_nonnegative_scalar(
+        k_pitch,
+        "k_pitch",
+    )
+
+    pitch_motion_cost = _validate_positive_weights(
+        pitch_motion_cost,
+        "pitch_motion_cost",
+    )
+
+    C = np.vstack(
+        (
+            J_position,
+            J_pitch,
+        )
+    )
+
+    b = np.array(
+        [
+            0.0,
+            0.0,
+            0.0,
+            k_pitch
+            *
+            pitch_error,
+        ],
+        dtype=float,
+    )
+
+    W_inverse = np.diag(
+        1.0
+        /
+        pitch_motion_cost
+    )
+
+    middle = (
+        C
+        @
+        W_inverse
+        @
+        C.T
+    )
+
+    delta_q_pitch = (
+        W_inverse
+        @
+        C.T
+        @
+        np.linalg.pinv(
+            middle
+        )
+        @
+        b
+    )
+
+    delta_q_pitch = _validate_vector(
+        delta_q_pitch,
+        "delta_q_pitch",
+        (5,),
+    )
+
+    position_leakage = float(
+        np.linalg.norm(
+            J_position
+            @
+            delta_q_pitch
+        )
+    )
+
+    achieved_pitch_step = float(
+        (
+            J_pitch
+            @
+            delta_q_pitch
+        )[
+            0
+        ]
+    )
+
+    requested_pitch_step = float(
+        k_pitch
+        *
+        pitch_error
+    )
+
+    pitch_residual = float(
+        requested_pitch_step
+        -
+        achieved_pitch_step
+    )
+
+    return {
+        "delta_q_pitch":
+            delta_q_pitch.copy(),
+
+        "requested_pitch_step":
+            requested_pitch_step,
+
+        "achieved_pitch_step":
+            achieved_pitch_step,
+
+        "pitch_residual":
+            pitch_residual,
+
+        "position_leakage":
+            position_leakage,
+
+        "constraint_matrix":
+            C.copy(),
+    }
+
+
+# ============================================================
+# TASK 3:
+# POSTURE IN NULL SPACE OF [POSITION + PITCH]
+#
+#     J_aug = [J_position
+#              J_pitch]
+#
+#     N_aug = I - J_aug^+ J_aug
+#
+#     delta_q_posture
+#       =
+#     k_posture
+#     N_aug
+#     W_posture
+#     (q_ref - q)
+#
+#
+# Therefore the posture correction does not disturb either:
+#
+#     position
+#     pitch
+# ============================================================
+
+def compute_hierarchical_posture_step(
+    J_position,
+    J_pitch,
+    q_candidate,
+    q_posture_ref,
+    k_posture=DEFAULT_K_POSTURE,
+    posture_joint_weights=DEFAULT_POSTURE_JOINT_WEIGHTS,
+):
+    q_candidate = _validate_vector(
+        q_candidate,
+        "q_candidate",
+        (5,),
+    )
+
+    q_posture_ref = _validate_vector(
+        q_posture_ref,
+        "q_posture_ref",
+        (5,),
+    )
+
+    k_posture = _validate_nonnegative_scalar(
+        k_posture,
+        "k_posture",
+    )
+
+    posture_joint_weights = _validate_nonnegative_weights(
+        posture_joint_weights,
+        "posture_joint_weights",
+    )
+
+    (
+        N_augmented,
+        J_augmented,
+    ) = compute_augmented_null_space_projector(
+        J_position=J_position,
+        J_pitch=J_pitch,
+    )
+
+    posture_error = (
+        q_posture_ref
+        -
+        q_candidate
+    )
+
+    posture_seed = (
+        posture_joint_weights
+        *
+        posture_error
+    )
+
+    delta_q_posture = (
+        k_posture
+        *
+        (
+            N_augmented
+            @
+            posture_seed
+        )
+    )
+
+    delta_q_posture = _validate_vector(
+        delta_q_posture,
+        "delta_q_posture",
+        (5,),
+    )
+
+    augmented_leakage = float(
+        np.linalg.norm(
+            J_augmented
+            @
+            delta_q_posture
+        )
+    )
+
+    return {
+        "delta_q_posture":
+            delta_q_posture.copy(),
+
+        "N_augmented":
+            N_augmented.copy(),
+
+        "J_augmented":
+            J_augmented.copy(),
+
+        "posture_error":
+            posture_error.copy(),
+
+        "posture_seed":
+            posture_seed.copy(),
+
+        "augmented_leakage":
+            augmented_leakage,
+    }
 
 
 # ============================================================
@@ -904,327 +1109,261 @@ def solve_numerical_IK_hybrid(
     data,
     W_p_swing_des,
     swing_foot,
+
+    # Legacy compatibility arguments.
     roll_swing_des=0.0,
     pitch_swing_des=0.0,
+    orientation_tolerance=1e-3,
+
     sigma_threshold=1e-4,
     alpha_newton=1.0,
     eta_gradient=1.0,
     tolerance=1e-4,
-    orientation_tolerance=1e-3,
-    max_iterations=50
+    max_iterations=50,
+
+    q_posture_ref=None,
+    k_posture=DEFAULT_K_POSTURE,
+
+    # Latched swing-start orientation.
+    R_swing_ref=None,
+
+    # k_roll is accepted for compatibility but not used.
+    k_roll=DEFAULT_K_ROLL,
+
+    # Hierarchical pitch task gain.
+    k_pitch=DEFAULT_K_PITCH,
+
+    pitch_tolerance=DEFAULT_PITCH_TOLERANCE,
+
+    pitch_motion_cost=DEFAULT_PITCH_MOTION_COST,
+
+    posture_joint_weights=DEFAULT_POSTURE_JOINT_WEIGHTS,
+
+    # Old weighted-null-space arguments accepted but unused.
+    roll_joint_weights=None,
+    pitch_joint_weights=None,
 ):
     """
-    Solve the 4D swing-leg numerical inverse kinematics.
+    Hierarchical swing-leg IK.
 
-    Controlled task:
+    Priority 1
+    ----------
+        Cartesian position [x, y, z].
 
-        [
-            foot x
-            foot y
-            foot z
-            foot pitch
-        ]
+    Priority 2
+    ----------
+        Foot pitch stabilization around the latched
+        swing-start orientation.
 
-    Roll is deliberately NOT controlled.
+    Priority 3
+    ----------
+        Joint posture regulation in the null space of:
+            [position + pitch].
 
-    Yaw is deliberately NOT controlled.
-
-
-    IK sites:
-
-        Left:
-            L6_IK
-
-        Right:
-            R6_IK
-
-
-    The argument:
-
-        roll_swing_des
-
-    is temporarily retained only for backward compatibility with
-    the current swing_low_level_controller.py interface.
-
-    It is NOT used in the IK task.
-
-    It will be removed from the low-level caller in the next step.
-
-
-    For flat-ground walking:
-
-        pitch_swing_des = 0
-
-    is the desired pitch command.
-
-
-    Hybrid method:
-
-        sigma_min > sigma_threshold
-
-            -> pseudo-Newton
-
-    otherwise:
-
-            -> Jacobian-transpose Gradient Descent
-
-
-    Position convergence:
-
-        ||e_position|| <= tolerance
-
-
-    Pitch convergence:
-
-        ||e_pitch|| <= orientation_tolerance
-
-
-    Important:
-
-    The function temporarily writes candidate joint positions
-    to MuJoCo data in order to evaluate forward kinematics.
-
-    Before returning, the original simulation state is restored.
-
-    Therefore this function does NOT directly move the robot.
+    Important
+    ---------
+    - Roll is not a Cartesian task.
+    - Hip-roll is regulated by posture.
+    - Pitch correction uses a weighted minimum-norm solution
+      that strongly discourages hip-yaw motion and prefers
+      hip-pitch + knee.
+    - Ankle remains available for sole counter-rotation.
+    - No mj_step() is called here.
     """
 
-
     # ========================================================
-    # 1. VALIDATE SWING FOOT
+    # 1. SWING FOOT
     # ========================================================
 
     if swing_foot not in (
         "L",
         "R",
-        None
+        None,
     ):
-
         raise ValueError(
             "swing_foot chỉ được là 'L', 'R' hoặc None."
         )
 
-
-    # ========================================================
-    # 2. DOUBLE SUPPORT
-    # ========================================================
-
     if swing_foot is None:
-
         diagnostics = {
-
             "converged": True,
-
+            "position_converged": True,
+            "pitch_converged": True,
+            "tilt_converged": True,
             "iterations": 0,
 
             "final_error": None,
-
             "final_error_norm": 0.0,
 
             "final_position_error": None,
-
             "final_position_error_norm": 0.0,
 
-            "final_orientation_error": None,
+            "final_pitch_error": 0.0,
+            "final_pitch_error_abs": 0.0,
 
+            "final_tilt_error": None,
+            "final_tilt_error_norm": 0.0,
+
+            "final_orientation_error": None,
             "final_orientation_error_norm": 0.0,
 
+            "orientation_task_active": True,
+            "pitch_task_active": True,
+            "roll_task_active": False,
+
             "method_used": None,
-
             "newton_iterations": 0,
-
             "gradient_iterations": 0,
+            "secondary_only_iterations": 0,
 
             "sigma_min": None,
 
             "swing_foot": None,
-
             "site_name": None,
-
             "joint_names": None,
 
-            # Retained only for backward-compatible diagnostics.
+            "q_posture_ref": None,
+            "R_swing_ref": None,
+
+            "k_posture": float(
+                k_posture
+            ),
+            "k_roll": float(
+                k_roll
+            ),
+            "k_pitch": float(
+                k_pitch
+            ),
+
+            "pitch_motion_cost":
+                np.asarray(
+                    pitch_motion_cost,
+                    dtype=float,
+                ).copy(),
+
+            "posture_joint_weights":
+                np.asarray(
+                    posture_joint_weights,
+                    dtype=float,
+                ).copy(),
+
+            "primary_step_norm_last": 0.0,
+            "pitch_step_norm_last": 0.0,
+            "posture_step_norm_last": 0.0,
+            "secondary_step_norm_last": 0.0,
+
+            "pitch_position_leakage_last": 0.0,
+            "pitch_residual_last": 0.0,
+            "posture_augmented_leakage_last": 0.0,
+
+            "null_space_projection_error_last": 0.0,
+
             "roll_swing_des": None,
-
-            "pitch_swing_des": None
-
+            "pitch_swing_des": None,
         }
 
-
-        return None, diagnostics
-
+        return (
+            None,
+            diagnostics,
+        )
 
     # ========================================================
-    # 3. VALIDATE DESIRED POSITION
+    # 2. INPUT VALIDATION
     # ========================================================
 
     if W_p_swing_des is None:
-
         raise ValueError(
-            "W_p_swing_des không được là None "
-            "khi đang có swing foot."
+            "W_p_swing_des không được None khi có swing foot."
         )
-
 
     W_p_swing_des = _validate_vector(
         W_p_swing_des,
         "W_p_swing_des",
-        (
-            3,
-        )
+        (3,),
     )
 
-
-    # ========================================================
-    # 4. VALIDATE DESIRED ORIENTATION
-    #
-    # Only pitch is used.
-    #
-    # roll_swing_des is intentionally ignored for backward
-    # compatibility with the current caller.
-    # ========================================================
-
+    # Legacy arguments are still validated for compatibility.
     roll_swing_des = float(
         roll_swing_des
     )
-
 
     pitch_swing_des = float(
         pitch_swing_des
     )
 
-
-    if not np.isfinite(
-        roll_swing_des
-    ):
-
-        raise ValueError(
-            "roll_swing_des phải hữu hạn."
-        )
-
-
-    if not np.isfinite(
-        pitch_swing_des
-    ):
-
-        raise ValueError(
-            "pitch_swing_des phải hữu hạn."
-        )
-
-
-    # ========================================================
-    # 5. VALIDATE NUMERICAL PARAMETERS
-    # ========================================================
-
-    sigma_threshold = float(
-        sigma_threshold
+    orientation_tolerance = _validate_positive_scalar(
+        orientation_tolerance,
+        "orientation_tolerance",
     )
 
-
-    alpha_newton = float(
-        alpha_newton
+    sigma_threshold = _validate_nonnegative_scalar(
+        sigma_threshold,
+        "sigma_threshold",
     )
 
-
-    eta_gradient = float(
-        eta_gradient
+    alpha_newton = _validate_positive_scalar(
+        alpha_newton,
+        "alpha_newton",
     )
 
-
-    tolerance = float(
-        tolerance
+    eta_gradient = _validate_positive_scalar(
+        eta_gradient,
+        "eta_gradient",
     )
 
-
-    orientation_tolerance = float(
-        orientation_tolerance
+    tolerance = _validate_positive_scalar(
+        tolerance,
+        "tolerance",
     )
 
+    k_posture = _validate_nonnegative_scalar(
+        k_posture,
+        "k_posture",
+    )
 
-    if (
-        not np.isfinite(
-            sigma_threshold
-        )
-        or
-        sigma_threshold < 0.0
-    ):
+    k_roll = _validate_nonnegative_scalar(
+        k_roll,
+        "k_roll",
+    )
 
-        raise ValueError(
-            "sigma_threshold phải hữu hạn và >= 0."
-        )
+    k_pitch = _validate_nonnegative_scalar(
+        k_pitch,
+        "k_pitch",
+    )
 
+    pitch_tolerance = _validate_positive_scalar(
+        pitch_tolerance,
+        "pitch_tolerance",
+    )
 
-    if (
-        not np.isfinite(
-            alpha_newton
-        )
-        or
-        alpha_newton <= 0.0
-    ):
+    pitch_motion_cost = _validate_positive_weights(
+        pitch_motion_cost,
+        "pitch_motion_cost",
+    )
 
-        raise ValueError(
-            "alpha_newton phải hữu hạn và > 0."
-        )
-
-
-    if (
-        not np.isfinite(
-            eta_gradient
-        )
-        or
-        eta_gradient <= 0.0
-    ):
-
-        raise ValueError(
-            "eta_gradient phải hữu hạn và > 0."
-        )
-
-
-    if (
-        not np.isfinite(
-            tolerance
-        )
-        or
-        tolerance <= 0.0
-    ):
-
-        raise ValueError(
-            "tolerance phải hữu hạn và > 0."
-        )
-
-
-    if (
-        not np.isfinite(
-            orientation_tolerance
-        )
-        or
-        orientation_tolerance <= 0.0
-    ):
-
-        raise ValueError(
-            "orientation_tolerance phải hữu hạn và > 0."
-        )
-
+    posture_joint_weights = _validate_nonnegative_weights(
+        posture_joint_weights,
+        "posture_joint_weights",
+    )
 
     if not isinstance(
         max_iterations,
-        (int, np.integer)
+        (
+            int,
+            np.integer,
+        ),
     ):
-
         raise TypeError(
             "max_iterations phải là số nguyên."
         )
 
-
     if max_iterations <= 0:
-
         raise ValueError(
             "max_iterations phải > 0."
         )
 
-
     # ========================================================
-    # 6. GET SWING-LEG INFORMATION
+    # 3. LEG INFORMATION
     # ========================================================
 
     (
@@ -1233,117 +1372,144 @@ def solve_numerical_IK_hybrid(
         joint_names,
         joint_ids,
         qpos_addresses,
-        dof_addresses
-
+        dof_addresses,
     ) = _get_leg_joint_information(
         model,
-        swing_foot
+        swing_foot,
     )
 
-
     # ========================================================
-    # 7. SAVE ORIGINAL MUJOCO STATE
+    # 4. SAVE REAL MUJOCO STATE
     # ========================================================
 
     qpos_original = (
         data.qpos.copy()
     )
 
-
     qvel_original = (
         data.qvel.copy()
     )
 
-
-    # ========================================================
-    # 8. INITIAL GUESS
-    #
-    #     q^(0) = q_current
-    # ========================================================
-
-    q_candidate = (
-        data.qpos[
-            qpos_addresses
-        ].copy()
+    mujoco.mj_forward(
+        model,
+        data,
     )
 
+    # ========================================================
+    # 5. INITIAL CANDIDATE + REFERENCES
+    # ========================================================
+
+    q_candidate = np.asarray(
+        data.qpos[
+            qpos_addresses
+        ],
+        dtype=float,
+    ).copy()
+
+    q_candidate = _validate_vector(
+        q_candidate,
+        "q_candidate",
+        (5,),
+    )
+
+    if q_posture_ref is None:
+        q_posture_ref = (
+            q_candidate.copy()
+        )
+    else:
+        q_posture_ref = _validate_vector(
+            q_posture_ref,
+            "q_posture_ref",
+            (5,),
+        ).copy()
+
+    if R_swing_ref is None:
+        R_swing_ref = _get_site_rotation_matrix(
+            data,
+            site_id,
+        )
+    else:
+        R_swing_ref = _validate_matrix(
+            R_swing_ref,
+            "R_swing_ref",
+            (
+                3,
+                3,
+            ),
+        )
 
     # ========================================================
-    # 9. DIAGNOSTIC INITIALIZATION
+    # 6. DIAGNOSTIC STATE
     # ========================================================
 
     converged = False
+    position_converged = False
+    pitch_converged = False
 
     iterations = 0
-
     newton_iterations = 0
-
     gradient_iterations = 0
+    secondary_only_iterations = 0
 
     method_used = None
-
     sigma_min = None
 
+    primary_step_norm_last = 0.0
+    pitch_step_norm_last = 0.0
+    posture_step_norm_last = 0.0
+    secondary_step_norm_last = 0.0
 
-    final_error = None
+    pitch_position_leakage_last = 0.0
+    pitch_residual_last = 0.0
+    posture_augmented_leakage_last = 0.0
+    null_space_projection_error_last = 0.0
 
-    final_error_norm = np.inf
+    final_position_error = np.zeros(
+        3,
+        dtype=float,
+    )
 
+    final_pitch_error = 0.0
 
-    final_position_error = None
+    final_posture_error = (
+        q_posture_ref
+        -
+        q_candidate
+    )
 
-    final_position_error_norm = np.inf
-
-
-    final_orientation_error = None
-
-    final_orientation_error_norm = np.inf
-
+    final_posture_error_norm = float(
+        np.linalg.norm(
+            final_posture_error
+        )
+    )
 
     # ========================================================
-    # 10. ITERATIVE IK
+    # 7. ITERATIVE HIERARCHICAL IK
     # ========================================================
 
     try:
-
-        # ----------------------------------------------------
-        # Make sure MuJoCo kinematics are up to date
-        # ----------------------------------------------------
-
-        mujoco.mj_forward(
-            model,
-            data
-        )
-
-
         for _ in range(
             max_iterations
         ):
+            # ------------------------------------------------
+            # Current errors
+            # ------------------------------------------------
 
-            # =================================================
-            # 10.1 CURRENT 4D TASK ERROR
-            # =================================================
-
-            (
-                task_error,
-                position_error,
-                orientation_error
-
-            ) = _compute_task_error(
-
+            position_error = _compute_position_error(
                 data=data,
-
                 site_id=site_id,
-
                 W_p_swing_des=W_p_swing_des,
-
-                pitch_swing_des=pitch_swing_des
             )
 
+            R_current = _get_site_rotation_matrix(
+                data,
+                site_id,
+            )
 
-            # =================================================
-            # 10.2 ERROR NORMS
-            # =================================================
+            pitch_error = compute_world_pitch_error(
+                R_current=R_current,
+                R_reference=R_swing_ref,
+            )
 
             position_error_norm = float(
                 np.linalg.norm(
@@ -1351,116 +1517,61 @@ def solve_numerical_IK_hybrid(
                 )
             )
 
-
-            orientation_error_norm = float(
-                np.linalg.norm(
-                    orientation_error
+            pitch_error_abs = float(
+                abs(
+                    pitch_error
                 )
             )
 
-
-            task_error_norm = float(
-                np.linalg.norm(
-                    task_error
-                )
-            )
-
-
-            # =================================================
-            # 10.3 CONVERGENCE CHECK
-            #
-            # Position:
-            #
-            #     [m]
-            #
-            # Pitch orientation:
-            #
-            #     [rad]
-            #
-            # are checked separately.
-            # =================================================
-
-            if (
-
+            position_converged = bool(
                 position_error_norm
                 <=
                 tolerance
+            )
 
-                and
-
-                orientation_error_norm
+            pitch_converged = bool(
+                pitch_error_abs
                 <=
-                orientation_tolerance
+                pitch_tolerance
+            )
 
+            if (
+                position_converged
+                and
+                pitch_converged
             ):
-
                 converged = True
-
-
-                final_error = (
-                    task_error.copy()
-                )
-
-
-                final_error_norm = (
-                    task_error_norm
-                )
-
-
-                final_position_error = (
-                    position_error.copy()
-                )
-
-
-                final_position_error_norm = (
-                    position_error_norm
-                )
-
-
-                final_orientation_error = (
-                    orientation_error.copy()
-                )
-
-
-                final_orientation_error_norm = (
-                    orientation_error_norm
-                )
-
-
                 break
 
+            # ------------------------------------------------
+            # Current Jacobians
+            # ------------------------------------------------
 
-            # =================================================
-            # 10.4 COMPLETE 4D TASK JACOBIAN
-            # =================================================
-
-            J_task = (
-                _compute_leg_task_jacobian(
-
-                    model=model,
-
-                    data=data,
-
-                    site_id=site_id,
-
-                    dof_addresses=dof_addresses
-                )
+            (
+                J_position,
+                J_rotation,
+            ) = _compute_leg_jacobians(
+                model=model,
+                data=data,
+                site_id=site_id,
+                dof_addresses=dof_addresses,
             )
 
-
-            # =================================================
-            # 10.5 MINIMUM SINGULAR VALUE
-            # =================================================
-
-            singular_values = (
-                np.linalg.svd(
-
-                    J_task,
-
-                    compute_uv=False
-                )
+            J_pitch = (
+                J_rotation[
+                    1:2,
+                    :
+                ].copy()
             )
 
+            # ------------------------------------------------
+            # TASK 1: Cartesian position
+            # ------------------------------------------------
+
+            singular_values = np.linalg.svd(
+                J_position,
+                compute_uv=False,
+            )
 
             sigma_min = float(
                 singular_values[
@@ -1468,142 +1579,217 @@ def solve_numerical_IK_hybrid(
                 ]
             )
 
-
-            # =================================================
-            # 10.6 METHOD SELECTION
-            # =================================================
-
-            if sigma_min > sigma_threshold:
-
-                # ---------------------------------------------
-                # PSEUDO-NEWTON
-                # ---------------------------------------------
-
-                delta_q = (
-                    compute_newton_step(
-
-                        J=J_task,
-
-                        error=task_error,
-
-                        alpha_newton=alpha_newton
-                    )
+            if position_converged:
+                delta_q_primary = np.zeros(
+                    5,
+                    dtype=float,
                 )
 
+                method_used = (
+                    "secondary_only"
+                )
+
+                secondary_only_iterations += 1
+
+            elif sigma_min > sigma_threshold:
+                delta_q_primary = compute_newton_step(
+                    J=J_position,
+                    error=position_error,
+                    alpha_newton=alpha_newton,
+                )
 
                 method_used = (
                     "newton"
                 )
 
-
                 newton_iterations += 1
 
-
             else:
-
-                # ---------------------------------------------
-                # GRADIENT DESCENT
-                # ---------------------------------------------
-
-                delta_q = (
+                delta_q_primary = (
                     compute_gradient_descent_step(
-
-                        J=J_task,
-
-                        error=task_error,
-
-                        eta_gradient=eta_gradient
+                        J=J_position,
+                        error=position_error,
+                        eta_gradient=eta_gradient,
                     )
                 )
-
 
                 method_used = (
                     "gradient_descent"
                 )
 
-
                 gradient_iterations += 1
 
+            # ------------------------------------------------
+            # TASK 2: pitch, while preserving position
+            # ------------------------------------------------
 
-            # =================================================
-            # 10.7 UPDATE CANDIDATE JOINT CONFIGURATION
-            # =================================================
+            if pitch_converged:
+                pitch_result = {
+                    "delta_q_pitch":
+                        np.zeros(
+                            5,
+                            dtype=float,
+                        ),
 
-            q_candidate = (
+                    "requested_pitch_step":
+                        0.0,
 
-                q_candidate
+                    "achieved_pitch_step":
+                        0.0,
 
-                +
+                    "pitch_residual":
+                        0.0,
 
-                delta_q
+                    "position_leakage":
+                        0.0,
+                }
+
+            else:
+                pitch_result = compute_weighted_pitch_step(
+                    J_position=J_position,
+                    J_pitch=J_pitch,
+                    pitch_error=pitch_error,
+                    k_pitch=k_pitch,
+                    pitch_motion_cost=pitch_motion_cost,
+                )
+
+            delta_q_pitch = pitch_result[
+                "delta_q_pitch"
+            ]
+
+            # ------------------------------------------------
+            # TASK 3: posture in null([position + pitch])
+            # ------------------------------------------------
+
+            posture_result = compute_hierarchical_posture_step(
+                J_position=J_position,
+                J_pitch=J_pitch,
+                q_candidate=q_candidate,
+                q_posture_ref=q_posture_ref,
+                k_posture=k_posture,
+                posture_joint_weights=posture_joint_weights,
             )
 
+            delta_q_posture = posture_result[
+                "delta_q_posture"
+            ]
 
-            # =================================================
-            # 10.8 APPLY JOINT LIMITS
-            # =================================================
+            # ------------------------------------------------
+            # Hierarchical update
+            # ------------------------------------------------
 
-            q_candidate = (
-                _apply_joint_limits(
+            delta_q = (
+                delta_q_primary
+                +
+                delta_q_pitch
+                +
+                delta_q_posture
+            )
 
-                    model=model,
+            delta_q = _validate_vector(
+                delta_q,
+                "delta_q",
+                (5,),
+            )
 
-                    joint_ids=joint_ids,
-
-                    q_candidate=q_candidate
+            primary_step_norm_last = float(
+                np.linalg.norm(
+                    delta_q_primary
                 )
             )
 
+            pitch_step_norm_last = float(
+                np.linalg.norm(
+                    delta_q_pitch
+                )
+            )
 
-            # =================================================
-            # 10.9 TEMPORARILY WRITE CANDIDATE TO MUJOCO
-            # =================================================
+            posture_step_norm_last = float(
+                np.linalg.norm(
+                    delta_q_posture
+                )
+            )
+
+            secondary_step_norm_last = float(
+                np.linalg.norm(
+                    delta_q_pitch
+                    +
+                    delta_q_posture
+                )
+            )
+
+            pitch_position_leakage_last = float(
+                pitch_result[
+                    "position_leakage"
+                ]
+            )
+
+            pitch_residual_last = float(
+                pitch_result[
+                    "pitch_residual"
+                ]
+            )
+
+            posture_augmented_leakage_last = float(
+                posture_result[
+                    "augmented_leakage"
+                ]
+            )
+
+            null_space_projection_error_last = float(
+                np.linalg.norm(
+                    posture_result[
+                        "J_augmented"
+                    ]
+                    @
+                    posture_result[
+                        "N_augmented"
+                    ]
+                )
+            )
+
+            q_candidate = (
+                q_candidate
+                +
+                delta_q
+            )
+
+            q_candidate = _apply_joint_limits(
+                model=model,
+                joint_ids=joint_ids,
+                q_candidate=q_candidate,
+            )
 
             data.qpos[
                 qpos_addresses
             ] = q_candidate
 
-
-            # =================================================
-            # 10.10 UPDATE FORWARD KINEMATICS
-            # =================================================
-
             mujoco.mj_forward(
                 model,
-                data
+                data,
             )
-
 
             iterations += 1
 
-
         # ====================================================
-        # 11. FINAL ERROR
+        # 8. FINAL ERRORS
         # ====================================================
 
-        (
-            final_error,
-            final_position_error,
-            final_orientation_error
-
-        ) = _compute_task_error(
-
+        final_position_error = _compute_position_error(
             data=data,
-
             site_id=site_id,
-
             W_p_swing_des=W_p_swing_des,
-
-            pitch_swing_des=pitch_swing_des
         )
 
-
-        final_error_norm = float(
-            np.linalg.norm(
-                final_error
-            )
+        R_current_final = _get_site_rotation_matrix(
+            data,
+            site_id,
         )
 
+        final_pitch_error = compute_world_pitch_error(
+            R_current=R_current_final,
+            R_reference=R_swing_ref,
+        )
 
         final_position_error_norm = float(
             np.linalg.norm(
@@ -1611,216 +1797,292 @@ def solve_numerical_IK_hybrid(
             )
         )
 
-
-        final_orientation_error_norm = float(
-            np.linalg.norm(
-                final_orientation_error
+        final_pitch_error_abs = float(
+            abs(
+                final_pitch_error
             )
         )
 
-
-        if (
-
+        position_converged = bool(
             final_position_error_norm
             <=
             tolerance
+        )
 
-            and
-
-            final_orientation_error_norm
+        pitch_converged = bool(
+            final_pitch_error_abs
             <=
-            orientation_tolerance
+            pitch_tolerance
+        )
 
-        ):
-
-            converged = True
-
-
-        # ====================================================
-        # 12. FINAL JOINT SOLUTION
-        # ====================================================
+        converged = bool(
+            position_converged
+            and
+            pitch_converged
+        )
 
         q_swing_des = (
             q_candidate.copy()
         )
 
+        final_posture_error = (
+            q_posture_ref
+            -
+            q_swing_des
+        )
 
-        if q_swing_des.shape != (
-            5,
-        ):
-
-            raise RuntimeError(
-                "q_swing_des phải có shape (5,), "
-                f"nhưng nhận được {q_swing_des.shape}."
+        final_posture_error_norm = float(
+            np.linalg.norm(
+                final_posture_error
             )
-
-
-        if not np.all(
-            np.isfinite(
-                q_swing_des
-            )
-        ):
-
-            raise RuntimeError(
-                "q_swing_des chứa NaN hoặc Inf."
-            )
-
-
-    # ========================================================
-    # 13. RESTORE REAL MUJOCO SIMULATION STATE
-    # ========================================================
+        )
 
     finally:
+        # ====================================================
+        # 9. RESTORE REAL MUJOCO STATE
+        # ====================================================
 
         data.qpos[
             :
         ] = qpos_original
 
-
         data.qvel[
             :
         ] = qvel_original
 
-
         mujoco.mj_forward(
             model,
-            data
+            data,
         )
 
+    # ========================================================
+    # 10. DIAGNOSTICS
+    # ========================================================
 
-    # ========================================================
-    # 14. DIAGNOSTICS
-    # ========================================================
+    final_tilt_error = np.array(
+        [
+            0.0,
+            final_pitch_error,
+        ],
+        dtype=float,
+    )
 
     diagnostics = {
+        "converged":
+            bool(
+                converged
+            ),
 
-        "converged": bool(
-            converged
-        ),
+        "position_converged":
+            bool(
+                position_converged
+            ),
 
+        "pitch_converged":
+            bool(
+                pitch_converged
+            ),
 
-        "iterations": int(
-            iterations
-        ),
+        # Compatibility with previous tilt-based version.
+        "tilt_converged":
+            bool(
+                pitch_converged
+            ),
 
+        "iterations":
+            int(
+                iterations
+            ),
 
-        # ----------------------------------------------------
-        # Complete 4D error
-        # ----------------------------------------------------
+        "final_error":
+            final_position_error.copy(),
 
-        "final_error": (
-            final_error.copy()
-        ),
+        "final_error_norm":
+            float(
+                np.linalg.norm(
+                    final_position_error
+                )
+            ),
 
+        "final_position_error":
+            final_position_error.copy(),
 
-        "final_error_norm": float(
-            final_error_norm
-        ),
+        "final_position_error_norm":
+            float(
+                np.linalg.norm(
+                    final_position_error
+                )
+            ),
 
+        "final_pitch_error":
+            float(
+                final_pitch_error
+            ),
 
-        # ----------------------------------------------------
-        # Position error
-        # ----------------------------------------------------
+        "final_pitch_error_abs":
+            float(
+                abs(
+                    final_pitch_error
+                )
+            ),
 
-        "final_position_error": (
-            final_position_error.copy()
-        ),
+        # Compatibility fields.
+        "final_tilt_error":
+            final_tilt_error.copy(),
 
+        "final_tilt_error_norm":
+            float(
+                abs(
+                    final_pitch_error
+                )
+            ),
 
-        "final_position_error_norm": float(
-            final_position_error_norm
-        ),
+        "final_orientation_error":
+            final_tilt_error.copy(),
 
+        "final_orientation_error_norm":
+            float(
+                abs(
+                    final_pitch_error
+                )
+            ),
 
-        # ----------------------------------------------------
-        # Pitch-only orientation error
-        # ----------------------------------------------------
+        "orientation_task_active":
+            True,
 
-        "final_orientation_error": (
-            final_orientation_error.copy()
-        ),
+        "pitch_task_active":
+            True,
 
+        "roll_task_active":
+            False,
 
-        "final_orientation_error_norm": float(
-            final_orientation_error_norm
-        ),
+        "method_used":
+            method_used,
 
+        "newton_iterations":
+            int(
+                newton_iterations
+            ),
 
-        # ----------------------------------------------------
-        # Numerical method
-        # ----------------------------------------------------
+        "gradient_iterations":
+            int(
+                gradient_iterations
+            ),
 
-        "method_used": (
-            method_used
-        ),
+        "secondary_only_iterations":
+            int(
+                secondary_only_iterations
+            ),
 
+        "sigma_min":
+            (
+                None
+                if sigma_min is None
+                else float(
+                    sigma_min
+                )
+            ),
 
-        "newton_iterations": int(
-            newton_iterations
-        ),
+        "swing_foot":
+            swing_foot,
 
+        "site_name":
+            site_name,
 
-        "gradient_iterations": int(
-            gradient_iterations
-        ),
-
-
-        "sigma_min": (
-
-            None
-
-            if sigma_min is None
-
-            else float(
-                sigma_min
-            )
-        ),
-
-
-        # ----------------------------------------------------
-        # Swing-leg information
-        # ----------------------------------------------------
-
-        "swing_foot": (
-            swing_foot
-        ),
-
-
-        "site_name": (
-            site_name
-        ),
-
-
-        "joint_names": (
+        "joint_names":
             list(
                 joint_names
-            )
-        ),
+            ),
 
+        "q_posture_ref":
+            q_posture_ref.copy(),
 
-        # ----------------------------------------------------
-        # Desired IK-site orientation
-        # ----------------------------------------------------
+        "R_swing_ref":
+            R_swing_ref.copy(),
 
-        # Retained only for backward compatibility.
-        # It is NOT part of the IK task.
-        "roll_swing_des": float(
-            roll_swing_des
-        ),
+        "k_posture":
+            float(
+                k_posture
+            ),
 
+        "k_roll":
+            float(
+                k_roll
+            ),
 
-        "pitch_swing_des": float(
-            pitch_swing_des
-        )
+        "k_pitch":
+            float(
+                k_pitch
+            ),
 
+        "pitch_motion_cost":
+            pitch_motion_cost.copy(),
+
+        "posture_joint_weights":
+            posture_joint_weights.copy(),
+
+        "final_posture_error":
+            final_posture_error.copy(),
+
+        "final_posture_error_norm":
+            float(
+                final_posture_error_norm
+            ),
+
+        "primary_step_norm_last":
+            float(
+                primary_step_norm_last
+            ),
+
+        "pitch_step_norm_last":
+            float(
+                pitch_step_norm_last
+            ),
+
+        "posture_step_norm_last":
+            float(
+                posture_step_norm_last
+            ),
+
+        "secondary_step_norm_last":
+            float(
+                secondary_step_norm_last
+            ),
+
+        "pitch_position_leakage_last":
+            float(
+                pitch_position_leakage_last
+            ),
+
+        "pitch_residual_last":
+            float(
+                pitch_residual_last
+            ),
+
+        "posture_augmented_leakage_last":
+            float(
+                posture_augmented_leakage_last
+            ),
+
+        "null_space_projection_error_last":
+            float(
+                null_space_projection_error_last
+            ),
+
+        # Legacy desired-orientation arguments are no longer
+        # used as Cartesian tasks.
+        "roll_swing_des":
+            float(
+                roll_swing_des
+            ),
+
+        "pitch_swing_des":
+            float(
+                pitch_swing_des
+            ),
     }
-
-
-    # ========================================================
-    # 15. RETURN
-    # ========================================================
 
     return (
         q_swing_des,
-        diagnostics
+        diagnostics,
     )

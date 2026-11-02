@@ -59,6 +59,7 @@ from gait_manager import initialize_gait_manager, update_gait_manager
 from swing_low_level_controller import (
     compute_swing_low_level_control,
     reset_swing_joint_velocity_reference,
+    reset_swing_low_level_state,
 )
 
 
@@ -161,9 +162,9 @@ T_DS = float(TIMING["T_DS"])
 
 FIRST_SWING_FOOT = "R"
 
-STEP_LENGTH = 0.03
+STEP_LENGTH = 0.05
 STEP_WIDTH = HOME_NOMINAL_STEP_WIDTH
-SWING_HEIGHT = 0.02
+SWING_HEIGHT = 0.04
 GROUND_HEIGHT = 0.0
 
 SIM_DURATION = 5.0
@@ -171,26 +172,66 @@ SIM_DURATION = 5.0
 # Startup:
 #   HOME DS -> SETTLE -> directional INITIAL_DS -> actual LO -> cyclic gait
 SETTLE_TIME = 0.50
-STARTUP_LIFTOFF_TIMEOUT = 1.20
+STARTUP_LIFTOFF_TIMEOUT = 2.00
 INITIAL_DS_SHIFT_TIME = 0.30
 
-# Before the first physical LO, use a small early-swing reference to lift
-# the selected foot. This does not change the physical gait phase.
-STARTUP_PRELIFTOFF_PHASE_MAX = 0.15
+# The first physical liftoff is allowed only after the measured CoM
+# has actually shifted toward the stance/support foot.
+#
+# Right foot swings first:
+#     left foot supports -> positive World-y shift required.
+#
+# Left foot swings first:
+#     right foot supports -> negative World-y shift required.
+STARTUP_COM_SHIFT_MIN = 0.015
+
+# Startup physical liftoff assistance.
+#
+# The first foot is unloaded and lifted vertically before the first
+# contact-switch LO event. Horizontal motion is held at the latched
+# liftoff position.
+STARTUP_PRELIFTOFF_PHASE_MAX = 0.225
 STARTUP_PRELIFTOFF_RAMP_TIME = 0.05
+
+# Cyclic DS -> SS transition policy.
+#
+# The physical FSM remains contact-synchronized:
+#
+#     DS_L_TO_R --LO_L--> RSS
+#     DS_R_TO_L --LO_R--> LSS
+#
+# During DS, the controller waits for:
+#   1) nominal DS time completed, and
+#   2) measured CoM transferred toward the incoming support.
+#
+# Then the outgoing foot is unloaded in the CURRENT MPC input and
+# lifted vertically until contact_switch detects the real LO edge.
+#
+# The phase reached at LO is retained as an offset for the following
+# single-support swing, so the swing reference does not reset to zero.
+CYCLIC_LIFTOFF_PHASE_MAX = 0.225
+CYCLIC_LIFTOFF_RAMP_TIME = 0.05
+CYCLIC_COM_SHIFT_MIN = 0.015
 
 # Future support points retained in the walking queue.
 SUPPORT_PLAN_LENGTH = 10
 
 # If an expected cyclic event does not occur sufficiently long after the
 # nominal phase duration, stop instead of inventing a contact transition.
-PHASE_EVENT_TIMEOUT_MARGIN = 0.30
+PHASE_EVENT_TIMEOUT_MARGIN = 1.0
 
 # QP
 QP_MAX_ITER = 10000
 QP_CONSTRAINT_TOLERANCE = 3e-4
 
 PRINT_EVERY_N_MPC = 20
+
+# Physical liftoff diagnostics.
+#
+# During the first swing command, print one compact physical/IK/PD snapshot
+# at this interval. These diagnostics are read-only and do not change the
+# controller or advance MuJoCo.
+LIFTOFF_DIAGNOSTIC_PERIOD = 0.05
 
 GRAVITY = 9.81
 
@@ -342,6 +383,131 @@ def mix_walking_joint_torque(
         raise ValueError("swing_foot phải là 'L', 'R' hoặc None.")
 
     return tau
+
+
+def get_ds_transition_spec(phase):
+    """
+    Return the physical DS -> SS transition definition.
+
+    World-y convention:
+        left foot  -> positive y
+        right foot -> negative y
+    """
+    if phase == "DS_L_TO_R":
+        return {
+            "outgoing_foot": "L",
+            "incoming_support": "R",
+            "support_direction_y": -1.0,
+            "expected_lo": "LO_L",
+        }
+
+    if phase == "DS_R_TO_L":
+        return {
+            "outgoing_foot": "R",
+            "incoming_support": "L",
+            "support_direction_y": +1.0,
+            "expected_lo": "LO_R",
+        }
+
+    raise ValueError(
+        f"Phase {phase!r} không phải directional double-support phase."
+    )
+
+
+def evaluate_weight_transfer_guard(
+    phase,
+    t_phase,
+    current_state,
+    W_p_L6,
+    W_p_R6,
+):
+    """
+    Algorithmic DS -> liftoff guard.
+
+    Liftoff assistance is allowed only when:
+        - nominal DS time has completed, and
+        - measured CoM has crossed sufficiently toward the incoming support.
+
+    This function does not modify the FSM, contact state, controller state,
+    or simulation.
+    """
+    spec = get_ds_transition_spec(phase)
+
+    feet_mid_y = 0.5 * (
+        float(W_p_L6[1]) + float(W_p_R6[1])
+    )
+
+    com_y = float(
+        np.asarray(current_state, dtype=float).reshape(13)[1]
+    )
+
+    signed_shift = (
+        float(spec["support_direction_y"])
+        * (com_y - feet_mid_y)
+    )
+
+    time_ready = bool(
+        float(t_phase) >= T_DS - 1e-12
+    )
+
+    com_ready = bool(
+        signed_shift >= CYCLIC_COM_SHIFT_MIN
+    )
+
+    return {
+        **spec,
+        "ready": bool(time_ready and com_ready),
+        "time_ready": time_ready,
+        "com_ready": com_ready,
+        "feet_mid_y": feet_mid_y,
+        "com_y": com_y,
+        "signed_shift": signed_shift,
+    }
+
+
+def compute_cyclic_liftoff_phase(current_time, start_time):
+    """
+    Smooth vertical liftoff phase used while the outgoing foot is still
+    physically in contact.
+    """
+    elapsed = max(
+        float(current_time) - float(start_time),
+        0.0,
+    )
+
+    ratio = min(
+        elapsed / CYCLIC_LIFTOFF_RAMP_TIME,
+        1.0,
+    )
+
+    return float(
+        CYCLIC_LIFTOFF_PHASE_MAX * ratio
+    )
+
+
+def continue_swing_phase(raw_swing_phase, phase_at_lo):
+    """
+    Continue the single-support swing from the phase already reached at LO.
+
+        raw gait phase : 0 -> 1
+        effective phase:
+            s = s_LO + (1 - s_LO) * raw
+
+    Therefore:
+        raw = 0 -> s = s_LO
+        raw = 1 -> s = 1
+    """
+    raw = float(
+        np.clip(raw_swing_phase, 0.0, 1.0)
+    )
+
+    offset = float(
+        np.clip(phase_at_lo, 0.0, 1.0)
+    )
+
+    return float(
+        offset + (1.0 - offset) * raw
+    )
 
 
 # ============================================================
@@ -807,6 +973,306 @@ def print_status(
 
 
 # ============================================================
+# PHYSICAL LIFTOFF DIAGNOSTICS
+# ============================================================
+
+def _get_foot_contact_diagnostics(
+    contact_state,
+    swing_foot,
+):
+    """
+    Return current physical floor-contact diagnostics for one foot.
+
+    This reads the output of State/get_contact_state.py only.
+    It does not modify contact state or gait logic.
+    """
+    if swing_foot == "L":
+        count = int(contact_state["left_contact_count"])
+        contacts = contact_state["left_contacts"]
+    elif swing_foot == "R":
+        count = int(contact_state["right_contact_count"])
+        contacts = contact_state["right_contacts"]
+    else:
+        raise ValueError("swing_foot phải là 'L' hoặc 'R'.")
+
+    positions = []
+    distances = []
+
+    for entry in contacts:
+        positions.append(
+            np.asarray(
+                entry["position"],
+                dtype=float,
+            ).reshape(3).copy()
+        )
+        distances.append(
+            float(
+                entry["distance"]
+            )
+        )
+
+    return count, positions, distances
+
+
+def print_liftoff_diagnostics(
+    data,
+    control_mode,
+    phase,
+    contact_state,
+    W_p_L6,
+    W_p_R6,
+    swing_result,
+    held_u0_MPC,
+    tau_command,
+    current=None,
+    label="LIFTOFF DEBUG",
+):
+    """
+    Read-only diagnostic snapshot for physical liftoff.
+
+    The purpose is to separate four possibilities:
+
+        1. swing trajectory is not commanding vertical lift,
+        2. IK does not generate the required joint motion,
+        3. PD torque is insufficient to realize the IK command,
+        4. the foot has almost lifted but MuJoCo still reports one or more
+           physical floor contacts.
+
+    No controller state is modified here.
+    No mj_step() is called here.
+    """
+    if swing_result is None:
+        print("\n" + "=" * 78)
+        print(f"{label}: no swing_result available")
+        print("=" * 78)
+        print(
+            "contact =",
+            [
+                int(contact_state["c_L"]),
+                int(contact_state["c_R"]),
+            ],
+            "| contact_count =",
+            [
+                int(contact_state["left_contact_count"]),
+                int(contact_state["right_contact_count"]),
+            ],
+        )
+        return
+
+    swing_foot = str(
+        swing_result.swing_foot
+    )
+
+    if swing_foot == "L":
+        W_p_actual = np.asarray(
+            W_p_L6,
+            dtype=float,
+        ).reshape(3)
+        commanded_mpc_fz = float(
+            held_u0_MPC[2]
+        )
+    elif swing_foot == "R":
+        W_p_actual = np.asarray(
+            W_p_R6,
+            dtype=float,
+        ).reshape(3)
+        commanded_mpc_fz = float(
+            held_u0_MPC[8]
+        )
+    else:
+        raise RuntimeError(
+            f"Unsupported swing foot in diagnostics: {swing_foot}"
+        )
+
+    W_p_des = np.asarray(
+        swing_result.W_p_swing_des,
+        dtype=float,
+    ).reshape(3)
+
+    W_v_des = np.asarray(
+        swing_result.W_v_swing_des,
+        dtype=float,
+    ).reshape(3)
+
+    q_actual = np.asarray(
+        swing_result.q_swing,
+        dtype=float,
+    ).reshape(5)
+
+    q_des = np.asarray(
+        swing_result.q_swing_des,
+        dtype=float,
+    ).reshape(5)
+
+    q_posture_ref = np.asarray(
+        swing_result.q_posture_ref,
+        dtype=float,
+    ).reshape(5)
+
+    q_error = (
+        q_des
+        -
+        q_actual
+    )
+
+    tau_swing = np.asarray(
+        swing_result.tau_swing,
+        dtype=float,
+    ).reshape(5)
+
+    contact_count, contact_positions, contact_distances = (
+        _get_foot_contact_diagnostics(
+            contact_state=contact_state,
+            swing_foot=swing_foot,
+        )
+    )
+
+    z_error = float(
+        W_p_des[2]
+        -
+        W_p_actual[2]
+    )
+
+    print("\n" + "=" * 78)
+    print(
+        f"{label} | t={data.time:.4f} s | "
+        f"mode={control_mode} | phase={phase}"
+    )
+    print("=" * 78)
+
+    print(
+        f"swing foot={swing_foot} | "
+        f"swing_phase={swing_result.swing_phase:.6f}"
+    )
+
+    print(
+        "physical contact =",
+        [
+            int(contact_state["c_L"]),
+            int(contact_state["c_R"]),
+        ],
+        "| contact_count [L,R] =",
+        [
+            int(contact_state["left_contact_count"]),
+            int(contact_state["right_contact_count"]),
+        ],
+        "| ncon =",
+        int(contact_state["ncon"]),
+    )
+
+    print(
+        f"{swing_foot} contact_count = {contact_count}"
+    )
+
+    if contact_count > 0:
+        print(
+            f"{swing_foot} contact positions ="
+        )
+        for i, position in enumerate(
+            contact_positions
+        ):
+            print(
+                f"  contact[{i}] pos={position} "
+                f"dist={contact_distances[i]:+.8f} m"
+            )
+    else:
+        print(
+            f"{swing_foot} contact positions = []"
+        )
+
+    print(
+        f"{swing_foot} foot actual xyz =",
+        W_p_actual,
+    )
+
+    print(
+        f"{swing_foot} foot desired xyz =",
+        W_p_des,
+    )
+
+    print(
+        f"{swing_foot} desired velocity xyz =",
+        W_v_des,
+    )
+
+    print(
+        f"{swing_foot} z actual/des/error = "
+        f"{W_p_actual[2]:+.7f} / "
+        f"{W_p_des[2]:+.7f} / "
+        f"{z_error:+.7f} m "
+        f"({1000.0 * z_error:+.3f} mm)"
+    )
+
+    print(
+        f"MPC commanded Fz_{swing_foot} = "
+        f"{commanded_mpc_fz:+.7f} N "
+        "(QP command, NOT measured GRF)"
+    )
+
+    if current is not None:
+        print(
+            "CoM actual =",
+            np.asarray(
+                current.x[0:3],
+                dtype=float,
+            ),
+        )
+
+    print(
+        "q actual      =",
+        q_actual,
+    )
+
+    print(
+        "q posture_ref =",
+        q_posture_ref,
+    )
+
+    print(
+        "q desired     =",
+        q_des,
+    )
+
+    print(
+        "q error       =",
+        q_error,
+    )
+
+    print(
+        "tau swing     =",
+        tau_swing,
+    )
+
+    print(
+        "full tau cmd  =",
+        np.asarray(
+            tau_command,
+            dtype=float,
+        ).reshape(10),
+    )
+
+    ik_diag = swing_result.ik_diagnostics
+
+    print(
+        "IK converged  =",
+        ik_diag.get("converged"),
+        "| IK iterations =",
+        ik_diag.get("iterations"),
+        "| method =",
+        ik_diag.get("method_used"),
+        "| final pos error norm =",
+        ik_diag.get("final_position_error_norm"),
+    )
+
+    print(
+        "posture step norm(last) =",
+        ik_diag.get("posture_step_norm_last"),
+        "| null projection error(last) =",
+        ik_diag.get("null_space_projection_error_last"),
+    )
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -888,6 +1354,28 @@ def main():
     startup_swing_command_start_time = None
     startup_command_liftoff_position = None
 
+    # Cyclic DS -> SS transition state.
+    #
+    # This state exists only while the outgoing foot is being physically
+    # unloaded/lifted inside DS. The FSM itself is still changed only by
+    # the real LO event from contact_switch.
+    cyclic_liftoff_active = False
+    cyclic_liftoff_ds_phase = None
+    cyclic_liftoff_foot = None
+    cyclic_liftoff_start_time = None
+    cyclic_liftoff_position = None
+
+    # Swing phase continuity across LO.
+    #
+    # Example:
+    #     DS liftoff phase reaches 0.225
+    #     contact_switch detects LO
+    #     SS swing continues from 0.225 instead of resetting to 0.0
+    swing_phase_offset = {
+        "L": 0.0,
+        "R": 0.0,
+    }
+
     # --------------------------------------------------------
     # 5. Nominal CoM state for DCM reference
     #
@@ -920,9 +1408,16 @@ def main():
     last_mpc_compute_time = 0.0
     last_W_p_CoM_ref = standing_reference["W_p_CoM_ref"].copy()
 
+    # Last available swing result is retained only for diagnostics.
+    # It lets us print the final IK/PD state immediately before a startup FAULT.
+    last_swing_result = None
+
+    # Next simulation time at which physical-liftoff diagnostics are printed.
+    next_liftoff_diagnostic_time = 0.0
+
     logger = SimulationLogger()
 
-    reset_swing_joint_velocity_reference(None)
+    reset_swing_low_level_state(None)
 
     # --------------------------------------------------------
     # 8. Timing state
@@ -1002,7 +1497,28 @@ def main():
                 )
 
                 if startup_output.faulted or startup_state.stage == STAGE_FAULT:
+                    current = (
+                        current
+                        if current is not None
+                        else get_current_state_mpc(model, data)
+                    )
+
+                    print_liftoff_diagnostics(
+                        data=data,
+                        control_mode="STARTUP_FAULT",
+                        phase=startup_output.initial_ds_phase,
+                        contact_state=contact_state,
+                        W_p_L6=W_p_L6,
+                        W_p_R6=W_p_R6,
+                        swing_result=last_swing_result,
+                        held_u0_MPC=held_u0_MPC,
+                        tau_command=tau_command,
+                        current=current,
+                        label="STARTUP FAULT SNAPSHOT",
+                    )
+
                     data.ctrl[:] = 0.0
+
                     raise RuntimeError(
                         "Walking startup FAULT: "
                         f"{startup_output.fault_reason}"
@@ -1043,31 +1559,84 @@ def main():
                     )
 
                 # ------------------------------------------------
-                # After nominal initial weight shift, command the selected
-                # first foot to lift. The physical phase remains INITIAL_DS
-                # until the real LO edge is detected.
+                # After the minimum INITIAL_DS weight-shift time, command
+                # the first foot to lift ONLY when the measured CoM has
+                # actually shifted far enough toward the support foot.
+                #
+                # IMPORTANT:
+                #
+                # The nominal timer alone must never force physical liftoff.
                 # ------------------------------------------------
                 if (
                     startup_state.stage == STAGE_INITIAL_DS
                     and not startup_swing_command_active
-                    and startup_output.t_initial_ds
-                    >= INITIAL_DS_SHIFT_TIME - 1e-12
                 ):
-                    startup_swing_command_active = True
-                    startup_swing_command_start_time = float(data.time)
+                    current = (
+                        current
+                        if current is not None
+                        else get_current_state_mpc(model, data)
+                    )
+
+                    feet_mid_y = 0.5 * (
+                        float(W_p_L6[1])
+                        +
+                        float(W_p_R6[1])
+                    )
 
                     if FIRST_SWING_FOOT == "R":
-                        startup_command_liftoff_position = W_p_R6.copy()
+                        # Right foot swings -> left foot is support.
+                        # Left foot is on the positive World-y side.
+                        support_direction_y = +1.0
                     else:
-                        startup_command_liftoff_position = W_p_L6.copy()
+                        # Left foot swings -> right foot is support.
+                        # Right foot is on the negative World-y side.
+                        support_direction_y = -1.0
 
-                    reset_swing_joint_velocity_reference(FIRST_SWING_FOOT)
-                    force_mpc_update = True
-
-                    print(
-                        f"[t={data.time:.4f}] first swing command enabled: "
-                        f"foot={FIRST_SWING_FOOT}"
+                    signed_com_shift = (
+                        support_direction_y
+                        *
+                        (
+                            float(current.x[1])
+                            -
+                            feet_mid_y
+                        )
                     )
+
+                    shift_time_ready = bool(
+                        startup_output.t_initial_ds
+                        >= INITIAL_DS_SHIFT_TIME - 1e-12
+                    )
+
+                    com_ready = bool(
+                        signed_com_shift
+                        >= STARTUP_COM_SHIFT_MIN
+                    )
+
+                    if shift_time_ready and com_ready:
+                        startup_swing_command_active = True
+                        startup_swing_command_start_time = float(data.time)
+
+                        # Print the first physical-liftoff diagnostic immediately
+                        # after the swing controller produces its first result.
+                        next_liftoff_diagnostic_time = float(data.time)
+
+                        if FIRST_SWING_FOOT == "R":
+                            startup_command_liftoff_position = W_p_R6.copy()
+                        else:
+                            startup_command_liftoff_position = W_p_L6.copy()
+
+                        reset_swing_joint_velocity_reference(
+                            FIRST_SWING_FOOT
+                        )
+
+                        force_mpc_update = True
+
+                        print(
+                            f"[t={data.time:.4f}] first swing command enabled: "
+                            f"foot={FIRST_SWING_FOOT} | "
+                            f"CoM_y={current.x[1]:.5f} | "
+                            f"signed_shift={signed_com_shift:.5f}"
+                        )
 
                 # ------------------------------------------------
                 # REAL first LO -> handoff to cyclic gait manager.
@@ -1188,6 +1757,105 @@ def main():
                         f"events={gait_output.events}"
                     )
 
+                # ------------------------------------------------
+                # CYCLIC DS -> SS TRANSITION POLICY
+                #
+                # The FSM remains contact-driven. This layer only creates the
+                # physical conditions required for the expected LO event.
+                # ------------------------------------------------
+                if (
+                    gait_output.current_phase in ("DS_L_TO_R", "DS_R_TO_L")
+                    and not cyclic_liftoff_active
+                ):
+                    current = (
+                        current
+                        if current is not None
+                        else get_current_state_mpc(model, data)
+                    )
+
+                    transfer_guard = evaluate_weight_transfer_guard(
+                        phase=gait_output.current_phase,
+                        t_phase=gait_output.t_phase,
+                        current_state=current.x,
+                        W_p_L6=W_p_L6,
+                        W_p_R6=W_p_R6,
+                    )
+
+                    if transfer_guard["ready"]:
+                        cyclic_liftoff_active = True
+                        cyclic_liftoff_ds_phase = gait_output.current_phase
+                        cyclic_liftoff_foot = transfer_guard["outgoing_foot"]
+                        cyclic_liftoff_start_time = float(data.time)
+
+                        if cyclic_liftoff_foot == "L":
+                            cyclic_liftoff_position = W_p_L6.copy()
+                        else:
+                            cyclic_liftoff_position = W_p_R6.copy()
+
+                        # New physical swing begins here. Latch a fresh
+                        # posture/orientation reference for the outgoing leg.
+                        reset_swing_low_level_state(
+                            cyclic_liftoff_foot
+                        )
+
+                        # Re-solve MPC at the same x_k so the outgoing-foot
+                        # current wrench becomes zero before applying torque.
+                        force_mpc_update = True
+                        next_liftoff_diagnostic_time = float(data.time)
+
+                        print(
+                            f"[t={data.time:.4f}] cyclic liftoff start: "
+                            f"phase={gait_output.current_phase} | "
+                            f"outgoing={cyclic_liftoff_foot} | "
+                            f"incoming={transfer_guard['incoming_support']} | "
+                            f"signed_shift={transfer_guard['signed_shift']:+.5f}"
+                        )
+
+                # Real LO has moved the physical FSM from DS to SS.
+                #
+                # Preserve the phase already reached during the liftoff
+                # transition so the SS swing reference is continuous.
+                if (
+                    cyclic_liftoff_active
+                    and gait_output.current_phase != cyclic_liftoff_ds_phase
+                ):
+                    expected_event = (
+                        "LO_L"
+                        if cyclic_liftoff_foot == "L"
+                        else "LO_R"
+                    )
+
+                    if gait_output.transition_event != expected_event:
+                        data.ctrl[:] = 0.0
+                        raise RuntimeError(
+                            "Unexpected event during cyclic liftoff: "
+                            f"foot={cyclic_liftoff_foot}, "
+                            f"expected={expected_event}, "
+                            f"received={gait_output.transition_event}."
+                        )
+
+                    phase_at_lo = compute_cyclic_liftoff_phase(
+                        current_time=data.time,
+                        start_time=cyclic_liftoff_start_time,
+                    )
+
+                    swing_phase_offset[
+                        cyclic_liftoff_foot
+                    ] = phase_at_lo
+
+                    print(
+                        f"[t={data.time:.4f}] cyclic liftoff complete: "
+                        f"foot={cyclic_liftoff_foot} | "
+                        f"event={gait_output.transition_event} | "
+                        f"swing phase continues from {phase_at_lo:.4f}"
+                    )
+
+                    cyclic_liftoff_active = False
+                    cyclic_liftoff_ds_phase = None
+                    cyclic_liftoff_foot = None
+                    cyclic_liftoff_start_time = None
+                    cyclic_liftoff_position = None
+
                 T_phase_nominal = float(
                     get_nominal_phase_duration(
                         gait_output.current_phase,
@@ -1231,6 +1899,9 @@ def main():
                             if gait_output.transition_event == "TD_L"
                             else "R"
                         )
+
+                        # This swing cycle is complete.
+                        swing_phase_offset[touched_foot] = 0.0
                         reset_swing_joint_velocity_reference(touched_foot)
 
                     print(
@@ -1270,8 +1941,26 @@ def main():
                 control_mode = "CYCLIC"
                 current_phase = gait_output.current_phase
                 current_t_phase = gait_output.t_phase
-                current_swing_foot = gait_output.swing_foot
-                current_swing_phase = gait_output.swing_phase
+
+                if cyclic_liftoff_active:
+                    current_swing_foot = cyclic_liftoff_foot
+                    current_swing_phase = compute_cyclic_liftoff_phase(
+                        current_time=data.time,
+                        start_time=cyclic_liftoff_start_time,
+                    )
+
+                elif gait_output.swing_foot is not None:
+                    current_swing_foot = gait_output.swing_foot
+                    current_swing_phase = continue_swing_phase(
+                        raw_swing_phase=gait_output.swing_phase,
+                        phase_at_lo=swing_phase_offset[
+                            gait_output.swing_foot
+                        ],
+                    )
+
+                else:
+                    current_swing_foot = None
+                    current_swing_phase = None
 
             # ====================================================
             # E. MPC update schedule
@@ -1410,6 +2099,23 @@ def main():
                         else:
                             contact_schedule[0, :] = np.array([0, 1])
 
+                    # Cyclic DS -> SS transition:
+                    # unload only the outgoing foot in the CURRENT QP input.
+                    # The physical contact schedule / FSM is still changed
+                    # only after contact_switch detects the real LO edge.
+                    if (
+                        control_mode == "CYCLIC"
+                        and cyclic_liftoff_active
+                    ):
+                        if cyclic_liftoff_foot == "L":
+                            contact_schedule[0, :] = np.array([0, 1])
+                        elif cyclic_liftoff_foot == "R":
+                            contact_schedule[0, :] = np.array([1, 0])
+                        else:
+                            raise RuntimeError(
+                                "cyclic_liftoff_active nhưng foot không hợp lệ."
+                            )
+
                     if hold_nominal_at_boundary:
                         propagate_nominal_com = False
                         W_v_CoM_nominal_hold[:] = 0.0
@@ -1513,19 +2219,33 @@ def main():
                     STARTUP_PRELIFTOFF_PHASE_MAX * ramp_ratio
                 )
 
-                # INITIAL_DS queue:
-                #   [outgoing, incoming, first swing target, ...]
-                first_foothold = np.asarray(
-                    support_points[2],
-                    dtype=float,
-                ).reshape(3)
+                # ------------------------------------------------
+                # PRE-LIFTOFF:
+                #
+                # While the selected swing foot is still physically in
+                # contact with the floor, do NOT command horizontal motion.
+                #
+                # The pre-liftoff trajectory therefore keeps:
+                #
+                #     x_des = x_liftoff
+                #     y_des = y_liftoff
+                #
+                # and uses only the vertical part of the quintic swing
+                # trajectory to unload / lift the foot.
+                #
+                # The planned forward foothold support_points[2] becomes
+                # active only after the real LO event and cyclic handoff.
+                # ------------------------------------------------
+                preliftoff_target = (
+                    startup_command_liftoff_position.copy()
+                )
 
                 swing_result = compute_swing_low_level_control(
                     model=model,
                     data=data,
                     swing_foot=FIRST_SWING_FOOT,
                     W_p_liftoff=startup_command_liftoff_position,
-                    W_p_foothold=first_foothold,
+                    W_p_foothold=preliftoff_target,
                     swing_phase=float(preliftoff_phase),
                     T_swing=T_SS,
                     swing_height=SWING_HEIGHT,
@@ -1541,6 +2261,50 @@ def main():
 
             elif (
                 control_mode == "CYCLIC"
+                and cyclic_liftoff_active
+            ):
+                if cyclic_liftoff_foot not in ("L", "R"):
+                    raise RuntimeError(
+                        "Cyclic liftoff transition thiếu outgoing foot."
+                    )
+
+                if cyclic_liftoff_position is None:
+                    raise RuntimeError(
+                        "Cyclic liftoff transition thiếu latched foot position."
+                    )
+
+                liftoff_phase = compute_cyclic_liftoff_phase(
+                    current_time=data.time,
+                    start_time=cyclic_liftoff_start_time,
+                )
+
+                # DS liftoff transition is vertical-only:
+                #     x_des = x_start
+                #     y_des = y_start
+                # The regular planned foothold becomes active after real LO.
+                vertical_target = cyclic_liftoff_position.copy()
+
+                swing_result = compute_swing_low_level_control(
+                    model=model,
+                    data=data,
+                    swing_foot=cyclic_liftoff_foot,
+                    W_p_liftoff=cyclic_liftoff_position,
+                    W_p_foothold=vertical_target,
+                    swing_phase=liftoff_phase,
+                    T_swing=T_SS,
+                    swing_height=SWING_HEIGHT,
+                )
+
+                tau_command = mix_walking_joint_torque(
+                    tau_mpc=tau_mpc,
+                    swing_foot=cyclic_liftoff_foot,
+                    tau_swing=swing_result.tau_swing,
+                )
+
+                current_swing_phase = liftoff_phase
+
+            elif (
+                control_mode == "CYCLIC"
                 and gait_output.swing_foot is not None
             ):
                 if gait_output.W_p_liftoff is None:
@@ -1553,16 +2317,25 @@ def main():
                         "Cyclic swing thiếu W_p_foothold."
                     )
 
+                effective_swing_phase = continue_swing_phase(
+                    raw_swing_phase=gait_output.swing_phase,
+                    phase_at_lo=swing_phase_offset[
+                        gait_output.swing_foot
+                    ],
+                )
+
                 swing_result = compute_swing_low_level_control(
                     model=model,
                     data=data,
                     swing_foot=gait_output.swing_foot,
                     W_p_liftoff=gait_output.W_p_liftoff,
                     W_p_foothold=gait_output.W_p_foothold,
-                    swing_phase=gait_output.swing_phase,
+                    swing_phase=effective_swing_phase,
                     T_swing=T_SS,
                     swing_height=SWING_HEIGHT,
                 )
+
+                current_swing_phase = effective_swing_phase
 
                 tau_command = mix_walking_joint_torque(
                     tau_mpc=tau_mpc,
@@ -1578,6 +2351,70 @@ def main():
 
             if not np.all(np.isfinite(tau_command)):
                 raise RuntimeError("tau_command chứa NaN hoặc Inf.")
+
+            # ====================================================
+            # G2. Physical liftoff diagnostics
+            #
+            # Read-only:
+            #   - no controller state modification,
+            #   - no contact-state modification,
+            #   - no mj_step().
+            # ====================================================
+            if swing_result is not None:
+                last_swing_result = swing_result
+
+                liftoff_debug_active = bool(
+                    (
+                        control_mode == "INITIAL_DS"
+                        and startup_swing_command_active
+                    )
+                    or
+                    (
+                        control_mode == "CYCLIC"
+                        and cyclic_liftoff_active
+                    )
+                )
+
+                if (
+                    liftoff_debug_active
+                    and float(data.time)
+                    >= next_liftoff_diagnostic_time - 1e-12
+                ):
+                    current = (
+                        current
+                        if current is not None
+                        else get_current_state_mpc(model, data)
+                    )
+
+                    diagnostic_label = (
+                        "CYCLIC LIFTOFF DEBUG"
+                        if (
+                            control_mode == "CYCLIC"
+                            and cyclic_liftoff_active
+                        )
+                        else
+                        "PRE-LIFTOFF DEBUG"
+                    )
+
+                    print_liftoff_diagnostics(
+                        data=data,
+                        control_mode=control_mode,
+                        phase=current_phase,
+                        contact_state=contact_state,
+                        W_p_L6=W_p_L6,
+                        W_p_R6=W_p_R6,
+                        swing_result=swing_result,
+                        held_u0_MPC=held_u0_MPC,
+                        tau_command=tau_command,
+                        current=current,
+                        label=diagnostic_label,
+                    )
+
+                    next_liftoff_diagnostic_time = (
+                        float(data.time)
+                        +
+                        LIFTOFF_DIAGNOSTIC_PERIOD
+                    )
 
             # ====================================================
             # H. Apply u_k / tau_k to MuJoCo -- no step yet
