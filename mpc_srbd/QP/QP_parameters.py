@@ -31,18 +31,18 @@ import numpy as np
 Q = np.diag([
     50.0,   # px
     50.0,   # py
-    100.0,   # pz
+    150.0,   # pz
 
     50.0,   # roll
     50.0,   # pitch
-    100.0,   # yaw
+    150.0,   # yaw
 
     1.0,     # vx
     1.0,     # vy
     1.0,     # vz
 
-    1.0,    # wx
-    1.0,    # wy
+    10.0,    # wx
+    10.0,    # wy
     1.0,     # wz
 
     0.0      # augmented constant
@@ -63,15 +63,15 @@ Q = np.diag([
 # ]
 #
 # Force weights  = 1e-4
-# Moment weights = 1e-3
+# Moment weights = 1e-4
 # ============================================================
 
 R = np.diag([
     1e-4, 1e-4, 1e-4,   # Left foot force
-    1e-3, 1e-3, 1e-3,   # Left foot moment
+    1e-4, 1e-4, 1e-4,   # Left foot moment
 
     1e-4, 1e-4, 1e-4,   # Right foot force
-    1e-3, 1e-3, 1e-3    # Right foot moment
+    1e-4, 1e-4, 1e-4    # Right foot moment
 ])
 
 
