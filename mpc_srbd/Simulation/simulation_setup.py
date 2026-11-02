@@ -1,8 +1,60 @@
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 
-import numpy as np
 import mujoco
+import numpy as np
+
+
+# ============================================================
+# PATH SETUP
+#
+# simulation_setup.py is a reusable module.
+#
+# It must be importable directly from:
+#
+#     Simulation/
+#
+# without requiring the caller to modify sys.path first.
+# ============================================================
+
+SIMULATION_DIR = (
+    Path(__file__).resolve().parent
+)
+
+MPC_SRBD_DIR = (
+    SIMULATION_DIR.parent
+)
+
+STATE_DIR = (
+    MPC_SRBD_DIR
+    /
+    "State"
+)
+
+QP_DIR = (
+    MPC_SRBD_DIR
+    /
+    "QP"
+)
+
+
+for directory in (
+    MPC_SRBD_DIR,
+    STATE_DIR,
+    QP_DIR,
+):
+
+    directory_str = str(
+        directory
+    )
+
+    if directory_str not in sys.path:
+
+        sys.path.insert(
+            0,
+            directory_str
+        )
 
 
 # ============================================================
@@ -10,24 +62,19 @@ import mujoco
 # ============================================================
 
 from get_current_state_mpc import (
-    get_current_state_mpc
+    get_current_state_mpc,
 )
 
 from mass_CoM import (
-    get_mass_CoM
+    get_mass_CoM,
 )
 
 from W_inertia_CoM import (
-    get_W_inertia_CoM
+    get_W_inertia_CoM,
 )
 
-
-# ============================================================
-# COMMAND
-# ============================================================
-
-from reference_generator import (
-    ReferenceGenerator
+from get_contact_state import (
+    build_contact_state_map,
 )
 
 
@@ -36,7 +83,7 @@ from reference_generator import (
 # ============================================================
 
 from QP_solver import (
-    QPSolver
+    QPSolver,
 )
 
 
@@ -47,8 +94,19 @@ from QP_solver import (
 @dataclass
 class SimulationSetup:
     """
-    Common objects and parameters required by SRBD-MPC
-    simulation scenarios.
+    Common static resources required by SRBD-MPC simulations.
+
+    This setup is deliberately independent of:
+
+        - standing reference
+        - DCM reference
+        - foothold generator
+        - gait FSM
+        - swing trajectory
+        - walking controller
+
+    Those components belong to the corresponding higher-level
+    simulation/controller modules.
     """
 
     # --------------------------------------------------------
@@ -66,7 +124,24 @@ class SimulationSetup:
 
     dt_sim: float
 
+    horizon: int
+
+    dt_mpc: float
+
+    dt_mpc_update: float
+
     steps_per_mpc_update: int
+
+    prediction_horizon_time: float
+
+
+    # --------------------------------------------------------
+    # MuJoCo initialization
+    # --------------------------------------------------------
+
+    home_key_id: int
+
+    home_key_name: str
 
 
     # --------------------------------------------------------
@@ -86,12 +161,195 @@ class SimulationSetup:
 
 
     # --------------------------------------------------------
-    # MPC components
+    # Contact detection resources
+    #
+    # Built ONCE and reused throughout simulation.
     # --------------------------------------------------------
 
-    reference_generator: ReferenceGenerator
+    contact_map: dict
+
+
+    # --------------------------------------------------------
+    # QP
+    # --------------------------------------------------------
 
     qp_solver: QPSolver
+
+
+# ============================================================
+# SCALAR VALIDATION
+# ============================================================
+
+def _validate_positive_float(
+    value,
+    name,
+):
+    """
+    Validate positive finite scalar.
+    """
+
+    value = float(
+        value
+    )
+
+
+    if not np.isfinite(
+        value
+    ):
+
+        raise ValueError(
+            f"{name} chứa NaN hoặc Inf."
+        )
+
+
+    if value <= 0.0:
+
+        raise ValueError(
+            f"{name} phải lớn hơn 0."
+        )
+
+
+    return value
+
+
+# ============================================================
+# INTEGER VALIDATION
+# ============================================================
+
+def _validate_positive_integer(
+    value,
+    name,
+):
+
+    # --------------------------------------------------------
+    # Avoid silently accepting:
+    #
+    #     10.5 -> int(10.5) -> 10
+    # --------------------------------------------------------
+
+    value_float = float(
+        value
+    )
+
+
+    if not np.isfinite(
+        value_float
+    ):
+
+        raise ValueError(
+            f"{name} chứa NaN hoặc Inf."
+        )
+
+
+    value_int = int(
+        round(
+            value_float
+        )
+    )
+
+
+    if not np.isclose(
+        value_float,
+        value_int,
+        atol=1e-12,
+        rtol=0.0,
+    ):
+
+        raise ValueError(
+            f"{name} phải là số nguyên."
+        )
+
+
+    if value_int <= 0:
+
+        raise ValueError(
+            f"{name} phải lớn hơn 0."
+        )
+
+
+    return value_int
+
+
+# ============================================================
+# VALIDATE TIMING MULTIPLE
+# ============================================================
+
+def _compute_integer_step_ratio(
+    larger_dt,
+    smaller_dt,
+    name,
+):
+    """
+    Compute:
+
+        larger_dt / smaller_dt
+
+    and require the result to be an integer.
+
+    Used for:
+
+        dt_mpc_update / dt_sim
+
+    because actual MPC updates must occur exactly on MuJoCo
+    physics-step boundaries.
+    """
+
+    larger_dt = _validate_positive_float(
+        larger_dt,
+        "larger_dt",
+    )
+
+
+    smaller_dt = _validate_positive_float(
+        smaller_dt,
+        "smaller_dt",
+    )
+
+
+    steps = int(
+
+        round(
+
+            larger_dt
+
+            /
+
+            smaller_dt
+        )
+    )
+
+
+    if steps <= 0:
+
+        raise ValueError(
+            f"{name}: số bước phải > 0."
+        )
+
+
+    reconstructed_dt = (
+
+        steps
+
+        *
+
+        smaller_dt
+    )
+
+
+    if not np.isclose(
+        reconstructed_dt,
+        larger_dt,
+        atol=1e-12,
+        rtol=0.0,
+    ):
+
+        raise ValueError(
+            f"{name}: {larger_dt} phải là bội số nguyên "
+            f"của {smaller_dt}."
+        )
+
+
+    return steps
 
 
 # ============================================================
@@ -110,135 +368,113 @@ def initialize_simulation(
     qp_max_iter=1000,
     qp_polishing=True,
     qp_enable_warm_start=False,
-    qp_constraint_tolerance=1e-4
+    qp_constraint_tolerance=1e-4,
+    print_initialization=True,
 ):
     """
-    Initialize all common components required by an SRBD-MPC
-    MuJoCo simulation.
+    Initialize common resources for SRBD-MPC simulation.
 
-    Processing sequence
-    -------------------
+    Architecture
+    ------------
 
         XML
          |
          v
-    MuJoCo model/data
+        MuJoCo model/data
          |
          v
-    Simulation timing
+        home keyframe
          |
          v
-    Home keyframe reset
+        mj_forward + mj_subtreeVel
+         |
+         +----------------------+
+         |                      |
+         v                      v
+    SRBD constants         contact map
          |
          v
-    MuJoCo forward update
+    current MPC state x0
          |
          v
-    Constant SRBD parameters
-         |
-         v
-    Initial MPC state x_0
-         |
-         v
-    ReferenceGenerator
-         |
-         v
-    QPSolver
+       QP solver
+
+
+    Important
+    ---------
+
+    This function does NOT create:
+
+        - walking reference
+        - DCM reference
+        - standing reference
+        - footholds
+        - gait phase
+        - contact schedule
+        - swing trajectory
+
+    Those signals are scenario-dependent and must be generated
+    outside this setup.
+
+
+    Timing convention
+    -----------------
+
+    dt_sim
+        MuJoCo physics timestep.
+
+
+    dt_mpc_update
+        Actual MPC solve/update period.
+
+        Must satisfy:
+
+            dt_mpc_update
+                =
+            integer * dt_sim
+
+
+    dt_mpc
+        MPC prediction discretization interval.
+
+        This is NOT required to equal dt_mpc_update.
+
+        For current walking architecture:
+
+            dt_mpc = T_step / N
 
 
     Parameters
     ----------
     xml_path : str or pathlib.Path
 
-        Path to MuJoCo scene XML.
+        MuJoCo scene XML.
 
 
     horizon : int
 
-        MPC prediction horizon:
-
-            N
+        MPC horizon N.
 
 
     dt_mpc : float
 
-        MPC prediction discretization period.
+        MPC prediction discretization period [s].
 
 
     dt_mpc_update : float
 
-        Actual MPC control update period.
+        Actual MPC solve/update period [s].
 
 
     home_key_name : str
 
-        MuJoCo keyframe used to initialize the robot.
-
-        Default:
-
-            "home"
-
-
-    qp_verbose : bool
-
-        Enable OSQP terminal output.
-
-
-    qp_eps_abs : float
-
-        OSQP absolute convergence tolerance.
-
-
-    qp_eps_rel : float
-
-        OSQP relative convergence tolerance.
-
-
-    qp_max_iter : int
-
-        Maximum OSQP iterations.
-
-
-    qp_polishing : bool
-
-        Enable OSQP polishing.
-
-
-    qp_enable_warm_start : bool
-
-        Enable OSQP warm start.
-
-
-    qp_constraint_tolerance : float
-
-        Maximum accepted post-solve constraint violation.
+        MuJoCo home keyframe.
 
 
     Returns
     -------
     setup : SimulationSetup
-
-        Common simulation setup containing:
-
-            setup.model
-
-            setup.data
-
-            setup.dt_sim
-
-            setup.steps_per_mpc_update
-
-            setup.mass_CoM
-
-            setup.W_inertia_CoM_q0
-
-            setup.x_initial
-
-            setup.reference_generator
-
-            setup.qp_solver
     """
-
 
     # ========================================================
     # 1. INPUT VALIDATION
@@ -256,24 +492,73 @@ def initialize_simulation(
         )
 
 
-    if horizon <= 0:
-
-        raise ValueError(
-            "horizon phải lớn hơn 0."
+    horizon = (
+        _validate_positive_integer(
+            horizon,
+            "horizon",
         )
+    )
 
 
-    if dt_mpc <= 0.0:
-
-        raise ValueError(
-            "dt_mpc phải lớn hơn 0."
+    dt_mpc = (
+        _validate_positive_float(
+            dt_mpc,
+            "dt_mpc",
         )
+    )
 
 
-    if dt_mpc_update <= 0.0:
+    dt_mpc_update = (
+        _validate_positive_float(
+            dt_mpc_update,
+            "dt_mpc_update",
+        )
+    )
+
+
+    qp_eps_abs = (
+        _validate_positive_float(
+            qp_eps_abs,
+            "qp_eps_abs",
+        )
+    )
+
+
+    qp_eps_rel = (
+        _validate_positive_float(
+            qp_eps_rel,
+            "qp_eps_rel",
+        )
+    )
+
+
+    qp_constraint_tolerance = (
+        _validate_positive_float(
+            qp_constraint_tolerance,
+            "qp_constraint_tolerance",
+        )
+    )
+
+
+    qp_max_iter = (
+        _validate_positive_integer(
+            qp_max_iter,
+            "qp_max_iter",
+        )
+    )
+
+
+    home_key_name = str(
+        home_key_name
+    )
+
+
+    if len(
+        home_key_name
+    ) == 0:
 
         raise ValueError(
-            "dt_mpc_update phải lớn hơn 0."
+            "home_key_name không được rỗng."
         )
 
 
@@ -282,6 +567,7 @@ def initialize_simulation(
     # ========================================================
 
     model = mujoco.MjModel.from_xml_path(
+
         str(
             xml_path
         )
@@ -302,38 +588,62 @@ def initialize_simulation(
     )
 
 
-    steps_per_mpc_update = int(
-        round(
-            dt_mpc_update
-            /
+    if (
+        not np.isfinite(
             dt_sim
+        )
+        or
+        dt_sim <= 0.0
+    ):
+
+        raise RuntimeError(
+            "MuJoCo model.opt.timestep không hợp lệ."
+        )
+
+
+    # --------------------------------------------------------
+    # Actual MPC solve period must align exactly with
+    # MuJoCo integration steps.
+    # --------------------------------------------------------
+
+    steps_per_mpc_update = (
+        _compute_integer_step_ratio(
+
+            larger_dt=(
+                dt_mpc_update
+            ),
+
+            smaller_dt=(
+                dt_sim
+            ),
+
+            name=(
+                "dt_mpc_update / dt_sim"
+            ),
         )
     )
 
 
     # --------------------------------------------------------
-    # MPC update period must correspond to an integer number
-    # of MuJoCo integration steps:
+    # Prediction horizon duration.
+    #
+    # Note:
+    #
+    #     horizon * dt_mpc
+    #
+    # is independent from:
     #
     #     dt_mpc_update
-    #
-    #         =
-    #
-    #     steps_per_mpc_update * dt_sim
     # --------------------------------------------------------
 
-    if not np.isclose(
-        steps_per_mpc_update
-        *
-        dt_sim,
-        dt_mpc_update,
-        atol=1e-12
-    ):
+    prediction_horizon_time = (
 
-        raise ValueError(
-            "dt_mpc_update phải là bội số nguyên "
-            "của dt_sim."
-        )
+        horizon
+
+        *
+
+        dt_mpc
+    )
 
 
     # ========================================================
@@ -341,46 +651,50 @@ def initialize_simulation(
     # ========================================================
 
     home_key_id = mujoco.mj_name2id(
+
         model,
+
         mujoco.mjtObj.mjOBJ_KEY,
-        home_key_name
+
+        home_key_name,
     )
 
 
     if home_key_id < 0:
 
         raise RuntimeError(
-            f'Không tìm thấy keyframe "{home_key_name}" '
-            "trong XML."
+            f"Không tìm thấy keyframe "
+            f"'{home_key_name}' trong XML."
         )
 
 
-    # --------------------------------------------------------
-    # Reset robot state to the selected keyframe.
-    # --------------------------------------------------------
-
     mujoco.mj_resetDataKeyframe(
+
         model,
+
         data,
-        home_key_id
+
+        home_key_id,
     )
 
 
     # --------------------------------------------------------
-    # Update MuJoCo derived quantities at q0.
+    # Update all MuJoCo derived quantities at q0.
     #
-    # These operations do not advance simulation time.
+    # IMPORTANT:
+    #
+    # These functions do NOT advance simulation time.
     # --------------------------------------------------------
 
     mujoco.mj_forward(
         model,
-        data
+        data,
     )
 
 
     mujoco.mj_subtreeVel(
         model,
-        data
+        data,
     )
 
 
@@ -388,50 +702,153 @@ def initialize_simulation(
     # 5. CONSTANT SRBD PARAMETERS
     # ========================================================
 
-    mass_CoM = get_mass_CoM(
-        model
-    )
+    mass_CoM = float(
 
-
-    # --------------------------------------------------------
-    # Freeze CoM inertia tensor at the initial configuration:
-    #
-    #     q = q0
-    #
-    # Current SRBD-MPC implementation keeps this inertia
-    # constant during simulation.
-    # --------------------------------------------------------
-
-    W_inertia_CoM_q0 = (
-        get_W_inertia_CoM(
-            model,
-            data
+        get_mass_CoM(
+            model
         )
     )
+
+
+    if (
+        not np.isfinite(
+            mass_CoM
+        )
+        or
+        mass_CoM <= 0.0
+    ):
+
+        raise RuntimeError(
+            "mass_CoM không hợp lệ."
+        )
+
+
+    # --------------------------------------------------------
+    # Freeze whole-body inertia at home configuration q0.
+    #
+    # Current SRBD model treats:
+    #
+    #     ICoM = ICoM(q0)
+    #
+    # as constant during prediction.
+    # --------------------------------------------------------
+
+    W_inertia_CoM_q0 = np.asarray(
+
+        get_W_inertia_CoM(
+
+            model,
+
+            data,
+        ),
+
+        dtype=float,
+
+    )
+
+
+    if W_inertia_CoM_q0.shape != (
+        3,
+        3,
+    ):
+
+        raise RuntimeError(
+            "W_inertia_CoM_q0 phải có shape (3,3)."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            W_inertia_CoM_q0
+        )
+    ):
+
+        raise RuntimeError(
+            "W_inertia_CoM_q0 chứa NaN hoặc Inf."
+        )
+
+
+    # --------------------------------------------------------
+    # Inertia tensor should be symmetric.
+    # --------------------------------------------------------
+
+    if not np.allclose(
+        W_inertia_CoM_q0,
+        W_inertia_CoM_q0.T,
+        atol=1e-10,
+        rtol=0.0,
+    ):
+
+        raise RuntimeError(
+            "W_inertia_CoM_q0 không đối xứng."
+        )
 
 
     # ========================================================
     # 6. INITIAL MPC STATE
     # ========================================================
 
-    initial = get_current_state_mpc(
-        model,
-        data
+    initial = (
+        get_current_state_mpc(
+            model,
+            data,
+        )
     )
 
 
-    x_initial = initial.x.copy()
+    x_initial = np.asarray(
+
+        initial.x,
+
+        dtype=float,
+
+    ).reshape(-1)
+
+
+    if x_initial.shape != (
+        13,
+    ):
+
+        raise RuntimeError(
+            "x_initial phải có shape (13,)."
+        )
+
+
+    if not np.all(
+        np.isfinite(
+            x_initial
+        )
+    ):
+
+        raise RuntimeError(
+            "x_initial chứa NaN hoặc Inf."
+        )
+
+
+    x_initial = (
+        x_initial.copy()
+    )
 
 
     # ========================================================
-    # 7. REFERENCE GENERATOR
+    # 7. CONTACT DETECTION MAP
+    #
+    # Resolve MuJoCo IDs ONCE.
+    #
+    # The resulting dictionary is reused at every simulation
+    # step by:
+    #
+    #     get_contact_state(...)
+    #
+    # or:
+    #
+    #     get_binary_contact_state(...)
     # ========================================================
 
-    reference_generator = ReferenceGenerator(
-        x_initial=x_initial,
-        horizon=horizon,
-        dt_prediction=dt_mpc,
-        dt_update=dt_mpc_update
+    contact_map = (
+        build_contact_state_map(
+            model
+        )
     )
 
 
@@ -440,144 +857,260 @@ def initialize_simulation(
     # ========================================================
 
     qp_solver = QPSolver(
-        verbose=qp_verbose,
-        eps_abs=qp_eps_abs,
-        eps_rel=qp_eps_rel,
-        max_iter=qp_max_iter,
-        polishing=qp_polishing,
+
+        verbose=(
+            qp_verbose
+        ),
+
+        eps_abs=(
+            qp_eps_abs
+        ),
+
+        eps_rel=(
+            qp_eps_rel
+        ),
+
+        max_iter=(
+            qp_max_iter
+        ),
+
+        polishing=(
+            qp_polishing
+        ),
+
         enable_warm_start=(
             qp_enable_warm_start
         ),
+
         constraint_tolerance=(
             qp_constraint_tolerance
-        )
+        ),
     )
 
 
     # ========================================================
-    # 9. PRINT INITIALIZATION INFORMATION
-    # ========================================================
-
-    print("\n")
-    print("=" * 70)
-    print("SIMULATION INITIALIZATION")
-    print("=" * 70)
-
-
-    print(
-        "XML =",
-        xml_path
-    )
-
-
-    print(
-        "\ndt_sim             =",
-        dt_sim,
-        "s"
-    )
-
-
-    print(
-        "dt_mpc             =",
-        dt_mpc,
-        "s"
-    )
-
-
-    print(
-        "dt_mpc_update      =",
-        dt_mpc_update,
-        "s"
-    )
-
-
-    print(
-        "MPC update rate    =",
-        1.0 / dt_mpc_update,
-        "Hz"
-    )
-
-
-    print(
-        "MuJoCo steps/MPC   =",
-        steps_per_mpc_update
-    )
-
-
-    print(
-        "Prediction horizon =",
-        horizon * dt_mpc,
-        "s"
-    )
-
-
-    print(
-        "\nmass_CoM =",
-        mass_CoM,
-        "kg"
-    )
-
-
-    print(
-        "\nW_inertia_CoM(q0) ="
-    )
-
-
-    print(
-        W_inertia_CoM_q0
-    )
-
-
-    print(
-        "\nx_initial ="
-    )
-
-
-    print(
-        x_initial
-    )
-
-
-    print(
-        "\nInitial CoM position reference ="
-    )
-
-
-    print(
-        reference_generator.get_position_reference()
-    )
-
-
-    # ========================================================
-    # 10. BUILD SETUP OBJECT
+    # 9. BUILD SETUP OBJECT
     # ========================================================
 
     setup = SimulationSetup(
 
-        model=model,
+        model=(
+            model
+        ),
 
-        data=data,
+        data=(
+            data
+        ),
 
-        dt_sim=dt_sim,
+        dt_sim=(
+            dt_sim
+        ),
+
+        horizon=(
+            horizon
+        ),
+
+        dt_mpc=(
+            dt_mpc
+        ),
+
+        dt_mpc_update=(
+            dt_mpc_update
+        ),
 
         steps_per_mpc_update=(
             steps_per_mpc_update
         ),
 
-        mass_CoM=mass_CoM,
+        prediction_horizon_time=(
+            prediction_horizon_time
+        ),
+
+        home_key_id=(
+            int(
+                home_key_id
+            )
+        ),
+
+        home_key_name=(
+            home_key_name
+        ),
+
+        mass_CoM=(
+            mass_CoM
+        ),
 
         W_inertia_CoM_q0=(
-            W_inertia_CoM_q0
+            W_inertia_CoM_q0.copy()
         ),
 
-        x_initial=x_initial,
-
-        reference_generator=(
-            reference_generator
+        x_initial=(
+            x_initial.copy()
         ),
 
-        qp_solver=qp_solver
+        contact_map=(
+            contact_map
+        ),
+
+        qp_solver=(
+            qp_solver
+        ),
     )
+
+
+    # ========================================================
+    # 10. INITIALIZATION INFORMATION
+    # ========================================================
+
+    if print_initialization:
+
+        print("\n")
+        print("=" * 70)
+        print("SIMULATION INITIALIZATION")
+        print("=" * 70)
+
+
+        print(
+            "XML =",
+            xml_path
+        )
+
+
+        print(
+            "\nhome_key_name =",
+            home_key_name
+        )
+
+
+        print(
+            "home_key_id   =",
+            home_key_id
+        )
+
+
+        print(
+            "\ndt_sim =",
+            dt_sim,
+            "s"
+        )
+
+
+        print(
+            "dt_mpc =",
+            dt_mpc,
+            "s"
+        )
+
+
+        print(
+            "dt_mpc_update =",
+            dt_mpc_update,
+            "s"
+        )
+
+
+        print(
+            "MuJoCo steps / MPC update =",
+            steps_per_mpc_update
+        )
+
+
+        print(
+            "MPC update rate =",
+            1.0 / dt_mpc_update,
+            "Hz"
+        )
+
+
+        print(
+            "\nhorizon N =",
+            horizon
+        )
+
+
+        print(
+            "prediction horizon =",
+            prediction_horizon_time,
+            "s"
+        )
+
+
+        print(
+            "\nmass_CoM =",
+            mass_CoM,
+            "kg"
+        )
+
+
+        print(
+            "\nW_inertia_CoM_q0 ="
+        )
+
+
+        print(
+            W_inertia_CoM_q0
+        )
+
+
+        print(
+            "\nx_initial ="
+        )
+
+
+        print(
+            x_initial
+        )
+
+
+        print(
+            "\ncontact map:"
+        )
+
+
+        print(
+            "floor geom =",
+            contact_map[
+                "floor_geom_name"
+            ]
+        )
+
+
+        print(
+            "left foot body =",
+            contact_map[
+                "left_foot_body_name"
+            ]
+        )
+
+
+        print(
+            "right foot body =",
+            contact_map[
+                "right_foot_body_name"
+            ]
+        )
+
+
+        print(
+            "\nIMPORTANT:"
+        )
+
+
+        print(
+            "Reference generation is NOT part of "
+            "simulation_setup.py."
+        )
+
+
+        print(
+            "dt_mpc is prediction spacing; "
+            "dt_mpc_update is actual MPC update period."
+        )
+
+
+        print(
+            "No mj_step() was executed during initialization."
+        )
 
 
     # ========================================================
