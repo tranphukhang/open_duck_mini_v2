@@ -284,31 +284,68 @@ def update_support_queue_after_command_transition(support_points, gait_output):
         raise RuntimeError(f'Unknown gait transition reason: {gait_output.transition_reason!r}')
     return ensure_support_plan_length(support_points=points, current_phase=gait_output.phase_cmd, target_length=SUPPORT_PLAN_LENGTH)
 
-def solve_ltv_mpc(setup, current, W_p_CoM_ref, W_v_CoM_ref, W_p_L6_plan, W_p_R6_plan, contact_schedule_cmd):
+def solve_ltv_mpc(setup, current, W_p_CoM_ref, W_v_CoM_ref, W_p_L6_plan, W_p_R6_plan, contact_schedule_mpc):
     """
-    contact_schedule_cmd is COMMAND contact, never measured contact.
+    contact_schedule_mpc uses measured physical contact at row 0 and
+    commanded/planned contact for future rows.
     """
     srbd_reference = build_srbd_reference(W_p_CoM_ref=W_p_CoM_ref, W_v_CoM_ref=W_v_CoM_ref, W_euler_CoM_ref=np.zeros(3, dtype=float), W_w_CoM_ref=np.zeros(3, dtype=float))
     W_r_L_sequence, W_r_R_sequence = build_moment_arm_horizon(W_p_CoM_ref=srbd_reference['W_p_CoM_ref'], W_p_L6_plan=W_p_L6_plan, W_p_R6_plan=W_p_R6_plan)
     Phi, Gamma = build_SRBD_model_sequence(Ew_inverse=current.Ew_inverse, mass_CoM=setup.mass_CoM, W_inertia_CoM=setup.W_inertia_CoM_q0, W_r_L_sequence=W_r_L_sequence, W_r_R_sequence=W_r_R_sequence, dt_mpc=DT_MPC, horizon=N)
-    return build_and_solve_QP(qp_solver=setup.qp_solver, Phi=Phi, Gamma=Gamma, x_current=current.x, X_ref=srbd_reference['X_ref'], N=N, L6_R_W=current.L6_IK_R_W, R6_R_W=current.R6_IK_R_W, contact_schedule=contact_schedule_cmd, print_diagnostics=False) + (srbd_reference,)
+    return build_and_solve_QP(qp_solver=setup.qp_solver, Phi=Phi, Gamma=Gamma, x_current=current.x, X_ref=srbd_reference['X_ref'], N=N, L6_R_W=current.L6_IK_R_W, R6_R_W=current.R6_IK_R_W, contact_schedule=contact_schedule_mpc, print_diagnostics=False) + (srbd_reference,)
 
-def print_status(high_level_iteration, data, gait_output, current, W_p_CoM_ref, held_u0_MPC, tau_command, solver_info, post_diagnostics, support_points, contact_schedule_cmd):
+def print_status(high_level_iteration, data, gait_output, current, W_p_CoM_ref, held_u0_MPC, tau_command, solver_info, post_diagnostics, support_points, contact_schedule_cmd, contact_schedule_mpc):
     max_violation = None
     if post_diagnostics is not None:
         max_violation = post_diagnostics.get('max_violation')
+
     print('\n' + '-' * 82)
-    print(f't={data.time:.4f} s | HL={high_level_iteration} | phase_cmd={gait_output.phase_cmd} | t_cmd={gait_output.t_phase_cmd:.4f}')
-    print('contact_meas=', gait_output.contact_meas, '| contact_cmd=', gait_output.contact_cmd, '| achieved=', gait_output.contact_cmd_achieved)
-    print('events=', gait_output.events, '| pending_LO=', gait_output.pending_liftoff_confirmation, '| waiting_TD=', gait_output.waiting_for_contact)
-    print('swing=', gait_output.swing_foot, '| swing_phase=', gait_output.swing_phase)
-    print('contact_cmd horizon first rows =\n', np.asarray(contact_schedule_cmd[:min(4, len(contact_schedule_cmd))], dtype=int))
+    print(
+        f't={data.time:.4f} s | HL={high_level_iteration} | '
+        f'phase_cmd={gait_output.phase_cmd} | '
+        f't_cmd={gait_output.t_phase_cmd:.4f}'
+    )
+    print(
+        'contact_meas=', gait_output.contact_meas,
+        '| contact_cmd=', gait_output.contact_cmd,
+        '| achieved=', gait_output.contact_cmd_achieved,
+    )
+    print(
+        'events=', gait_output.events,
+        '| pending_LO=', gait_output.pending_liftoff_confirmation,
+        '| waiting_TD=', gait_output.waiting_for_contact,
+    )
+    print(
+        'swing=', gait_output.swing_foot,
+        '| swing_phase=', gait_output.swing_phase,
+        '| swing_start=', gait_output.W_p_swing_start,
+        '| swing_target=', gait_output.W_p_foothold,
+    )
+    print(
+        'contact CMD horizon first rows =\n',
+        np.asarray(contact_schedule_cmd[:min(4, len(contact_schedule_cmd))], dtype=int),
+    )
+    print(
+        'contact MPC horizon first rows =\n',
+        np.asarray(contact_schedule_mpc[:min(4, len(contact_schedule_mpc))], dtype=int),
+    )
     print('CoM actual =', current.x[0:3])
     print('CoM ref[0] =', W_p_CoM_ref[0])
-    print('Fz cmd [L,R] =', np.array([held_u0_MPC[2], held_u0_MPC[8]], dtype=float), 'N')
+    print(
+        'Fz MPC row0 [L,R] =',
+        np.array([held_u0_MPC[2], held_u0_MPC[8]], dtype=float),
+        'N',
+    )
     print('tau =', tau_command)
-    print('QP status =', solver_info.get('status'), '| solve_time =', solver_info.get('solve_time'), '| max_violation =', max_violation)
-    print('support queue first points =\n', np.asarray(support_points[:min(4, len(support_points))], dtype=float))
+    print(
+        'QP status =', solver_info.get('status'),
+        '| solve_time =', solver_info.get('solve_time'),
+        '| max_violation =', max_violation,
+    )
+    print(
+        'support queue first points =\n',
+        np.asarray(support_points[:min(4, len(support_points))], dtype=float),
+    )
 
 def main():
     setup = initialize_simulation(xml_path=XML_PATH, horizon=N, dt_mpc=DT_MPC, dt_mpc_update=DT_HIGH_LEVEL, home_key_name='home', qp_verbose=False, qp_eps_abs=1e-05, qp_eps_rel=1e-05, qp_max_iter=QP_MAX_ITER, qp_polishing=True, qp_enable_warm_start=True, qp_constraint_tolerance=QP_CONSTRAINT_TOLERANCE, print_initialization=True)
@@ -344,6 +381,7 @@ def main():
     held_q_dot_swing_des = None
     last_W_p_CoM_ref = np.tile(home_CoM.reshape(1, 3), (N, 1))
     last_contact_schedule_cmd = np.ones((N, 2), dtype=int)
+    last_contact_schedule_mpc = np.ones((N, 2), dtype=int)
     last_solver_info = {'status': 'not_solved', 'solve_time': 0.0}
     last_post_diagnostics = None
     last_mpc_compute_time = 0.0
@@ -364,7 +402,8 @@ def main():
     print('initial phase_cmd    =', initial_phase_cmd)
     print('first swing foot     =', FIRST_SWING_FOOT)
     print('\nCommand path:')
-    print('timing/FSM -> phase_cmd -> contact_cmd horizon -> DCM/MPC')
+    print('timing/FSM -> phase_cmd -> command preview -> DCM/reference')
+    print('MPC contact row0 = measured feedback; future rows = command preview')
     print('Feedback path:')
     print('MuJoCo -> contact_meas/foot_meas -> gait feedback + foot-plan re-anchor')
     print('Physics:')
@@ -400,11 +439,43 @@ def main():
                     print(f'\n[t={current_time:.4f}] COMMAND transition: {gait_output.previous_phase_cmd} --{gait_output.transition_reason}--> {gait_output.phase_cmd} | contact_meas={gait_output.contact_meas.tolist()} | contact_cmd={gait_output.contact_cmd.tolist()}')
                     if gait_output.swing_foot is not None:
                         reset_swing_low_level_state(gait_output.swing_foot)
-                phase_preview_cmd = build_contact_preview(current_phase=gait_output.phase_cmd, t_phase=gait_output.t_phase_cmd, timing=TIMING, horizon=N, dt_mpc=DT_MPC)
-                contact_schedule_cmd = phase_preview_cmd['contact_schedule'].copy()
-                if not np.array_equal(contact_schedule_cmd[0], gait_output.contact_cmd):
-                    raise RuntimeError('contact_schedule_cmd[0] không khớp contact_cmd.')
-                foot_plan = build_foot_plan_horizon(current_phase=gait_output.phase_cmd, phase_sequence=phase_preview_cmd['phase_sequence'], support_points=np.asarray(support_points, dtype=float), W_p_L6_feedback=W_p_L6, W_p_R6_feedback=W_p_R6)
+                # Command phase preview is used for DCM/reference planning.
+                # MPC row 0 is physically anchored to measured contact.
+                phase_preview_cmd = build_contact_preview(
+                    current_phase=gait_output.phase_cmd,
+                    t_phase=gait_output.t_phase_cmd,
+                    timing=TIMING,
+                    horizon=N,
+                    dt_mpc=DT_MPC,
+                    current_contact_meas=gait_output.contact_meas,
+                )
+                contact_schedule_cmd = phase_preview_cmd['contact_schedule_cmd'].copy()
+                contact_schedule_mpc = phase_preview_cmd['contact_schedule_mpc'].copy()
+
+                if not np.array_equal(
+                    contact_schedule_cmd[0],
+                    gait_output.contact_cmd,
+                ):
+                    raise RuntimeError(
+                        'contact_schedule_cmd[0] không khớp contact_cmd.'
+                    )
+
+                if not np.array_equal(
+                    contact_schedule_mpc[0],
+                    gait_output.contact_meas,
+                ):
+                    raise RuntimeError(
+                        'contact_schedule_mpc[0] phải bằng contact feedback hiện tại.'
+                    )
+
+                foot_plan = build_foot_plan_horizon(
+                    current_phase=gait_output.phase_cmd,
+                    phase_sequence=phase_preview_cmd['phase_sequence'],
+                    support_points=np.asarray(support_points, dtype=float),
+                    W_p_L6_feedback=W_p_L6,
+                    W_p_R6_feedback=W_p_R6,
+                    current_contact_meas=gait_output.contact_meas,
+                )
                 W_p_L6_plan = foot_plan['W_p_L6_plan']
                 W_p_R6_plan = foot_plan['W_p_R6_plan']
                 support_points = [point.copy() for point in foot_plan['support_points_reanchored']]
@@ -423,30 +494,56 @@ def main():
                         raise RuntimeError('Swing command thiếu W_p_swing_start.')
                     if gait_output.W_p_foothold is None:
                         raise RuntimeError('Swing command thiếu W_p_foothold.')
-                    swing_reference = compute_swing_reference_100hz(model=model, data=data, swing_foot=gait_output.swing_foot, W_p_liftoff=gait_output.W_p_swing_start, W_p_foothold=gait_output.W_p_foothold, swing_phase=gait_output.swing_phase, T_swing=T_SS, swing_height=SWING_HEIGHT)
+                    # W_p_swing_start and W_p_foothold are BOTH latched at
+                    # DS -> SS.  At 100 Hz only swing_phase changes; the
+                    # trajectory is evaluated on the same fixed geometry.
+                    swing_reference = compute_swing_reference_100hz(
+                        model=model,
+                        data=data,
+                        swing_foot=gait_output.swing_foot,
+                        W_p_liftoff=gait_output.W_p_swing_start,
+                        W_p_foothold=gait_output.W_p_foothold,
+                        swing_phase=gait_output.swing_phase,
+                        T_swing=T_SS,
+                        swing_height=SWING_HEIGHT,
+                    )
                     held_swing_foot = gait_output.swing_foot
                     held_q_swing_des = np.asarray(swing_reference['q_swing_des'], dtype=float).reshape(5).copy()
                     held_q_dot_swing_des = np.asarray(swing_reference['q_dot_swing_des'], dtype=float).reshape(5).copy()
                 mpc_start = time.perf_counter()
-                U_opt, u0_opt, solver_info, post_diagnostics, srbd_reference = solve_ltv_mpc(setup=setup, current=current, W_p_CoM_ref=W_p_CoM_ref, W_v_CoM_ref=W_v_CoM_ref, W_p_L6_plan=W_p_L6_plan, W_p_R6_plan=W_p_R6_plan, contact_schedule_cmd=contact_schedule_cmd)
+                U_opt, u0_opt, solver_info, post_diagnostics, srbd_reference = solve_ltv_mpc(
+                    setup=setup,
+                    current=current,
+                    W_p_CoM_ref=W_p_CoM_ref,
+                    W_v_CoM_ref=W_v_CoM_ref,
+                    W_p_L6_plan=W_p_L6_plan,
+                    W_p_R6_plan=W_p_R6_plan,
+                    contact_schedule_mpc=contact_schedule_mpc,
+                )
                 del U_opt
                 del srbd_reference
                 if u0_opt is None:
                     data.ctrl[:] = 0.0
                     raise RuntimeError(f'QP không trả nghiệm hợp lệ.\nphase_cmd={gait_output.phase_cmd}\ncontact_meas={gait_output.contact_meas}\ncontact_cmd={gait_output.contact_cmd}\nsolver_info={solver_info}\npost_diagnostics={post_diagnostics}')
                 held_u0_MPC = np.asarray(u0_opt, dtype=float).reshape(12).copy()
-                if gait_output.contact_cmd[0] == 0:
+                # u0 is constrained by CURRENT measured contact, not contact_cmd.
+                if contact_schedule_mpc[0, 0] == 0:
                     if np.linalg.norm(held_u0_MPC[0:6]) > 1e-05:
-                        raise RuntimeError('Left foot contact_cmd=0 nhưng u0 left wrench != 0.')
-                if gait_output.contact_cmd[1] == 0:
+                        raise RuntimeError(
+                            'Left foot contact_meas=0 nhưng u0 left wrench != 0.'
+                        )
+                if contact_schedule_mpc[0, 1] == 0:
                     if np.linalg.norm(held_u0_MPC[6:12]) > 1e-05:
-                        raise RuntimeError('Right foot contact_cmd=0 nhưng u0 right wrench != 0.')
+                        raise RuntimeError(
+                            'Right foot contact_meas=0 nhưng u0 right wrench != 0.'
+                        )
                 held_tau_mpc, _, _ = get_joint_torque_from_MPC_wrench(model, data, held_u0_MPC)
                 held_tau_mpc = np.asarray(held_tau_mpc, dtype=float).reshape(10).copy()
                 last_solver_info = solver_info
                 last_post_diagnostics = post_diagnostics
                 last_W_p_CoM_ref = W_p_CoM_ref.copy()
                 last_contact_schedule_cmd = contact_schedule_cmd.copy()
+                last_contact_schedule_mpc = contact_schedule_mpc.copy()
                 last_mpc_compute_time = time.perf_counter() - mpc_start
                 high_level_updated = True
                 next_high_level_time = current_time + DT_HIGH_LEVEL
@@ -462,7 +559,20 @@ def main():
             if high_level_updated:
                 logger.log_step(time=float(data.time), x=current.x, u0=held_u0_MPC, tau=tau_command, mpc_compute_time=last_mpc_compute_time, qp_solve_time=float(last_solver_info.get('solve_time', 0.0)))
                 if high_level_iteration % PRINT_EVERY_N_HIGH_LEVEL == 0:
-                    print_status(high_level_iteration=high_level_iteration, data=data, gait_output=gait_output, current=current, W_p_CoM_ref=last_W_p_CoM_ref, held_u0_MPC=held_u0_MPC, tau_command=tau_command, solver_info=last_solver_info, post_diagnostics=last_post_diagnostics, support_points=support_points, contact_schedule_cmd=last_contact_schedule_cmd)
+                    print_status(
+                        high_level_iteration=high_level_iteration,
+                        data=data,
+                        gait_output=gait_output,
+                        current=current,
+                        W_p_CoM_ref=last_W_p_CoM_ref,
+                        held_u0_MPC=held_u0_MPC,
+                        tau_command=tau_command,
+                        solver_info=last_solver_info,
+                        post_diagnostics=last_post_diagnostics,
+                        support_points=support_points,
+                        contact_schedule_cmd=last_contact_schedule_cmd,
+                        contact_schedule_mpc=last_contact_schedule_mpc,
+                    )
                 high_level_iteration += 1
             mujoco.mj_step(model, data)
             physics_step += 1
