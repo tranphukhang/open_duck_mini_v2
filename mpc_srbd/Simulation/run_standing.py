@@ -30,7 +30,9 @@ for directory in (
     KINEMATICS_DIR,
     ACTUATOR_DIR,
 ):
-    directory_str = str(directory)
+    directory_str = str(
+        directory
+    )
 
     if directory_str not in sys.path:
         sys.path.insert(
@@ -43,31 +45,52 @@ for directory in (
 # SIMULATION
 # ============================================================
 
-from simulation_setup import initialize_simulation
-from simulation_logger import SimulationLogger
+from simulation_setup import (
+    initialize_simulation,
+)
+
+from simulation_logger import (
+    SimulationLogger,
+)
+
+from standing_reference import (
+    build_sinusoidal_z_reference,
+)
 
 
 # ============================================================
 # STATE
 # ============================================================
 
-from get_current_state_mpc import get_current_state_mpc
-from get_contact_state import get_contact_state
+from get_current_state_mpc import (
+    get_current_state_mpc,
+)
+
+from get_contact_state import (
+    get_contact_state,
+)
 
 
 # ============================================================
 # SRBD
 # ============================================================
 
-from build_SRBD_model import build_SRBD_model
+from build_SRBD_model import (
+    build_SRBD_model,
+)
 
 
 # ============================================================
 # QP
 # ============================================================
 
-from build_and_solve_QP import build_and_solve_QP
-from QP_diagnostics import print_QP_diagnostics
+from build_and_solve_QP import (
+    build_and_solve_QP,
+)
+
+from QP_diagnostics import (
+    print_QP_diagnostics,
+)
 
 
 # ============================================================
@@ -83,7 +106,9 @@ from W_wrench_to_joint_torque import (
 # ACTUATOR
 # ============================================================
 
-from actuator_mapping import apply_joint_torque
+from actuator_mapping import (
+    apply_joint_torque,
+)
 
 
 # ============================================================
@@ -119,14 +144,29 @@ N = 10
 # Prediction discretization.
 DT_MPC = 0.05
 
-# Actual MPC re-solve period.
+# Actual MPC solve/update period.
 DT_MPC_UPDATE = 0.01
+
+
+# ============================================================
+# SINUSOIDAL Z REFERENCE PARAMETERS
+# ============================================================
+
+# +/- 5 mm quanh chiều cao CoM ban đầu.
+Z_AMPLITUDE = 0.01
+
+# 0.2 Hz -> chu kỳ 5 s.
+Z_FREQUENCY = 1.0
+
+# Pha ban đầu [rad].
+Z_PHASE = 0.0
 
 
 # ============================================================
 # SIMULATION PARAMETERS
 # ============================================================
 
+# Chạy 2 chu kỳ sin.
 SIM_DURATION = 10.0
 
 PRINT_EVERY_N_MPC = 10
@@ -137,6 +177,7 @@ PRINT_EVERY_N_MPC = 10
 # ============================================================
 
 QP_MAX_ITER = 10000
+
 QP_CONSTRAINT_TOLERANCE = 1e-4
 
 
@@ -148,116 +189,6 @@ GRAVITY = 9.81
 
 
 # ============================================================
-# STANDING REFERENCE
-# ============================================================
-
-def build_standing_X_ref(
-    x_initial,
-    horizon,
-):
-    """
-    Build the stacked standing SRBD reference directly.
-
-    State:
-
-        x =
-        [
-            p_CoM,      # 3
-            euler,      # 3
-            v_CoM,      # 3
-            omega,      # 3
-            1           # 1
-        ]
-
-    Standing target:
-
-        p_ref     = p_initial
-        euler_ref = euler_initial
-        v_ref     = 0
-        omega_ref = 0
-        x[12]     = 1
-
-    The same reference is repeated over the complete prediction
-    horizon:
-
-        X_ref =
-        [
-            x_ref(k+1)
-            ...
-            x_ref(k+N)
-        ]
-    """
-
-    x_initial = np.asarray(
-        x_initial,
-        dtype=float,
-    ).reshape(-1)
-
-    horizon = int(
-        horizon
-    )
-
-    if x_initial.shape != (13,):
-        raise ValueError(
-            "x_initial phải có shape (13,)."
-        )
-
-    if horizon <= 0:
-        raise ValueError(
-            "horizon phải > 0."
-        )
-
-    if not np.all(
-        np.isfinite(
-            x_initial
-        )
-    ):
-        raise ValueError(
-            "x_initial chứa NaN hoặc Inf."
-        )
-
-    x_ref = np.zeros(
-        13,
-        dtype=float,
-    )
-
-    # CoM position target.
-    x_ref[0:3] = x_initial[0:3]
-
-    # Orientation target.
-    x_ref[3:6] = x_initial[3:6]
-
-    # Linear velocity target.
-    x_ref[6:9] = 0.0
-
-    # Angular velocity target.
-    x_ref[9:12] = 0.0
-
-    # Homogeneous constant state.
-    x_ref[12] = 1.0
-
-    X_ref = np.tile(
-        x_ref,
-        horizon,
-    )
-
-    expected_shape = (
-        13 * horizon,
-    )
-
-    if X_ref.shape != expected_shape:
-        raise RuntimeError(
-            f"X_ref phải có shape {expected_shape}, "
-            f"nhưng nhận được {X_ref.shape}."
-        )
-
-    return (
-        x_ref,
-        X_ref,
-    )
-
-
-# ============================================================
 # STANDING CONTACT SCHEDULE
 # ============================================================
 
@@ -266,23 +197,17 @@ def build_standing_contact_schedule(
     contact_meas,
 ):
     """
-    Build standing contact schedule.
+    Standing contact schedule.
 
-    Important convention:
+    Current row:
 
-        row 0:
-            CURRENT measured physical contact feedback.
+        c_0 = current physical contact feedback
 
-        rows 1 ... N-1:
-            standing command = double support [1, 1].
+    Future rows:
 
-    Therefore:
+        [1, 1]
 
-        c_0 = c_k^meas
-
-    while the future standing plan remains:
-
-        [1, 1].
+    because standing mode is planned as double support.
     """
 
     horizon = int(
@@ -307,7 +232,10 @@ def build_standing_contact_schedule(
     if not np.all(
         np.isin(
             contact_meas,
-            [0, 1],
+            [
+                0,
+                1,
+            ],
         )
     ):
         raise ValueError(
@@ -322,8 +250,10 @@ def build_standing_contact_schedule(
         dtype=int,
     )
 
-    # Current MPC input u0 must use current physical contact.
-    contact_schedule[0] = contact_meas
+    # Current MPC input u0 uses current physical contact.
+    contact_schedule[0] = (
+        contact_meas
+    )
 
     return contact_schedule
 
@@ -338,7 +268,7 @@ def get_contact_frame_wrench(
     R6_IK_R_W,
 ):
     """
-    MPC wrench:
+    MPC wrench convention:
 
         u =
         [
@@ -348,7 +278,7 @@ def get_contact_frame_wrench(
             W_M_R
         ]
 
-    Convert World-frame wrench to corrected foot contact frames
+    Transform World-frame wrench into corrected contact frames
     for diagnostics only.
     """
 
@@ -362,10 +292,21 @@ def get_contact_frame_wrench(
             "u0_MPC phải có shape (12,)."
         )
 
-    W_F_L = u0_MPC[0:3]
-    W_M_L = u0_MPC[3:6]
-    W_F_R = u0_MPC[6:9]
-    W_M_R = u0_MPC[9:12]
+    W_F_L = (
+        u0_MPC[0:3]
+    )
+
+    W_M_L = (
+        u0_MPC[3:6]
+    )
+
+    W_F_R = (
+        u0_MPC[6:9]
+    )
+
+    W_M_R = (
+        u0_MPC[9:12]
+    )
 
     L_F = (
         L6_IK_R_W
@@ -407,7 +348,7 @@ def print_status(
     mpc_iteration,
     control_time,
     current,
-    x_ref,
+    x_ref_current,
     held_u0_MPC,
     tau_command,
     solver_info,
@@ -418,7 +359,7 @@ def print_status(
     contact_schedule,
 ):
     """
-    Compact standing-MPC diagnostics.
+    Runtime diagnostics for sinusoidal-z standing test.
     """
 
     (
@@ -459,46 +400,85 @@ def print_status(
     )
 
     print(
-        "mode = STANDING"
+        "mode = STANDING / SINUSOIDAL Z"
     )
+
+    # ========================================================
+    # CONTACT
+    # ========================================================
 
     print(
         "\ncontact_meas =",
         [
-            contact_state["c_L"],
-            contact_state["c_R"],
+            contact_state[
+                "c_L"
+            ],
+            contact_state[
+                "c_R"
+            ],
         ]
     )
 
     print(
-        "contact_schedule first rows ="
+        "contact_schedule[0] =",
+        contact_schedule[0]
     )
 
-    print(
-        contact_schedule[
-            :min(
-                4,
-                contact_schedule.shape[0],
-            )
-        ]
-    )
+    # ========================================================
+    # POSITION
+    # ========================================================
 
     print(
-        "\nCoM actual =",
+        "\nCoM position actual =",
         current.x[0:3]
     )
 
     print(
-        "CoM ref    =",
-        x_ref[0:3]
+        "CoM position ref    =",
+        x_ref_current[0:3]
     )
 
     print(
-        "CoM error  =",
+        "CoM position error  =",
         current.x[0:3]
         -
-        x_ref[0:3]
+        x_ref_current[0:3]
     )
+
+    # ========================================================
+    # Z TRACKING
+    # ========================================================
+
+    print(
+        "\nz actual =",
+        current.x[2]
+    )
+
+    print(
+        "z ref    =",
+        x_ref_current[2]
+    )
+
+    print(
+        "z error  =",
+        current.x[2]
+        -
+        x_ref_current[2]
+    )
+
+    print(
+        "vz actual =",
+        current.x[8]
+    )
+
+    print(
+        "vz ref    =",
+        x_ref_current[8]
+    )
+
+    # ========================================================
+    # ATTITUDE
+    # ========================================================
 
     print(
         "\nEuler actual =",
@@ -507,18 +487,17 @@ def print_status(
 
     print(
         "Euler ref    =",
-        x_ref[3:6]
-    )
-
-    print(
-        "\nCoM velocity =",
-        current.x[6:9]
+        x_ref_current[3:6]
     )
 
     print(
         "Angular velocity =",
         current.x[9:12]
     )
+
+    # ========================================================
+    # FEEDBACK-LINEARIZED SRBD PARAMETERS
+    # ========================================================
 
     print(
         "\nEw_inverse ="
@@ -545,6 +524,10 @@ def print_status(
     print(
         current.W_inertia_CoM
     )
+
+    # ========================================================
+    # MPC WRENCH
+    # ========================================================
 
     print(
         "\nu0_MPC [World] ="
@@ -602,6 +585,10 @@ def print_status(
         "N"
     )
 
+    # ========================================================
+    # TORQUE
+    # ========================================================
+
     print(
         "\ntau_command ="
     )
@@ -609,6 +596,10 @@ def print_status(
     print(
         tau_command
     )
+
+    # ========================================================
+    # SOLVER
+    # ========================================================
 
     print(
         "\nOSQP status =",
@@ -633,6 +624,7 @@ def print_status(
     )
 
     if post_diagnostics is not None:
+
         print(
             "Constraint max violation =",
             post_diagnostics.get(
@@ -673,8 +665,13 @@ def main():
         print_initialization=True,
     )
 
-    model = setup.model
-    data = setup.data
+    model = (
+        setup.model
+    )
+
+    data = (
+        setup.data
+    )
 
     DT_SIM = float(
         setup.dt_sim
@@ -685,19 +682,7 @@ def main():
     )
 
     # ========================================================
-    # 2. STANDING REFERENCE
-    # ========================================================
-
-    (
-        x_ref,
-        X_ref,
-    ) = build_standing_X_ref(
-        x_initial=setup.x_initial,
-        horizon=N,
-    )
-
-    # ========================================================
-    # 3. HELD CONTROL
+    # 2. HELD CONTROL
     # ========================================================
 
     held_u0_MPC = np.zeros(
@@ -711,25 +696,30 @@ def main():
     )
 
     # ========================================================
-    # 4. LOGGER / COUNTERS
+    # 3. LOGGER / COUNTERS
     # ========================================================
 
-    logger = SimulationLogger()
+    logger = (
+        SimulationLogger()
+    )
 
     physics_step = 0
+
     mpc_iteration = 0
 
     last_solver_info = None
+
     last_post_diagnostics = None
+
     last_mpc_compute_time = 0.0
 
     # ========================================================
-    # 5. CONFIGURATION
+    # 4. CONFIGURATION
     # ========================================================
 
     print("\n")
     print("=" * 78)
-    print("STANDING SIMULATION - FROZEN-LINEARIZATION SRBD MPC")
+    print("STANDING SIMULATION - SINUSOIDAL Z REFERENCE")
     print("=" * 78)
 
     print(
@@ -774,36 +764,39 @@ def main():
     )
 
     print(
-        "\nStanding x_ref ="
+        "\nZ_AMPLITUDE =",
+        Z_AMPLITUDE,
+        "m"
     )
 
     print(
-        x_ref
+        "Z_FREQUENCY =",
+        Z_FREQUENCY,
+        "Hz"
     )
 
     print(
-        "\nSRBD model convention:"
+        "Z_PERIOD =",
+        1.0 / Z_FREQUENCY,
+        "s"
     )
 
     print(
-        "B_inertia_CoM = constant"
+        "\nInitial CoM z =",
+        setup.x_initial[2],
+        "m"
     )
 
     print(
-        "At each MPC update:"
-    )
-
-    print(
-        "x_k, Ew_inverse, r_L, r_R, W_inertia_CoM <- feedback"
-    )
-
-    print(
-        "W_inertia_CoM(k) = W_R_B(k) @ B_inertia_CoM @ W_R_B(k).T"
-    )
-
-    print(
-        "Ew_inverse, r_L, r_R, W_inertia_CoM are frozen "
-        "over the current prediction horizon."
+        "Expected z range = [",
+        setup.x_initial[2]
+        -
+        Z_AMPLITUDE,
+        ",",
+        setup.x_initial[2]
+        +
+        Z_AMPLITUDE,
+        "] m"
     )
 
     print(
@@ -812,6 +805,7 @@ def main():
 
     print(
         "x_k/contact_k"
+        " -> build X_ref(t_k)"
         " -> build frozen SRBD"
         " -> solve QP"
         " -> u_k"
@@ -822,7 +816,7 @@ def main():
     )
 
     # ========================================================
-    # 6. PASSIVE VIEWER
+    # 5. PASSIVE VIEWER
     # ========================================================
 
     with mujoco.viewer.launch_passive(
@@ -833,10 +827,14 @@ def main():
         while (
             viewer.is_running()
             and
-            data.time < SIM_DURATION
+            data.time
+            <
+            SIM_DURATION
         ):
 
-            wall_step_start = time.perf_counter()
+            wall_step_start = (
+                time.perf_counter()
+            )
 
             control_time = (
                 physics_step
@@ -862,49 +860,53 @@ def main():
                     time.perf_counter()
                 )
 
-                # ---------------------------------------------
+                # =============================================
                 # A1. CURRENT FEEDBACK SNAPSHOT
-                # ---------------------------------------------
+                # =============================================
 
-                current = get_current_state_mpc(
-                    model=model,
-                    data=data,
-                    B_inertia_CoM=setup.B_inertia_CoM,
+                current = (
+                    get_current_state_mpc(
+                        model=model,
+                        data=data,
+                        B_inertia_CoM=(
+                            setup.B_inertia_CoM
+                        ),
+                    )
                 )
 
-                x_k = current.x.copy()
+                x_k = (
+                    current.x.copy()
+                )
 
-                # ---------------------------------------------
-                # A2. CURRENT PHYSICAL CONTACT FEEDBACK
-                # ---------------------------------------------
+                # =============================================
+                # A2. CURRENT CONTACT FEEDBACK
+                # =============================================
 
-                contact_state = get_contact_state(
-                    model=model,
-                    data=data,
-                    contact_map=setup.contact_map,
+                contact_state = (
+                    get_contact_state(
+                        model=model,
+                        data=data,
+                        contact_map=(
+                            setup.contact_map
+                        ),
+                    )
                 )
 
                 contact_meas = np.array(
                     [
                         int(
-                            contact_state["c_L"]
+                            contact_state[
+                                "c_L"
+                            ]
                         ),
                         int(
-                            contact_state["c_R"]
+                            contact_state[
+                                "c_R"
+                            ]
                         ),
                     ],
                     dtype=int,
                 )
-
-                # ---------------------------------------------
-                # A3. CONTACT SCHEDULE
-                #
-                # row 0:
-                #     current contact feedback
-                #
-                # future:
-                #     standing command = double support
-                # ---------------------------------------------
 
                 contact_schedule = (
                     build_standing_contact_schedule(
@@ -913,30 +915,64 @@ def main():
                     )
                 )
 
-                # ---------------------------------------------
+                # =============================================
+                # A3. SINUSOIDAL Z REFERENCE
+                #
+                # Rebuild at every MPC tick.
+                # =============================================
+
+                (
+                    x_ref_current,
+                    X_ref,
+                ) = build_sinusoidal_z_reference(
+                    control_time=control_time,
+                    x_initial=setup.x_initial,
+                    horizon=N,
+                    dt_mpc=DT_MPC,
+                    amplitude_z=Z_AMPLITUDE,
+                    frequency_z=Z_FREQUENCY,
+                    phase_z=Z_PHASE,
+                )
+
+                # =============================================
                 # A4. BUILD FROZEN SRBD MODEL
                 #
-                # All model quantities below are the current
-                # feedback values and are frozen across this
-                # prediction horizon.
-                # ---------------------------------------------
+                # Current feedback values:
+                #
+                #   Ew_inverse(k)
+                #   W_inertia_CoM(k)
+                #   W_r_L(k)
+                #   W_r_R(k)
+                #
+                # are frozen over the current prediction horizon.
+                # =============================================
 
                 (
                     Phi,
                     Gamma,
                 ) = build_SRBD_model(
-                    Ew_inverse=current.Ew_inverse,
-                    mass_CoM=setup.mass_CoM,
-                    W_inertia_CoM=current.W_inertia_CoM,
-                    W_r_L=current.W_r_L,
-                    W_r_R=current.W_r_R,
+                    Ew_inverse=(
+                        current.Ew_inverse
+                    ),
+                    mass_CoM=(
+                        setup.mass_CoM
+                    ),
+                    W_inertia_CoM=(
+                        current.W_inertia_CoM
+                    ),
+                    W_r_L=(
+                        current.W_r_L
+                    ),
+                    W_r_R=(
+                        current.W_r_R
+                    ),
                     dt_mpc=DT_MPC,
                     horizon=N,
                 )
 
-                # ---------------------------------------------
+                # =============================================
                 # A5. SOLVE QP
-                # ---------------------------------------------
+                # =============================================
 
                 (
                     U_opt,
@@ -944,21 +980,29 @@ def main():
                     solver_info,
                     post_diagnostics,
                 ) = build_and_solve_QP(
-                    qp_solver=setup.qp_solver,
+                    qp_solver=(
+                        setup.qp_solver
+                    ),
                     Phi=Phi,
                     Gamma=Gamma,
                     x_current=x_k,
                     X_ref=X_ref,
                     N=N,
-                    L6_R_W=current.L6_IK_R_W,
-                    R6_R_W=current.R6_IK_R_W,
-                    contact_schedule=contact_schedule,
+                    L6_R_W=(
+                        current.L6_IK_R_W
+                    ),
+                    R6_R_W=(
+                        current.R6_IK_R_W
+                    ),
+                    contact_schedule=(
+                        contact_schedule
+                    ),
                     print_diagnostics=False,
                 )
 
-                # ---------------------------------------------
-                # A6. FAILURE HANDLING
-                # ---------------------------------------------
+                # =============================================
+                # A6. QP FAILURE
+                # =============================================
 
                 if u0_opt is None:
 
@@ -986,6 +1030,7 @@ def main():
                     )
 
                     if post_diagnostics is not None:
+
                         print_QP_diagnostics(
                             post_diagnostics
                         )
@@ -994,9 +1039,9 @@ def main():
                         "Standing QP không trả về nghiệm hợp lệ."
                     )
 
-                # ---------------------------------------------
-                # A7. HOLD CURRENT MPC INPUT u_k
-                # ---------------------------------------------
+                # =============================================
+                # A7. HOLD FIRST MPC INPUT u_k
+                # =============================================
 
                 held_u0_MPC = np.asarray(
                     u0_opt,
@@ -1017,8 +1062,13 @@ def main():
                         "u0_MPC chứa NaN hoặc Inf."
                     )
 
-                last_solver_info = solver_info
-                last_post_diagnostics = post_diagnostics
+                last_solver_info = (
+                    solver_info
+                )
+
+                last_post_diagnostics = (
+                    post_diagnostics
+                )
 
                 last_mpc_compute_time = (
                     time.perf_counter()
@@ -1031,8 +1081,11 @@ def main():
             #
             # Runs every MuJoCo physics step.
             #
-            # The MPC wrench is ZOH-held between MPC updates,
-            # but J(q_k) is evaluated at the current q_k.
+            # MPC wrench:
+            #     held by ZOH between MPC solves.
+            #
+            # Jacobian:
+            #     evaluated at current q_k.
             # =================================================
 
             (
@@ -1094,8 +1147,12 @@ def main():
                     x=current.x,
                     u0=held_u0_MPC,
                     tau=tau_command,
-                    mpc_compute_time=last_mpc_compute_time,
-                    qp_solve_time=qp_solve_time,
+                    mpc_compute_time=(
+                        last_mpc_compute_time
+                    ),
+                    qp_solve_time=(
+                        qp_solve_time
+                    ),
                 )
 
                 if (
@@ -1105,19 +1162,42 @@ def main():
                     ==
                     0
                 ):
+
                     print_status(
-                        mpc_iteration=mpc_iteration,
-                        control_time=control_time,
+                        mpc_iteration=(
+                            mpc_iteration
+                        ),
+                        control_time=(
+                            control_time
+                        ),
                         current=current,
-                        x_ref=x_ref,
-                        held_u0_MPC=held_u0_MPC,
-                        tau_command=tau_command,
-                        solver_info=last_solver_info,
-                        post_diagnostics=last_post_diagnostics,
-                        mpc_compute_time=last_mpc_compute_time,
-                        mass_CoM=setup.mass_CoM,
-                        contact_state=contact_state,
-                        contact_schedule=contact_schedule,
+                        x_ref_current=(
+                            x_ref_current
+                        ),
+                        held_u0_MPC=(
+                            held_u0_MPC
+                        ),
+                        tau_command=(
+                            tau_command
+                        ),
+                        solver_info=(
+                            last_solver_info
+                        ),
+                        post_diagnostics=(
+                            last_post_diagnostics
+                        ),
+                        mpc_compute_time=(
+                            last_mpc_compute_time
+                        ),
+                        mass_CoM=(
+                            setup.mass_CoM
+                        ),
+                        contact_state=(
+                            contact_state
+                        ),
+                        contact_schedule=(
+                            contact_schedule
+                        ),
                     )
 
                 mpc_iteration += 1
@@ -1125,9 +1205,13 @@ def main():
             # =================================================
             # E. PHYSICS INTEGRATION
             #
-            # Exactly one mj_step() here:
+            # IMPORTANT:
+            #
+            # Exactly ONE mj_step() in the main loop:
             #
             #     x_k
+            #       ->
+            #     u_k
             #       ->
             #     tau_k
             #       ->
@@ -1145,7 +1229,10 @@ def main():
 
             viewer.sync()
 
-            # Optional real-time pacing.
+            # =================================================
+            # F. OPTIONAL REAL-TIME PACING
+            # =================================================
+
             elapsed = (
                 time.perf_counter()
                 -
@@ -1159,12 +1246,13 @@ def main():
             )
 
             if remaining > 0.0:
+
                 time.sleep(
                     remaining
                 )
 
     # ========================================================
-    # 7. FINAL SUMMARY
+    # 6. FINAL SUMMARY
     # ========================================================
 
     logger.print_summary()
