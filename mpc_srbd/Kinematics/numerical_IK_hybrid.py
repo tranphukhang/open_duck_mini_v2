@@ -57,19 +57,16 @@ LEG_CONFIG = {
 #   Task 2:
 #       Foot pitch stabilization
 #
-#   Task 3:
-#       Joint posture
+# There is NO posture task in this version.
 #
-# Roll is NOT imposed as a separate Cartesian task in this
-# version. Hip-roll is kept near its swing-start posture by the
-# tertiary posture objective.
+# Roll is also NOT imposed as a separate Cartesian task.
 #
-# DEFAULT_K_ROLL is retained only so the current
-# swing_low_level_controller.py interface remains compatible.
-# It is not used by the hierarchical solver.
+# DEFAULT_K_POSTURE and DEFAULT_K_ROLL are retained only for
+# interface compatibility with swing_low_level_controller.py.
+# They are not used by the active IK update.
 # ============================================================
 
-DEFAULT_K_POSTURE = 0.10
+DEFAULT_K_POSTURE = 0.0
 DEFAULT_K_PITCH = 0.25
 DEFAULT_K_ROLL = 0.0
 
@@ -114,23 +111,16 @@ DEFAULT_PITCH_MOTION_COST = np.array(
 
 
 # ============================================================
-# POSTURE WEIGHTS
+# POSTURE COMPATIBILITY
 #
-# The tertiary task tries to return the leg toward the latched
-# swing-start posture without disturbing position or pitch.
+# These weights are retained only because the current external
+# interface still accepts posture_joint_weights.
 #
-# Hip yaw / hip roll receive larger restoration weights because
-# they should not drift unnecessarily during flat-ground swing.
+# The active solver does NOT compute a posture correction.
 # ============================================================
 
-DEFAULT_POSTURE_JOINT_WEIGHTS = np.array(
-    [
-        2.0,    # hip yaw
-        1.5,    # hip roll
-        0.5,    # hip pitch
-        0.5,    # knee
-        0.25,   # ankle
-    ],
+DEFAULT_POSTURE_JOINT_WEIGHTS = np.zeros(
+    5,
     dtype=float,
 )
 
@@ -1011,6 +1001,7 @@ def compute_hierarchical_posture_step(
     q_candidate,
     q_posture_ref,
     k_posture=DEFAULT_K_POSTURE,
+    # Compatibility only; posture is not an active IK task.
     posture_joint_weights=DEFAULT_POSTURE_JOINT_WEIGHTS,
 ):
     q_candidate = _validate_vector(
@@ -1121,6 +1112,7 @@ def solve_numerical_IK_hybrid(
     tolerance=1e-4,
     max_iterations=50,
 
+    # Compatibility only; posture is not an active IK task.
     q_posture_ref=None,
     k_posture=DEFAULT_K_POSTURE,
 
@@ -1155,15 +1147,12 @@ def solve_numerical_IK_hybrid(
         Foot pitch stabilization around the latched
         swing-start orientation.
 
-    Priority 3
-    ----------
-        Joint posture regulation in the null space of:
-            [position + pitch].
+    There is no tertiary posture task.
 
     Important
     ---------
     - Roll is not a Cartesian task.
-    - Hip-roll is regulated by posture.
+    - Joint posture is not regulated by the IK.
     - Pitch correction uses a weighted minimum-norm solution
       that strongly discourages hip-yaw motion and prefers
       hip-pitch + knee.
@@ -1210,6 +1199,7 @@ def solve_numerical_IK_hybrid(
             "orientation_task_active": True,
             "pitch_task_active": True,
             "roll_task_active": False,
+            "posture_task_active": False,
 
             "method_used": None,
             "newton_iterations": 0,
@@ -1658,21 +1648,20 @@ def solve_numerical_IK_hybrid(
             ]
 
             # ------------------------------------------------
-            # TASK 3: posture in null([position + pitch])
+            # NO POSTURE TASK
+            #
+            # Active hierarchy:
+            #
+            #     [x, y, z]  >>  pitch
+            #
+            # The remaining redundant DOF is not driven toward
+            # a latched joint posture.
             # ------------------------------------------------
 
-            posture_result = compute_hierarchical_posture_step(
-                J_position=J_position,
-                J_pitch=J_pitch,
-                q_candidate=q_candidate,
-                q_posture_ref=q_posture_ref,
-                k_posture=k_posture,
-                posture_joint_weights=posture_joint_weights,
+            delta_q_posture = np.zeros(
+                5,
+                dtype=float,
             )
-
-            delta_q_posture = posture_result[
-                "delta_q_posture"
-            ]
 
             # ------------------------------------------------
             # Hierarchical update
@@ -1682,8 +1671,6 @@ def solve_numerical_IK_hybrid(
                 delta_q_primary
                 +
                 delta_q_pitch
-                +
-                delta_q_posture
             )
 
             delta_q = _validate_vector(
@@ -1704,17 +1691,11 @@ def solve_numerical_IK_hybrid(
                 )
             )
 
-            posture_step_norm_last = float(
-                np.linalg.norm(
-                    delta_q_posture
-                )
-            )
+            posture_step_norm_last = 0.0
 
             secondary_step_norm_last = float(
                 np.linalg.norm(
                     delta_q_pitch
-                    +
-                    delta_q_posture
                 )
             )
 
@@ -1730,23 +1711,9 @@ def solve_numerical_IK_hybrid(
                 ]
             )
 
-            posture_augmented_leakage_last = float(
-                posture_result[
-                    "augmented_leakage"
-                ]
-            )
-
-            null_space_projection_error_last = float(
-                np.linalg.norm(
-                    posture_result[
-                        "J_augmented"
-                    ]
-                    @
-                    posture_result[
-                        "N_augmented"
-                    ]
-                )
-            )
+            # Compatibility diagnostics: posture is inactive.
+            posture_augmented_leakage_last = 0.0
+            null_space_projection_error_last = 0.0
 
             q_candidate = (
                 q_candidate
@@ -1956,6 +1923,9 @@ def solve_numerical_IK_hybrid(
         "roll_task_active":
             False,
 
+        "posture_task_active":
+            False,
+
         "method_used":
             method_used,
 
@@ -2000,6 +1970,7 @@ def solve_numerical_IK_hybrid(
         "R_swing_ref":
             R_swing_ref.copy(),
 
+        # Compatibility only; inactive in this solver.
         "k_posture":
             float(
                 k_posture
@@ -2018,6 +1989,7 @@ def solve_numerical_IK_hybrid(
         "pitch_motion_cost":
             pitch_motion_cost.copy(),
 
+        # Compatibility only; inactive in this solver.
         "posture_joint_weights":
             posture_joint_weights.copy(),
 
