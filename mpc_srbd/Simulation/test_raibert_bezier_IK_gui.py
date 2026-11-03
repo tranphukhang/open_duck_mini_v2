@@ -1,6 +1,8 @@
 from pathlib import Path
+import os
 import sys
 import time
+import tempfile
 
 import mujoco
 import mujoco.viewer
@@ -56,54 +58,68 @@ from Kinematics.numerical_IK_params import (
     IK_MAX_ITERATIONS,
 )
 
+from Actuator.swing_joint_PD import (
+    compute_swing_joint_PD,
+)
+
+from Actuator.swing_joint_PD_params import (
+    KP_SWING,
+    KD_SWING,
+)
+
 
 # ============================================================
-# TEST CONFIGURATION
+# TEST SETTINGS
 # ============================================================
 
-SWING_LEG = "L"
+SWING_LEG = "R"
 
 
 # ============================================================
 # CONTROL LOOP
 #
-# Same low-level control period used by the paper:
+# Paper-style low-level control:
 #
-#     dt = 0.001 s
+#     dt_control = 0.001 s
 #
-# No mj_step() is used in this test.
+# XML physics:
 #
-# MuJoCo qpos is directly updated so that we can visually
-# inspect the kinematic pipeline.
+#     dt_physics = 0.0005 s
+#
+# Therefore:
+#
+#     x_k
+#       ->
+#     calculate u_k
+#       ->
+#     apply u_k for 2 MuJoCo substeps
+#       ->
+#     x_(k+1)
 # ============================================================
 
 CONTROL_DT = 0.001
 
 T_SWING = 0.24
 
-N_CONTROL_STEPS = int(
-    round(
-        T_SWING
-        /
-        CONTROL_DT
+N_SAMPLES = (
+    int(
+        round(
+            T_SWING
+            /
+            CONTROL_DT
+        )
     )
-) + 1
+    +
+    1
+)
 
 
 # ============================================================
 # GUI
 #
-# Logical controller still runs using dt = 0.001 s.
+# Only wall-clock display is slowed down.
 #
-# DISPLAY_TIME_SCALE only slows wall-clock visualization.
-#
-# 10 means:
-#
-#     0.24 s logical swing
-#
-# appears as approximately:
-#
-#     2.4 s in the GUI.
+# Controller mathematics remains at 1000 Hz.
 # ============================================================
 
 DISPLAY_TIME_SCALE = 10.0
@@ -115,15 +131,6 @@ GUI_END_HOLD = 3.0
 
 # ============================================================
 # BEZIER
-#
-# Start conservatively with 8 mm because our previous test
-# showed 12 mm could bring the knee close to its limit.
-#
-# Later:
-#
-#     SWING_HEIGHT = 0.012
-#
-# can be tested again.
 # ============================================================
 
 SWING_HEIGHT = 0.008
@@ -134,9 +141,7 @@ CP2_COEF = 0.666
 
 
 # ============================================================
-# TEST VELOCITY COMMAND
-#
-# Desired walking velocity.
+# VELOCITY REFERENCE
 # ============================================================
 
 W_V_REF = np.array(
@@ -150,18 +155,9 @@ W_V_REF = np.array(
 
 
 # ============================================================
-# EMULATED VELOCITY FEEDBACK
+# EMULATED STATE-ESTIMATOR VELOCITY
 #
-# We do not yet run full dynamics.
-#
-# Instead, we emulate state-estimator velocity feedback:
-#
-#     v_actual(k)
-#
-# and store it in MuJoCo qvel.
-#
-# A small time-varying error is included so that the Raibert
-# foothold actually changes online.
+# Same signal used in previous integration test.
 # ============================================================
 
 VX_FEEDBACK_AMPLITUDE = 0.04
@@ -170,12 +166,48 @@ VY_FEEDBACK_AMPLITUDE = 0.02
 
 
 # ============================================================
-# INITIAL JOINT CONFIGURATION
+# DESIRED JOINT VELOCITY
+#
+# qdot_des is obtained from finite difference:
+#
+#     qdot_des_raw =
+#         (q_des(k) - q_des(k-1)) / dt
+#
+# then low-pass filtered.
+#
+# These values follow the previous swing low-level design.
+# ============================================================
+
+Q_DOT_DES_FILTER_TAU = 0.005
+
+Q_DOT_DES_LIMIT = np.array(
+    [
+        6.0,    # hip yaw
+        6.0,    # hip roll
+        8.0,    # hip pitch
+        10.0,   # knee
+        8.0,    # ankle
+    ],
+    dtype=float,
+)
+
+
+# ============================================================
+# FLAT GROUND
+# ============================================================
+
+SLOPE_PITCH = 0.0
+
+
+# ============================================================
+# INITIAL CONFIGURATION
+#
+# Joint order:
 #
 # [
-#     hip_yaw,
-#     hip_roll,
-#     hip_pitch,
+#     hip yaw,
+#     hip roll,
+#     hip pitch,
 #     knee,
 #     ankle
 # ]
@@ -203,13 +235,6 @@ INITIAL_Q_RIGHT = np.array(
     ],
     dtype=float,
 )
-
-
-# ============================================================
-# FLAT GROUND
-# ============================================================
-
-SLOPE_PITCH = 0.0
 
 
 # ============================================================
@@ -250,173 +275,343 @@ ANKLE_SITE_NAMES = {
 
 
 # ============================================================
-# VISUAL MARKERS
+# GUI MARKERS
 #
-# All markers are intentionally transparent.
-#
-# Their sizes are also different so that when two points
-# overlap, both remain visible.
+# Transparent + different sizes so desired / actual remain
+# visible when overlapping.
 # ============================================================
 
 MARKER_RADIUS_FOOTHOLD = 0.0070
-
 MARKER_RADIUS_DESIRED = 0.0050
-
-MARKER_RADIUS_ACTUAL = 0.0032
-
+MARKER_RADIUS_ACTUAL = 0.0030
 MARKER_RADIUS_LIFTOFF = 0.0040
+MARKER_RADIUS_TRAIL = 0.0018
 
-MARKER_RADIUS_TRAIL = 0.0020
 
-
-# Semi-transparent RGBA
 RGBA_FOOTHOLD = np.array(
     [
         1.0,
         0.45,
         0.05,
-        0.18,
+        0.16,
     ],
     dtype=np.float32,
 )
+
 
 RGBA_DESIRED = np.array(
     [
         0.10,
         0.85,
         0.20,
-        0.23,
+        0.22,
     ],
     dtype=np.float32,
 )
+
 
 RGBA_ACTUAL = np.array(
     [
         0.10,
         0.35,
         1.00,
-        0.32,
+        0.38,
     ],
     dtype=np.float32,
 )
+
 
 RGBA_LIFTOFF = np.array(
     [
         0.70,
         0.70,
         0.70,
-        0.16,
+        0.14,
     ],
     dtype=np.float32,
 )
+
 
 RGBA_TRAIL_DES = np.array(
     [
         0.10,
         0.85,
         0.20,
-        0.08,
+        0.07,
     ],
     dtype=np.float32,
 )
+
 
 RGBA_TRAIL_ACT = np.array(
     [
         0.10,
         0.35,
         1.00,
-        0.10,
+        0.09,
     ],
     dtype=np.float32,
 )
 
 
-# Save one trail marker every N control samples.
 TRAIL_DECIMATION = 8
 
 MAX_TRAIL_POINTS = 40
 
 
 # ============================================================
-# JOINT HELPERS
+# TEMPORARY FIXED-BASE MODEL
+#
+# This test is specifically:
+#
+#     swing-reference
+#       ->
+#     joint PD
+#       ->
+#     MuJoCo joint dynamics
+#
+# The original XML has a floating base but no walking ground
+# scene. Therefore we remove ONLY the freejoint in a temporary
+# XML file.
+#
+# The original XML file is NOT modified.
+# ============================================================
+
+def load_fixed_base_model(
+    xml_path,
+):
+
+    xml_path = Path(
+        xml_path
+    )
+
+    xml_text = xml_path.read_text(
+        encoding="utf-8"
+    )
+
+
+    freejoint_text = (
+        '<freejoint name="floating_base"/>'
+    )
+
+
+    if freejoint_text not in xml_text:
+
+        raise RuntimeError(
+            "Không tìm thấy floating_base freejoint trong XML."
+        )
+
+
+    fixed_xml_text = xml_text.replace(
+        freejoint_text,
+        "<!-- floating_base removed for fixed-base PD test -->",
+        1,
+    )
+
+
+    fd, temp_name = tempfile.mkstemp(
+        prefix="_tmp_fixed_base_",
+        suffix=".xml",
+        dir=str(
+            xml_path.parent
+        ),
+    )
+
+    os.close(
+        fd
+    )
+
+
+    temp_path = Path(
+        temp_name
+    )
+
+
+    try:
+
+        temp_path.write_text(
+            fixed_xml_text,
+            encoding="utf-8",
+        )
+
+
+        model = mujoco.MjModel.from_xml_path(
+            str(
+                temp_path
+            )
+        )
+
+
+    finally:
+
+        if temp_path.exists():
+
+            temp_path.unlink()
+
+
+    return model
+
+
+# ============================================================
+# NAME HELPERS
 # ============================================================
 
 def get_joint_id(
     model,
-    joint_name,
+    name,
 ):
 
-    joint_id = mujoco.mj_name2id(
+    idx = mujoco.mj_name2id(
         model,
         mujoco.mjtObj.mjOBJ_JOINT,
-        joint_name,
+        name,
     )
 
-    if joint_id < 0:
+    if idx < 0:
+
         raise ValueError(
-            f"Joint '{joint_name}' not found."
+            f"Joint '{name}' not found."
         )
 
     return int(
-        joint_id
+        idx
     )
 
 
-def get_joint_qpos_address(
+def get_actuator_id(
     model,
-    joint_name,
+    name,
 ):
 
-    joint_id = get_joint_id(
+    idx = mujoco.mj_name2id(
         model,
-        joint_name,
+        mujoco.mjtObj.mjOBJ_ACTUATOR,
+        name,
     )
+
+    if idx < 0:
+
+        raise ValueError(
+            f"Actuator '{name}' not found."
+        )
 
     return int(
-        model.jnt_qposadr[
-            joint_id
-        ]
+        idx
     )
 
 
-def get_joint_position(
+def get_site_id(
     model,
-    data,
-    joint_name,
+    name,
 ):
 
-    adr = get_joint_qpos_address(
+    idx = mujoco.mj_name2id(
         model,
-        joint_name,
+        mujoco.mjtObj.mjOBJ_SITE,
+        name,
     )
 
-    return float(
-        data.qpos[
-            adr
-        ]
+    if idx < 0:
+
+        raise ValueError(
+            f"Site '{name}' not found."
+        )
+
+    return int(
+        idx
     )
 
 
-def set_joint_position(
+def get_body_id(
     model,
-    data,
-    joint_name,
-    value,
+    name,
 ):
 
-    adr = get_joint_qpos_address(
+    idx = mujoco.mj_name2id(
         model,
-        joint_name,
+        mujoco.mjtObj.mjOBJ_BODY,
+        name,
     )
 
-    data.qpos[
-        adr
-    ] = float(
-        value
+    if idx < 0:
+
+        raise ValueError(
+            f"Body '{name}' not found."
+        )
+
+    return int(
+        idx
     )
 
 
-def set_leg_configuration(
+# ============================================================
+# JOINT STATE
+# ============================================================
+
+def get_leg_joint_state(
+    model,
+    data,
+    leg,
+):
+
+    q = np.zeros(
+        5,
+        dtype=float,
+    )
+
+    q_dot = np.zeros(
+        5,
+        dtype=float,
+    )
+
+
+    for i, joint_name in enumerate(
+        LEG_JOINT_NAMES[
+            leg
+        ]
+    ):
+
+        joint_id = get_joint_id(
+            model,
+            joint_name,
+        )
+
+
+        qpos_adr = int(
+            model.jnt_qposadr[
+                joint_id
+            ]
+        )
+
+
+        dof_adr = int(
+            model.jnt_dofadr[
+                joint_id
+            ]
+        )
+
+
+        q[
+            i
+        ] = data.qpos[
+            qpos_adr
+        ]
+
+
+        q_dot[
+            i
+        ] = data.qvel[
+            dof_adr
+        ]
+
+
+    return (
+        q,
+        q_dot,
+    )
+
+
+def set_leg_joint_position(
     model,
     data,
     leg,
@@ -430,122 +625,31 @@ def set_leg_configuration(
         5
     )
 
-    for (
-        joint_name,
-        q,
-    ) in zip(
+
+    for i, joint_name in enumerate(
         LEG_JOINT_NAMES[
             leg
-        ],
-        q_leg,
+        ]
     ):
 
-        set_joint_position(
+        joint_id = get_joint_id(
             model,
-            data,
             joint_name,
-            q,
         )
 
 
-# ============================================================
-# BODY / SITE HELPERS
-# ============================================================
-
-def get_body_id(
-    model,
-    body_name,
-):
-
-    body_id = mujoco.mj_name2id(
-        model,
-        mujoco.mjtObj.mjOBJ_BODY,
-        body_name,
-    )
-
-    if body_id < 0:
-        raise ValueError(
-            f"Body '{body_name}' not found."
+        qpos_adr = int(
+            model.jnt_qposadr[
+                joint_id
+            ]
         )
 
-    return int(
-        body_id
-    )
 
-
-def get_site_id(
-    model,
-    site_name,
-):
-
-    site_id = mujoco.mj_name2id(
-        model,
-        mujoco.mjtObj.mjOBJ_SITE,
-        site_name,
-    )
-
-    if site_id < 0:
-        raise ValueError(
-            f"Site '{site_name}' not found."
-        )
-
-    return int(
-        site_id
-    )
-
-
-def get_ankle_position(
-    model,
-    data,
-    leg,
-):
-
-    site_id = get_site_id(
-        model,
-        ANKLE_SITE_NAMES[
-            leg
-        ],
-    )
-
-    return np.asarray(
-        data.site_xpos[
-            site_id
-        ],
-        dtype=float,
-    ).copy()
-
-
-def get_base_pose(
-    model,
-    data,
-):
-
-    body_id = get_body_id(
-        model,
-        BASE_BODY_NAME,
-    )
-
-    W_p_base = np.asarray(
-        data.xpos[
-            body_id
-        ],
-        dtype=float,
-    ).copy()
-
-    W_R_B = np.asarray(
-        data.xmat[
-            body_id
-        ],
-        dtype=float,
-    ).reshape(
-        3,
-        3,
-    ).copy()
-
-    return (
-        W_p_base,
-        W_R_B,
-    )
+        data.qpos[
+            qpos_adr
+        ] = q_leg[
+            i
+        ]
 
 
 # ============================================================
@@ -562,39 +666,16 @@ def set_initial_state(
         data,
     )
 
-    # Floating base
-    data.qpos[
-        0:3
-    ] = np.array(
-        [
-            0.0,
-            0.0,
-            0.28,
-        ],
-        dtype=float,
-    )
 
-    data.qpos[
-        3:7
-    ] = np.array(
-        [
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-        ],
-        dtype=float,
-    )
-
-
-    set_leg_configuration(
+    set_leg_joint_position(
         model,
         data,
         "L",
         INITIAL_Q_LEFT,
     )
 
-    set_leg_configuration(
+
+    set_leg_joint_position(
         model,
         data,
         "R",
@@ -604,6 +685,8 @@ def set_initial_state(
 
     data.qvel[:] = 0.0
 
+    data.ctrl[:] = 0.0
+
 
     mujoco.mj_forward(
         model,
@@ -612,23 +695,71 @@ def set_initial_state(
 
 
 # ============================================================
-# RAIBERT BODY-FRAME ANCHOR
+# BASE / ANKLE POSE
+# ============================================================
+
+def get_base_pose(
+    model,
+    data,
+):
+
+    body_id = get_body_id(
+        model,
+        BASE_BODY_NAME,
+    )
+
+
+    W_p_base = np.asarray(
+        data.xpos[
+            body_id
+        ],
+        dtype=float,
+    ).copy()
+
+
+    W_R_B = np.asarray(
+        data.xmat[
+            body_id
+        ],
+        dtype=float,
+    ).reshape(
+        3,
+        3,
+    ).copy()
+
+
+    return (
+        W_p_base,
+        W_R_B,
+    )
+
+
+def get_ankle_position(
+    model,
+    data,
+    leg,
+):
+
+    site_id = get_site_id(
+        model,
+        ANKLE_SITE_NAMES[
+            leg
+        ],
+    )
+
+
+    return np.asarray(
+        data.site_xpos[
+            site_id
+        ],
+        dtype=float,
+    ).copy()
+
+
+# ============================================================
+# RAIBERT ANCHOR
 #
-# Important:
-#
-# The paper does NOT use the literal hip joint coordinate.
-#
-# It uses:
-#
-#     base position
-#       +
-#     R_WB * get_hip_offset()
-#
-# For Open Duck we create an equivalent nominal anchor by
-# taking the nominal ankle X/Y relative to the body.
-#
-# The Z component is intentionally set to zero because Raibert
-# touchdown Z is overwritten separately.
+# Equivalent role to paper's get_hip_offset().
 # ============================================================
 
 def compute_raibert_anchor_offset_B(
@@ -643,6 +774,7 @@ def compute_raibert_anchor_offset_B(
         leg,
     )
 
+
     (
         W_p_base,
         W_R_B,
@@ -653,22 +785,19 @@ def compute_raibert_anchor_offset_B(
     )
 
 
-    W_delta = (
-        W_p_ankle
-        -
-        W_p_base
-    )
-
-
     B_r_anchor = (
         W_R_B.T
         @
-        W_delta
+        (
+            W_p_ankle
+            -
+            W_p_base
+        )
     )
 
 
-    # Same structural idea as paper:
-    # no vertical component in the hip/anchor offset.
+    # Same structural idea used by paper:
+    # vertical foothold is handled separately.
     B_r_anchor[
         2
     ] = 0.0
@@ -677,36 +806,8 @@ def compute_raibert_anchor_offset_B(
     return B_r_anchor
 
 
-def compute_raibert_anchor_W(
-    model,
-    data,
-    B_r_anchor,
-):
-
-    (
-        W_p_base,
-        W_R_B,
-
-    ) = get_base_pose(
-        model,
-        data,
-    )
-
-
-    W_p_anchor = (
-        W_p_base
-        +
-        W_R_B
-        @
-        B_r_anchor
-    )
-
-
-    return W_p_anchor
-
-
 # ============================================================
-# EMULATED VELOCITY FEEDBACK
+# VELOCITY FEEDBACK
 # ============================================================
 
 def compute_velocity_feedback(
@@ -723,7 +824,6 @@ def compute_velocity_feedback(
     )
 
 
-    # Forward-speed tracking disturbance.
     W_v_actual[
         0
     ] += (
@@ -737,7 +837,6 @@ def compute_velocity_feedback(
     )
 
 
-    # Small lateral disturbance.
     W_v_actual[
         1
     ] += (
@@ -762,215 +861,262 @@ def compute_velocity_feedback(
 
 
 # ============================================================
-# APPLY IK OUTPUT
+# ANKLE DESIRED
 #
-# q_ik:
+# Paper-style actual-state ankle compensation:
 #
-# [
-#     hip_yaw,
-#     hip_roll,
-#     hip_pitch,
-#     knee
-# ]
+#     q_A_des =
+#
+#     -slope_pitch
+#     -q_HP_actual
+#     -q_K_actual
 # ============================================================
 
-def apply_ik_solution(
-    model,
-    data,
-    leg,
-    q_ik,
+def compute_ankle_desired_from_actual(
+    q_actual,
 ):
 
-    q_ik = np.asarray(
-        q_ik,
+    q_actual = np.asarray(
+        q_actual,
         dtype=float,
     ).reshape(
-        4
+        5
     )
 
 
-    joint_names = (
-        LEG_JOINT_NAMES[
-            leg
-        ][
-            0:4
-        ]
-    )
+    q_hp_actual = q_actual[
+        2
+    ]
 
 
-    for (
-        joint_name,
-        value,
-    ) in zip(
-        joint_names,
-        q_ik,
-    ):
-
-        set_joint_position(
-            model,
-            data,
-            joint_name,
-            value,
-        )
-
-
-# ============================================================
-# ANKLE COMPENSATION
-# ============================================================
-
-def apply_ankle_compensation(
-    model,
-    data,
-    leg,
-):
-
-    if leg == "L":
-
-        hip_pitch_name = (
-            "L_hip_pitch"
-        )
-
-        knee_name = (
-            "L_knee"
-        )
-
-        ankle_name = (
-            "L_ankle"
-        )
-
-    else:
-
-        hip_pitch_name = (
-            "R_hip_pitch"
-        )
-
-        knee_name = (
-            "R_knee"
-        )
-
-        ankle_name = (
-            "R_ankle"
-        )
-
-
-    q_hp = get_joint_position(
-        model,
-        data,
-        hip_pitch_name,
-    )
-
-    q_k = get_joint_position(
-        model,
-        data,
-        knee_name,
-    )
-
-
-    q_ankle_des = (
-        -SLOPE_PITCH
-        -
-        q_hp
-        -
-        q_k
-    )
-
-
-    set_joint_position(
-        model,
-        data,
-        ankle_name,
-        q_ankle_des,
-    )
+    q_k_actual = q_actual[
+        3
+    ]
 
 
     return float(
-        q_ankle_des
+        -SLOPE_PITCH
+        -
+        q_hp_actual
+        -
+        q_k_actual
     )
 
 
 # ============================================================
-# JOINT-LIMIT MARGIN
+# DESIRED JOINT VELOCITY FILTER
 # ============================================================
 
-def compute_min_joint_margin(
-    model,
-    data,
-    leg,
+def update_q_dot_des(
+    q_des,
+    q_des_previous,
+    q_dot_des_filtered_previous,
 ):
 
-    min_margin = np.inf
+    q_des = np.asarray(
+        q_des,
+        dtype=float,
+    ).reshape(
+        5
+    )
 
-    nearest_joint = None
+
+    if q_des_previous is None:
+
+        return np.zeros(
+            5,
+            dtype=float,
+        )
 
 
-    for joint_name in LEG_JOINT_NAMES[
-        leg
-    ]:
+    q_dot_raw = (
+        q_des
+        -
+        q_des_previous
+    ) / CONTROL_DT
 
-        joint_id = get_joint_id(
+
+    q_dot_raw = np.clip(
+        q_dot_raw,
+        -Q_DOT_DES_LIMIT,
+        +Q_DOT_DES_LIMIT,
+    )
+
+
+    alpha = (
+        CONTROL_DT
+        /
+        (
+            Q_DOT_DES_FILTER_TAU
+            +
+            CONTROL_DT
+        )
+    )
+
+
+    q_dot_filtered = (
+        (
+            1.0
+            -
+            alpha
+        )
+        *
+        q_dot_des_filtered_previous
+
+        +
+
+        alpha
+        *
+        q_dot_raw
+    )
+
+
+    q_dot_filtered = np.clip(
+        q_dot_filtered,
+        -Q_DOT_DES_LIMIT,
+        +Q_DOT_DES_LIMIT,
+    )
+
+
+    return q_dot_filtered
+
+
+# ============================================================
+# ACTUATOR LIMIT
+# ============================================================
+
+def clip_leg_torque(
+    model,
+    leg,
+    tau,
+):
+
+    tau = np.asarray(
+        tau,
+        dtype=float,
+    ).reshape(
+        5
+    )
+
+
+    tau_clipped = (
+        tau.copy()
+    )
+
+
+    clipped_flags = np.zeros(
+        5,
+        dtype=bool,
+    )
+
+
+    for i, actuator_name in enumerate(
+        LEG_JOINT_NAMES[
+            leg
+        ]
+    ):
+
+        actuator_id = get_actuator_id(
             model,
-            joint_name,
+            actuator_name,
         )
 
 
-        if not bool(
-            model.jnt_limited[
-                joint_id
-            ]
-        ):
-
-            continue
-
-
-        q = get_joint_position(
-            model,
-            data,
-            joint_name,
-        )
-
-
-        q_min = float(
-            model.jnt_range[
-                joint_id,
-                0
-            ]
-        )
-
-        q_max = float(
-            model.jnt_range[
-                joint_id,
-                1
+        is_limited = bool(
+            model.actuator_ctrllimited[
+                actuator_id
             ]
         )
 
 
-        margin = min(
-            q - q_min,
-            q_max - q,
-        )
+        if is_limited:
 
-
-        if margin < min_margin:
-
-            min_margin = (
-                margin
+            ctrl_min = float(
+                model.actuator_ctrlrange[
+                    actuator_id,
+                    0
+                ]
             )
 
-            nearest_joint = (
-                joint_name
+
+            ctrl_max = float(
+                model.actuator_ctrlrange[
+                    actuator_id,
+                    1
+                ]
             )
+
+
+            clipped_value = np.clip(
+                tau[
+                    i
+                ],
+                ctrl_min,
+                ctrl_max,
+            )
+
+
+            clipped_flags[
+                i
+            ] = not np.isclose(
+                clipped_value,
+                tau[
+                    i
+                ],
+            )
+
+
+            tau_clipped[
+                i
+            ] = clipped_value
 
 
     return (
-        float(
-            min_margin
-        ),
-        nearest_joint,
+        tau_clipped,
+        clipped_flags,
     )
 
 
 # ============================================================
-# USER-SCENE MARKER
+# APPLY LEG TORQUE
+# ============================================================
+
+def write_leg_torque(
+    model,
+    data,
+    leg,
+    tau,
+):
+
+    tau = np.asarray(
+        tau,
+        dtype=float,
+    ).reshape(
+        5
+    )
+
+
+    for i, actuator_name in enumerate(
+        LEG_JOINT_NAMES[
+            leg
+        ]
+    ):
+
+        actuator_id = get_actuator_id(
+            model,
+            actuator_name,
+        )
+
+
+        data.ctrl[
+            actuator_id
+        ] = tau[
+            i
+        ]
+
+
+# ============================================================
+# USER-SCENE SPHERE
 # ============================================================
 
 def add_sphere_marker(
@@ -1026,10 +1172,6 @@ def add_sphere_marker(
     scene.ngeom += 1
 
 
-# ============================================================
-# UPDATE GUI MARKERS
-# ============================================================
-
 def update_gui_markers(
     viewer,
     W_p_liftoff,
@@ -1047,10 +1189,6 @@ def update_gui_markers(
         scene.ngeom = 0
 
 
-        # ----------------------------------------------------
-        # Liftoff
-        # ----------------------------------------------------
-
         add_sphere_marker(
             scene,
             W_p_liftoff,
@@ -1058,12 +1196,6 @@ def update_gui_markers(
             RGBA_LIFTOFF,
         )
 
-
-        # ----------------------------------------------------
-        # Current Raibert foothold
-        #
-        # Large and very transparent.
-        # ----------------------------------------------------
 
         add_sphere_marker(
             scene,
@@ -1073,10 +1205,6 @@ def update_gui_markers(
         )
 
 
-        # ----------------------------------------------------
-        # Current Bezier desired point
-        # ----------------------------------------------------
-
         add_sphere_marker(
             scene,
             W_p_des,
@@ -1085,13 +1213,6 @@ def update_gui_markers(
         )
 
 
-        # ----------------------------------------------------
-        # Current actual ankle center
-        #
-        # Smaller radius allows it to remain visible inside
-        # the desired point when both overlap.
-        # ----------------------------------------------------
-
         add_sphere_marker(
             scene,
             W_p_actual,
@@ -1099,10 +1220,6 @@ def update_gui_markers(
             RGBA_ACTUAL,
         )
 
-
-        # ----------------------------------------------------
-        # Faint trajectory trails
-        # ----------------------------------------------------
 
         for point in desired_trail[
             -MAX_TRAIL_POINTS:
@@ -1147,6 +1264,7 @@ def configure_camera(
             dtype=float,
         )
 
+
         viewer.cam.distance = 0.50
 
         viewer.cam.azimuth = 135.0
@@ -1161,15 +1279,15 @@ def configure_camera(
 def main():
 
     print(
-        "=" * 84
+        "=" * 92
     )
 
     print(
-        "TEST: RAIBERT -> BEZIER -> IK"
+        "TEST: RAIBERT -> BEZIER -> IK -> PD -> MUJOCO"
     )
 
     print(
-        "=" * 84
+        "=" * 92
     )
 
 
@@ -1190,80 +1308,106 @@ def main():
         )
 
 
-    print(
-        f"XML                  : {XML_PATH}"
-    )
-
-    print(
-        f"Swing leg            : {SWING_LEG}"
-    )
-
-    print(
-        f"Control dt            : {CONTROL_DT:.6f} s"
-    )
-
-    print(
-        f"Control frequency     : {1.0 / CONTROL_DT:.1f} Hz"
-    )
-
-    print(
-        f"T_swing               : {T_SWING:.3f} s"
-    )
-
-    print(
-        f"Swing height          : {SWING_HEIGHT:.4f} m"
-    )
-
-    print(
-        f"GUI time scale        : {DISPLAY_TIME_SCALE:.1f} x slower"
-    )
-
-    print()
-
-    print(
-        "Marker legend:"
-    )
-
-    print(
-        "  orange transparent : current Raibert foothold"
-    )
-
-    print(
-        "  green  transparent : Bezier desired ankle"
-    )
-
-    print(
-        "  blue   transparent : actual ankle"
-    )
-
-    print(
-        "  gray   transparent : liftoff point"
-    )
-
-    print()
-
-    print(
-        "IMPORTANT: this is a kinematic integration test."
-    )
-
-    print(
-        "No mj_step() is called."
-    )
-
-
     # ========================================================
-    # LOAD MODEL
+    # FIXED-BASE MODEL
     # ========================================================
 
-    model = mujoco.MjModel.from_xml_path(
-        str(
-            XML_PATH
-        )
+    model = load_fixed_base_model(
+        XML_PATH
     )
+
 
     data = mujoco.MjData(
         model
     )
+
+
+    # ========================================================
+    # PHYSICS / CONTROL RATE
+    # ========================================================
+
+    physics_dt = float(
+        model.opt.timestep
+    )
+
+
+    substep_ratio = (
+        CONTROL_DT
+        /
+        physics_dt
+    )
+
+
+    PHYSICS_SUBSTEPS = int(
+        round(
+            substep_ratio
+        )
+    )
+
+
+    if (
+        PHYSICS_SUBSTEPS <= 0
+        or
+        not np.isclose(
+            substep_ratio,
+            PHYSICS_SUBSTEPS,
+            atol=1e-12,
+            rtol=0.0,
+        )
+    ):
+
+        raise RuntimeError(
+            "CONTROL_DT phải là bội nguyên của MuJoCo timestep.\n"
+            f"CONTROL_DT = {CONTROL_DT}\n"
+            f"physics dt = {physics_dt}"
+        )
+
+
+    print(
+        f"XML                    : {XML_PATH}"
+    )
+
+    print(
+        f"Swing leg              : {SWING_LEG}"
+    )
+
+    print(
+        f"Fixed-base test        : YES"
+    )
+
+    print(
+        f"Control dt             : {CONTROL_DT:.6f} s"
+    )
+
+    print(
+        f"Control frequency      : {1.0 / CONTROL_DT:.1f} Hz"
+    )
+
+    print(
+        f"MuJoCo physics dt      : {physics_dt:.6f} s"
+    )
+
+    print(
+        f"Physics substeps       : {PHYSICS_SUBSTEPS}"
+    )
+
+    print(
+        f"T_swing                : {T_SWING:.3f} s"
+    )
+
+    print(
+        f"Swing height           : {SWING_HEIGHT:.4f} m"
+    )
+
+    print(
+        f"KP_SWING               : {KP_SWING}"
+    )
+
+    print(
+        f"KD_SWING               : {KD_SWING}"
+    )
+
+    print()
 
 
     # ========================================================
@@ -1276,6 +1420,25 @@ def main():
     )
 
 
+    STANCE_LEG = (
+        "R"
+        if SWING_LEG == "L"
+        else
+        "L"
+    )
+
+
+    (
+        q_stance_hold,
+        _,
+
+    ) = get_leg_joint_state(
+        model,
+        data,
+        STANCE_LEG,
+    )
+
+
     W_p_liftoff = get_ankle_position(
         model,
         data,
@@ -1283,9 +1446,15 @@ def main():
     )
 
 
-    # --------------------------------------------------------
-    # Equivalent to paper's get_hip_offset().
-    # --------------------------------------------------------
+    (
+        W_p_base_initial,
+        W_R_B_initial,
+
+    ) = get_base_pose(
+        model,
+        data,
+    )
+
 
     B_r_raibert_anchor = (
         compute_raibert_anchor_offset_B(
@@ -1296,13 +1465,10 @@ def main():
     )
 
 
-    # --------------------------------------------------------
-    # Flat-ground touchdown ankle height.
-    #
-    # Since our planner currently works directly with the
-    # ankle center, touchdown ankle Z is kept equal to the
-    # initial ankle-center height.
-    # --------------------------------------------------------
+    virtual_base_position = (
+        W_p_base_initial.copy()
+    )
+
 
     FOOTHOLD_Z = float(
         W_p_liftoff[
@@ -1312,16 +1478,44 @@ def main():
 
 
     print(
-        f"Initial ankle center  : {W_p_liftoff}"
+        f"Initial ankle center   : {W_p_liftoff}"
     )
 
     print(
-        f"Raibert anchor B      : {B_r_raibert_anchor}"
+        f"Raibert anchor B       : {B_r_raibert_anchor}"
     )
 
     print(
-        f"Touchdown ankle Z     : {FOOTHOLD_Z:.6f} m"
+        f"Touchdown ankle Z      : {FOOTHOLD_Z:.6f} m"
     )
+
+    print()
+
+
+    # ========================================================
+    # ACTUATOR LIMITS
+    # ========================================================
+
+    print(
+        "Swing actuator ctrl ranges:"
+    )
+
+
+    for actuator_name in LEG_JOINT_NAMES[
+        SWING_LEG
+    ]:
+
+        actuator_id = get_actuator_id(
+            model,
+            actuator_name,
+        )
+
+
+        print(
+            f"  {actuator_name:<14} "
+            f"{model.actuator_ctrlrange[actuator_id]}"
+        )
+
 
     print()
 
@@ -1338,27 +1532,31 @@ def main():
 
     velocity_log = []
 
-    velocity_ref_log = []
-
     foothold_log = []
 
-    desired_log = []
+    desired_xyz_log = []
 
-    actual_log = []
+    actual_xyz_log = []
 
-    error_log = []
+    cart_error_log = []
+
+    q_des_log = []
+
+    q_actual_log = []
+
+    q_dot_des_log = []
+
+    q_dot_actual_log = []
+
+    tau_raw_log = []
+
+    tau_applied_log = []
+
+    tau_clip_log = []
 
     sigma_log = []
 
     iteration_log = []
-
-    joint_margin_log = []
-
-    ankle_command_log = []
-
-    x_clip_log = []
-
-    y_clip_log = []
 
 
     desired_trail = []
@@ -1366,8 +1564,49 @@ def main():
     actual_trail = []
 
 
+    q_des_previous = None
+
+    q_dot_des_filtered = np.zeros(
+        5,
+        dtype=float,
+    )
+
+
+    PRINT_INDICES = {
+        0,
+        int(
+            round(
+                0.25
+                *
+                T_SWING
+                /
+                CONTROL_DT
+            )
+        ),
+        int(
+            round(
+                0.50
+                *
+                T_SWING
+                /
+                CONTROL_DT
+            )
+        ),
+        int(
+            round(
+                0.75
+                *
+                T_SWING
+                /
+                CONTROL_DT
+            )
+        ),
+        N_SAMPLES - 1,
+    }
+
+
     # ========================================================
-    # LAUNCH GUI
+    # GUI
     # ========================================================
 
     with mujoco.viewer.launch_passive(
@@ -1380,13 +1619,11 @@ def main():
         )
 
 
-        # ====================================================
+        # ----------------------------------------------------
         # INITIAL HOLD
-        # ====================================================
+        # ----------------------------------------------------
 
-        start_hold_time = (
-            time.time()
-        )
+        hold_start = time.time()
 
 
         while (
@@ -1394,7 +1631,7 @@ def main():
             and
             time.time()
             -
-            start_hold_time
+            hold_start
             <
             GUI_START_HOLD
         ):
@@ -1403,13 +1640,6 @@ def main():
                 model,
                 data,
                 SWING_LEG,
-            )
-
-
-            W_p_anchor = compute_raibert_anchor_W(
-                model,
-                data,
-                B_r_raibert_anchor,
             )
 
 
@@ -1422,7 +1652,7 @@ def main():
                     W_p_liftoff,
 
                 W_p_foothold=
-                    W_p_anchor,
+                    W_p_liftoff,
 
                 W_p_des=
                     W_p_liftoff,
@@ -1447,10 +1677,22 @@ def main():
 
         # ====================================================
         # CONTROL LOOP
+        #
+        # x_k
+        #  ->
+        # calculate references
+        #  ->
+        # calculate tau_k
+        #  ->
+        # apply tau_k
+        #  ->
+        # mj_step()
+        #  ->
+        # x_(k+1)
         # ====================================================
 
         for k in range(
-            N_CONTROL_STEPS
+            N_SAMPLES
         ):
 
             if not viewer.is_running():
@@ -1458,7 +1700,7 @@ def main():
 
 
             # =================================================
-            # x_k
+            # x_k / GAIT TIME
             # =================================================
 
             t = min(
@@ -1487,39 +1729,38 @@ def main():
 
 
             # =================================================
-            # STATE-ESTIMATOR VELOCITY FEEDBACK
+            # VELOCITY FEEDBACK
             # =================================================
 
-            W_v_actual = compute_velocity_feedback(
-                swing_phase
-            )
-
-
-            # Store the emulated measured velocity in MuJoCo.
-            data.qvel[
-                0:3
-            ] = W_v_actual
-
-
-            # =================================================
-            # PAPER-STYLE RAIBERT ANCHOR
-            #
-            # Base pose is read from current MuJoCo state.
-            # =================================================
-
-            W_p_raibert_anchor = (
-                compute_raibert_anchor_W(
-                    model,
-                    data,
-                    B_r_raibert_anchor,
+            W_v_actual = (
+                compute_velocity_feedback(
+                    swing_phase
                 )
             )
 
 
             # =================================================
-            # RAIBERT
+            # VIRTUAL MOVING BASE FOR RAIBERT PLANNER
             #
-            # T_remaining is updated every control cycle.
+            # Physical torso is fixed ONLY to isolate PD.
+            #
+            # Planner receives a moving virtual body position,
+            # exactly like the previous integration test.
+            # =================================================
+
+            W_p_raibert_anchor = (
+                virtual_base_position
+
+                +
+
+                W_R_B_initial
+                @
+                B_r_raibert_anchor
+            )
+
+
+            # =================================================
+            # RAIBERT
             # =================================================
 
             raibert_result = (
@@ -1556,10 +1797,6 @@ def main():
 
             # =================================================
             # BEZIER
-            #
-            # P0 remains the fixed liftoff point.
-            #
-            # Pf is updated online by Raibert.
             # =================================================
 
             bezier_result = (
@@ -1598,7 +1835,12 @@ def main():
 
 
             # =================================================
-            # NUMERICAL IK
+            # IK
+            #
+            # IMPORTANT:
+            # solve_numerical_IK_hybrid() restores qpos/qvel.
+            #
+            # It does NOT move the physical robot.
             # =================================================
 
             (
@@ -1648,44 +1890,197 @@ def main():
 
 
             # =================================================
-            # APPLY IK TO MUJOCO STATE
+            # ACTUAL JOINT STATE x_k
             # =================================================
 
-            apply_ik_solution(
+            (
+                q_actual,
+                q_dot_actual,
+
+            ) = get_leg_joint_state(
                 model,
                 data,
                 SWING_LEG,
-                q_ik,
-            )
-
-
-            mujoco.mj_forward(
-                model,
-                data,
             )
 
 
             # =================================================
-            # ANKLE COMPENSATION
+            # DESIRED ANKLE
+            #
+            # Follow paper:
+            #
+            # use ACTUAL HP and K.
             # =================================================
 
             q_ankle_des = (
-                apply_ankle_compensation(
-                    model,
-                    data,
-                    SWING_LEG,
+                compute_ankle_desired_from_actual(
+                    q_actual
                 )
             )
 
 
-            mujoco.mj_forward(
-                model,
-                data,
+            # =================================================
+            # COMPLETE q_des
+            #
+            # [
+            #   HY,
+            #   HR,
+            #   HP,
+            #   K,
+            #   ankle
+            # ]
+            # =================================================
+
+            q_des = np.array(
+                [
+                    q_ik[
+                        0
+                    ],
+
+                    q_ik[
+                        1
+                    ],
+
+                    q_ik[
+                        2
+                    ],
+
+                    q_ik[
+                        3
+                    ],
+
+                    q_ankle_des,
+                ],
+                dtype=float,
             )
 
 
             # =================================================
-            # ACTUAL ANKLE POSITION
+            # qdot_des
+            # =================================================
+
+            q_dot_des_filtered = (
+                update_q_dot_des(
+
+                    q_des=
+                        q_des,
+
+                    q_des_previous=
+                        q_des_previous,
+
+                    q_dot_des_filtered_previous=
+                        q_dot_des_filtered,
+                )
+            )
+
+
+            # =================================================
+            # PD
+            #
+            # tau =
+            #
+            # Kp(q_des-q)
+            # +
+            # Kd(qdot_des-qdot)
+            # =================================================
+
+            tau_raw = (
+                compute_swing_joint_PD(
+
+                    q_des=
+                        q_des,
+
+                    q=
+                        q_actual,
+
+                    q_dot=
+                        q_dot_actual,
+
+                    Kp=
+                        KP_SWING,
+
+                    Kd=
+                        KD_SWING,
+
+                    q_dot_des=
+                        q_dot_des_filtered,
+                )
+            )
+
+
+            # =================================================
+            # ACTUATOR SATURATION
+            # =================================================
+
+            (
+                tau_applied,
+                torque_clipped,
+
+            ) = clip_leg_torque(
+                model,
+                SWING_LEG,
+                tau_raw,
+            )
+
+
+            # =================================================
+            # STANCE LEG HOLD PD
+            #
+            # Only for visualization of this isolated fixed-base
+            # actuator test.
+            # =================================================
+
+            (
+                q_stance,
+                q_dot_stance,
+
+            ) = get_leg_joint_state(
+                model,
+                data,
+                STANCE_LEG,
+            )
+
+
+            tau_stance_raw = (
+                compute_swing_joint_PD(
+
+                    q_des=
+                        q_stance_hold,
+
+                    q=
+                        q_stance,
+
+                    q_dot=
+                        q_dot_stance,
+
+                    Kp=
+                        KP_SWING,
+
+                    Kd=
+                        KD_SWING,
+
+                    q_dot_des=
+                        np.zeros(
+                            5,
+                            dtype=float,
+                        ),
+                )
+            )
+
+
+            (
+                tau_stance,
+                _,
+
+            ) = clip_leg_torque(
+                model,
+                STANCE_LEG,
+                tau_stance_raw,
+            )
+
+
+            # =================================================
+            # CURRENT CARTESIAN STATE
             # =================================================
 
             W_p_actual = get_ankle_position(
@@ -1705,22 +2100,7 @@ def main():
 
 
             # =================================================
-            # JOINT LIMIT
-            # =================================================
-
-            (
-                min_joint_margin,
-                nearest_joint,
-
-            ) = compute_min_joint_margin(
-                model,
-                data,
-                SWING_LEG,
-            )
-
-
-            # =================================================
-            # LOG
+            # LOG x_k AND u_k
             # =================================================
 
             time_log.append(
@@ -1739,24 +2119,48 @@ def main():
                 W_v_actual.copy()
             )
 
-            velocity_ref_log.append(
-                W_V_REF.copy()
-            )
-
             foothold_log.append(
                 W_p_foothold.copy()
             )
 
-            desired_log.append(
+            desired_xyz_log.append(
                 W_p_des.copy()
             )
 
-            actual_log.append(
+            actual_xyz_log.append(
                 W_p_actual.copy()
             )
 
-            error_log.append(
+            cart_error_log.append(
                 cartesian_error
+            )
+
+            q_des_log.append(
+                q_des.copy()
+            )
+
+            q_actual_log.append(
+                q_actual.copy()
+            )
+
+            q_dot_des_log.append(
+                q_dot_des_filtered.copy()
+            )
+
+            q_dot_actual_log.append(
+                q_dot_actual.copy()
+            )
+
+            tau_raw_log.append(
+                tau_raw.copy()
+            )
+
+            tau_applied_log.append(
+                tau_applied.copy()
+            )
+
+            tau_clip_log.append(
+                torque_clipped.copy()
             )
 
             sigma_log.append(
@@ -1775,33 +2179,9 @@ def main():
                 )
             )
 
-            joint_margin_log.append(
-                min_joint_margin
-            )
-
-            ankle_command_log.append(
-                q_ankle_des
-            )
-
-            x_clip_log.append(
-                bool(
-                    raibert_result[
-                        "x_was_clipped"
-                    ]
-                )
-            )
-
-            y_clip_log.append(
-                bool(
-                    raibert_result[
-                        "y_was_clipped"
-                    ]
-                )
-            )
-
 
             # =================================================
-            # TRAIL
+            # TRAILS
             # =================================================
 
             if (
@@ -1854,57 +2234,13 @@ def main():
 
 
             # =================================================
-            # PRINT SELECTED PHASES
+            # TERMINAL DEBUG
             # =================================================
 
-            if (
-                k == 0
-                or
-                abs(
-                    swing_phase
-                    -
-                    0.25
-                )
-                <
-                CONTROL_DT
-                /
-                T_SWING
-                /
-                2.0
-                or
-                abs(
-                    swing_phase
-                    -
-                    0.50
-                )
-                <
-                CONTROL_DT
-                /
-                T_SWING
-                /
-                2.0
-                or
-                abs(
-                    swing_phase
-                    -
-                    0.75
-                )
-                <
-                CONTROL_DT
-                /
-                T_SWING
-                /
-                2.0
-                or
-                k
-                ==
-                N_CONTROL_STEPS
-                -
-                1
-            ):
+            if k in PRINT_INDICES:
 
                 print(
-                    "-" * 84
+                    "-" * 92
                 )
 
                 print(
@@ -1913,10 +2249,6 @@ def main():
 
                 print(
                     f"T_rem = {T_remaining:.4f} s"
-                )
-
-                print(
-                    f"v_actual = {W_v_actual}"
                 )
 
                 print(
@@ -1932,73 +2264,123 @@ def main():
                 )
 
                 print(
-                    f"error = "
+                    f"Cartesian error = "
                     f"{cartesian_error * 1000.0:.4f} mm"
                 )
 
                 print(
-                    f"IK iterations = "
-                    f"{ik_diag['iterations']}"
+                    f"q_des [deg] = "
+                    f"{np.rad2deg(q_des)}"
                 )
 
                 print(
+                    f"q     [deg] = "
+                    f"{np.rad2deg(q_actual)}"
+                )
+
+                print(
+                    f"tau raw = {tau_raw}"
+                )
+
+                print(
+                    f"tau applied = {tau_applied}"
+                )
+
+                print(
+                    f"torque clipped = {torque_clipped}"
+                )
+
+                print(
+                    f"IK iter = "
+                    f"{ik_diag['iterations']}, "
                     f"sigma_min = "
                     f"{ik_diag['sigma_min']:.6e}"
                 )
 
-                print(
-                    f"nearest limit = "
-                    f"{nearest_joint}, "
-                    f"margin = "
-                    f"{np.rad2deg(min_joint_margin):.3f} deg"
-                )
 
-                print(
-                    f"clip X/Y = "
-                    f"{raibert_result['x_was_clipped']} / "
-                    f"{raibert_result['y_was_clipped']}"
-                )
+            # =================================================
+            # SAVE DESIRED STATE FOR NEXT qdot_des
+            # =================================================
+
+            q_des_previous = (
+                q_des.copy()
+            )
 
 
             # =================================================
-            # EMULATE BASE MOTION FOR x_(k+1)
+            # FINAL SAMPLE x_N
             #
-            # IMPORTANT:
+            # At t = T_swing we only observe the final state.
             #
-            # This is NOT mj_step().
+            # The previous control u_(N-1) has already produced
+            # this x_N.
+            # =================================================
+
+            if k == N_SAMPLES - 1:
+
+                break
+
+
+            # =================================================
+            # APPLY u_k
+            # =================================================
+
+            data.ctrl[:] = 0.0
+
+
+            write_leg_torque(
+                model,
+                data,
+                SWING_LEG,
+                tau_applied,
+            )
+
+
+            write_leg_torque(
+                model,
+                data,
+                STANCE_LEG,
+                tau_stance,
+            )
+
+
+            # =================================================
+            # MUJOCO PHYSICS
             #
-            # We manually integrate the floating-base position
-            # only so the kinematic test has a moving body,
-            # similar to what would happen in actual walking.
+            # u_k is held constant through all physics substeps.
             #
             # x_k
             #   ->
-            # calculate references
+            # u_k
             #   ->
-            # apply q_k
+            # mj_step()
             #   ->
-            # create next emulated state x_(k+1)
+            # x_(k+1)
             # =================================================
 
-            if k < N_CONTROL_STEPS - 1:
+            for _ in range(
+                PHYSICS_SUBSTEPS
+            ):
 
-                data.qpos[
-                    0:3
-                ] += (
-                    W_v_actual
-                    *
-                    CONTROL_DT
-                )
-
-
-                mujoco.mj_forward(
+                mujoco.mj_step(
                     model,
                     data,
                 )
 
 
             # =================================================
-            # SLOW GUI ONLY
+            # VIRTUAL BODY STATE FOR NEXT RAIBERT UPDATE
+            # =================================================
+
+            virtual_base_position += (
+                W_v_actual
+                *
+                CONTROL_DT
+            )
+
+
+            # =================================================
+            # GUI SLOWDOWN ONLY
             # =================================================
 
             time.sleep(
@@ -2012,9 +2394,7 @@ def main():
         # FINAL HOLD
         # ====================================================
 
-        final_hold_time = (
-            time.time()
-        )
+        hold_end = time.time()
 
 
         while (
@@ -2022,7 +2402,7 @@ def main():
             and
             time.time()
             -
-            final_hold_time
+            hold_end
             <
             GUI_END_HOLD
         ):
@@ -2035,43 +2415,56 @@ def main():
 
 
     # ========================================================
-    # NUMPY LOGS
+    # ARRAYS
     # ========================================================
 
     time_log = np.asarray(
         time_log
     )
 
-    phase_log = np.asarray(
-        phase_log
-    )
-
-    Trem_log = np.asarray(
-        Trem_log
-    )
-
-    velocity_log = np.asarray(
-        velocity_log
-    )
-
-    velocity_ref_log = np.asarray(
-        velocity_ref_log
-    )
-
     foothold_log = np.asarray(
         foothold_log
     )
 
-    desired_log = np.asarray(
-        desired_log
+    desired_xyz_log = np.asarray(
+        desired_xyz_log
     )
 
-    actual_log = np.asarray(
-        actual_log
+    actual_xyz_log = np.asarray(
+        actual_xyz_log
     )
 
-    error_log = np.asarray(
-        error_log
+    cart_error_log = np.asarray(
+        cart_error_log
+    )
+
+    q_des_log = np.asarray(
+        q_des_log
+    )
+
+    q_actual_log = np.asarray(
+        q_actual_log
+    )
+
+    q_dot_des_log = np.asarray(
+        q_dot_des_log
+    )
+
+    q_dot_actual_log = np.asarray(
+        q_dot_actual_log
+    )
+
+    tau_raw_log = np.asarray(
+        tau_raw_log
+    )
+
+    tau_applied_log = np.asarray(
+        tau_applied_log
+    )
+
+    tau_clip_log = np.asarray(
+        tau_clip_log,
+        dtype=bool,
     )
 
     sigma_log = np.asarray(
@@ -2082,12 +2475,50 @@ def main():
         iteration_log
     )
 
-    joint_margin_log = np.asarray(
-        joint_margin_log
+
+    # ========================================================
+    # JOINT METRICS
+    # ========================================================
+
+    q_error = (
+        q_des_log
+        -
+        q_actual_log
     )
 
-    ankle_command_log = np.asarray(
-        ankle_command_log
+
+    joint_rmse_rad = np.sqrt(
+        np.mean(
+            q_error**2,
+            axis=0,
+        )
+    )
+
+
+    joint_rmse_deg = np.rad2deg(
+        joint_rmse_rad
+    )
+
+
+    peak_tau_raw = np.max(
+        np.abs(
+            tau_raw_log
+        ),
+        axis=0,
+    )
+
+
+    peak_tau_applied = np.max(
+        np.abs(
+            tau_applied_log
+        ),
+        axis=0,
+    )
+
+
+    clip_count_per_joint = np.sum(
+        tau_clip_log,
+        axis=0,
     )
 
 
@@ -2098,91 +2529,154 @@ def main():
     print()
 
     print(
-        "=" * 84
+        "=" * 92
     )
 
     print(
-        "INTEGRATION TEST SUMMARY"
+        "PD DYNAMIC INTEGRATION TEST SUMMARY"
     )
 
     print(
-        "=" * 84
+        "=" * 92
     )
 
 
     print(
-        f"Samples             : {len(time_log)}"
+        f"Samples               : {len(time_log)}"
     )
 
-    print(
-        f"Final error         : "
-        f"{error_log[-1] * 1000.0:.6f} mm"
-    )
 
     print(
-        f"Mean error          : "
-        f"{np.mean(error_log) * 1000.0:.6f} mm"
+        f"Final Cartesian error : "
+        f"{cart_error_log[-1] * 1000.0:.6f} mm"
     )
 
-    print(
-        f"Max error           : "
-        f"{np.max(error_log) * 1000.0:.6f} mm"
-    )
 
     print(
-        f"Minimum sigma       : "
+        f"Mean Cartesian error  : "
+        f"{np.mean(cart_error_log) * 1000.0:.6f} mm"
+    )
+
+
+    print(
+        f"Max Cartesian error   : "
+        f"{np.max(cart_error_log) * 1000.0:.6f} mm"
+    )
+
+
+    print(
+        f"Minimum sigma         : "
         f"{np.min(sigma_log):.6e}"
     )
 
+
     print(
-        f"Maximum IK iteration: "
+        f"Maximum IK iteration  : "
         f"{np.max(iteration_log)}"
     )
 
-    print(
-        f"Minimum joint margin: "
-        f"{np.rad2deg(np.min(joint_margin_log)):.4f} deg"
-    )
-
-    print(
-        f"X clipping count    : "
-        f"{sum(x_clip_log)}"
-    )
-
-    print(
-        f"Y clipping count    : "
-        f"{sum(y_clip_log)}"
-    )
 
     print()
 
     print(
-        f"Initial ankle       : "
-        f"{W_p_liftoff}"
+        "Joint RMSE [deg]"
+    )
+
+
+    for i, name in enumerate(
+        LEG_JOINT_NAMES[
+            SWING_LEG
+        ]
+    ):
+
+        print(
+            f"  {name:<14}: "
+            f"{joint_rmse_deg[i]:.6f}"
+        )
+
+
+    print()
+
+    print(
+        "Peak |tau raw| [N.m]"
+    )
+
+
+    for i, name in enumerate(
+        LEG_JOINT_NAMES[
+            SWING_LEG
+        ]
+    ):
+
+        print(
+            f"  {name:<14}: "
+            f"{peak_tau_raw[i]:.6f}"
+        )
+
+
+    print()
+
+    print(
+        "Peak |tau applied| [N.m]"
+    )
+
+
+    for i, name in enumerate(
+        LEG_JOINT_NAMES[
+            SWING_LEG
+        ]
+    ):
+
+        print(
+            f"  {name:<14}: "
+            f"{peak_tau_applied[i]:.6f}"
+        )
+
+
+    print()
+
+    print(
+        "Torque clipping count"
+    )
+
+
+    for i, name in enumerate(
+        LEG_JOINT_NAMES[
+            SWING_LEG
+        ]
+    ):
+
+        print(
+            f"  {name:<14}: "
+            f"{int(clip_count_per_joint[i])}"
+        )
+
+
+    print()
+
+    print(
+        f"Initial ankle         : {W_p_liftoff}"
     )
 
     print(
-        f"Final foothold      : "
-        f"{foothold_log[-1]}"
+        f"Final foothold        : {foothold_log[-1]}"
     )
 
     print(
-        f"Final desired ankle : "
-        f"{desired_log[-1]}"
+        f"Final desired ankle   : {desired_xyz_log[-1]}"
     )
 
     print(
-        f"Final actual ankle  : "
-        f"{actual_log[-1]}"
+        f"Final actual ankle    : {actual_xyz_log[-1]}"
     )
 
 
     # ========================================================
     # PLOT 1
-    # DESIRED VS ACTUAL POSITION
+    # CARTESIAN TRACKING
     # ========================================================
 
-    labels = [
+    xyz_labels = [
         "x",
         "y",
         "z",
@@ -2197,7 +2691,7 @@ def main():
 
         plt.plot(
             time_log,
-            desired_log[
+            desired_xyz_log[
                 :,
                 axis
             ],
@@ -2206,7 +2700,7 @@ def main():
 
         plt.plot(
             time_log,
-            actual_log[
+            actual_xyz_log[
                 :,
                 axis
             ],
@@ -2219,11 +2713,11 @@ def main():
         )
 
         plt.ylabel(
-            f"{labels[axis]} [m]"
+            f"{xyz_labels[axis]} [m]"
         )
 
         plt.title(
-            f"Swing ankle {labels[axis]} tracking"
+            f"PD dynamic ankle tracking - {xyz_labels[axis]}"
         )
 
         plt.grid(
@@ -2235,6 +2729,125 @@ def main():
 
     # ========================================================
     # PLOT 2
+    # CARTESIAN ERROR
+    # ========================================================
+
+    plt.figure()
+
+    plt.plot(
+        time_log,
+        cart_error_log
+        *
+        1000.0,
+    )
+
+    plt.xlabel(
+        "Time [s]"
+    )
+
+    plt.ylabel(
+        "Cartesian error [mm]"
+    )
+
+    plt.title(
+        "Raibert -> Bezier -> IK -> PD Cartesian error"
+    )
+
+    plt.grid(
+        True
+    )
+
+
+    # ========================================================
+    # PLOT 3
+    # JOINT POSITION ERROR
+    # ========================================================
+
+    plt.figure()
+
+
+    for i, name in enumerate(
+        LEG_JOINT_NAMES[
+            SWING_LEG
+        ]
+    ):
+
+        plt.plot(
+            time_log,
+            np.rad2deg(
+                q_error[
+                    :,
+                    i
+                ]
+            ),
+            label=name,
+        )
+
+
+    plt.xlabel(
+        "Time [s]"
+    )
+
+    plt.ylabel(
+        "Joint position error [deg]"
+    )
+
+    plt.title(
+        "Swing joint PD tracking error"
+    )
+
+    plt.grid(
+        True
+    )
+
+    plt.legend()
+
+
+    # ========================================================
+    # PLOT 4
+    # APPLIED TORQUE
+    # ========================================================
+
+    plt.figure()
+
+
+    for i, name in enumerate(
+        LEG_JOINT_NAMES[
+            SWING_LEG
+        ]
+    ):
+
+        plt.plot(
+            time_log,
+            tau_applied_log[
+                :,
+                i
+            ],
+            label=name,
+        )
+
+
+    plt.xlabel(
+        "Time [s]"
+    )
+
+    plt.ylabel(
+        "Torque [N.m]"
+    )
+
+    plt.title(
+        "Swing joint applied PD torque"
+    )
+
+    plt.grid(
+        True
+    )
+
+    plt.legend()
+
+
+    # ========================================================
+    # PLOT 5
     # RAIBERT FOOTHOLD
     # ========================================================
 
@@ -2272,7 +2885,7 @@ def main():
     )
 
     plt.ylabel(
-        "Raibert foothold [m]"
+        "Foothold [m]"
     )
 
     plt.title(
@@ -2287,142 +2900,18 @@ def main():
 
 
     # ========================================================
-    # PLOT 3
-    # CARTESIAN ERROR
-    # ========================================================
-
-    plt.figure()
-
-    plt.plot(
-        time_log,
-        error_log
-        *
-        1000.0,
-    )
-
-    plt.xlabel(
-        "Time [s]"
-    )
-
-    plt.ylabel(
-        "Cartesian error [mm]"
-    )
-
-    plt.title(
-        "Bezier -> IK tracking error"
-    )
-
-    plt.grid(
-        True
-    )
-
-
-    # ========================================================
-    # PLOT 4
-    # VELOCITY FEEDBACK
-    # ========================================================
-
-    plt.figure()
-
-    plt.plot(
-        time_log,
-        velocity_log[
-            :,
-            0
-        ],
-        label="vx actual",
-    )
-
-    plt.plot(
-        time_log,
-        velocity_ref_log[
-            :,
-            0
-        ],
-        linestyle="--",
-        label="vx ref",
-    )
-
-    plt.plot(
-        time_log,
-        velocity_log[
-            :,
-            1
-        ],
-        label="vy actual",
-    )
-
-    plt.plot(
-        time_log,
-        velocity_ref_log[
-            :,
-            1
-        ],
-        linestyle="--",
-        label="vy ref",
-    )
-
-    plt.xlabel(
-        "Time [s]"
-    )
-
-    plt.ylabel(
-        "Velocity [m/s]"
-    )
-
-    plt.title(
-        "Velocity feedback used by Raibert"
-    )
-
-    plt.grid(
-        True
-    )
-
-    plt.legend()
-
-
-    # ========================================================
-    # PLOT 5
-    # T REMAINING
-    # ========================================================
-
-    plt.figure()
-
-    plt.plot(
-        time_log,
-        Trem_log,
-    )
-
-    plt.xlabel(
-        "Time [s]"
-    )
-
-    plt.ylabel(
-        "T_remaining [s]"
-    )
-
-    plt.title(
-        "Remaining swing time feedback"
-    )
-
-    plt.grid(
-        True
-    )
-
-
-    # ========================================================
     # PLOT 6
-    # X-Z SWING PATH
+    # X-Z TRAJECTORY
     # ========================================================
 
     plt.figure()
 
     plt.plot(
-        desired_log[
+        desired_xyz_log[
             :,
             0
         ],
-        desired_log[
+        desired_xyz_log[
             :,
             2
         ],
@@ -2430,11 +2919,11 @@ def main():
     )
 
     plt.plot(
-        actual_log[
+        actual_xyz_log[
             :,
             0
         ],
-        actual_log[
+        actual_xyz_log[
             :,
             2
         ],
@@ -2451,7 +2940,7 @@ def main():
     )
 
     plt.title(
-        "Swing path X-Z"
+        "PD dynamic swing path X-Z"
     )
 
     plt.axis(

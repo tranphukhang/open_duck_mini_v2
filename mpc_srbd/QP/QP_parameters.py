@@ -25,8 +25,6 @@ import numpy as np
 # used in this project.
 #
 # The 13th state is the augmented constant state.
-# It is not a physical tracking state, therefore its
-# tracking weight is zero.
 # ============================================================
 
 Q = np.diag([
@@ -59,6 +57,7 @@ Q = np.diag([
 # [
 #     F_Lx, F_Ly, F_Lz,
 #     M_Lx, M_Ly, M_Lz,
+#
 #     F_Rx, F_Ry, F_Rz,
 #     M_Rx, M_Ry, M_Rz
 # ]
@@ -70,9 +69,6 @@ Q = np.diag([
 # Moment weights:
 #
 #     1e-4
-#
-# These values are mapped from the HECTOR paper-code
-# input ordering into the input ordering of this project.
 # ============================================================
 
 R = np.diag([
@@ -96,17 +92,13 @@ mu = 0.6
 #
 # Robot mass:
 #
-#     m ≈ 1.5 kg
+#     m ~= 1.5 kg
 #
 # Robot weight:
 #
-#     mg ≈ 14.7 N
+#     mg ~= 14.7 N
 #
-# Fmax = 30 N gives approximately:
-#
-#     Fmax ≈ 2 * mg
-#
-# which provides sufficient margin for the initial
+# Fmax = 30 N gives sufficient margin for the current
 # standing and locomotion tests.
 # ============================================================
 
@@ -138,25 +130,70 @@ l_h = 0.027
 # ============================================================
 # LINE-CONTACT ROLL-MOMENT RELAXATION
 #
-# Ideal line-contact assumption:
+# Ideal line-contact model:
 #
 #     Mx_foot = 0
 #
-# The real foot has a finite width.
+# Practical implementation:
 #
-# The L6 / R6 contact line is approximately centered in
-# the foot, with about 0.02 m available on each lateral side.
+#     -Mx_tolerance
+#     <=
+#     Mx_foot
+#     <=
+#     Mx_tolerance
 #
-# Instead of imposing the exact equality Mx = 0, use a
-# small symmetric relaxation:
+# The physical foot has approximately 0.02 m lateral
+# distance from the L6/R6 contact line to each side.
 #
-#     -Mx_tolerance <= Mx_foot <= Mx_tolerance
-#
-# This still preserves the line-contact approximation while
-# avoiding an unnecessarily hard numerical equality.
+# 0.01 N.m is therefore used as a small symmetric
+# relaxation while preserving the line-contact approximation.
 # ============================================================
 
 Mx_tolerance = 0.01   # [N.m]
+
+
+# ============================================================
+# OPTIONAL TOE / HEEL LATERAL-FRICTION CONSTRAINTS
+#
+# False:
+#
+#     Baseline mode.
+#
+#     Keep only:
+#
+#         1. relaxed Mx line-contact constraint
+#         2. toe CoP constraint
+#         3. heel CoP constraint
+#
+#     Together with force_constraint.py:
+#
+#         5 force constraints / foot
+#         3 moment constraints / foot
+#
+#     -> 8 constraints / foot
+#
+#     This is closer to the HECTOR paper-code formulation.
+#
+#
+# True:
+#
+#     Extended mode.
+#
+#     Additionally enforce separated toe/heel lateral
+#     friction constraints:
+#
+#         |f_ty| <= mu * f_tz
+#
+#         |f_hy| <= mu * f_hz
+#
+#     This adds 4 constraints / foot and produces a more
+#     restrictive admissible contact-wrench set.
+#
+#     The formulas remain implemented in moment_constraint.py
+#     and can therefore be enabled again without rewriting code.
+# ============================================================
+
+enable_toe_heel_lateral_friction = False
 
 
 # ============================================================
@@ -172,5 +209,5 @@ dt_mpc = 0.05   # [s]
 
 # MPC controller update period
 #
-# 0.005 s -> 200 Hz MPC update rate
+# 0.005 s -> 200 Hz
 dt_mpc_update = 0.005   # [s]

@@ -13,6 +13,7 @@ from QP_parameters import (
     l_t,
     l_h,
     Mx_tolerance,
+    enable_toe_heel_lateral_friction,
 )
 
 
@@ -27,7 +28,7 @@ def build_QP_problem(
     contact_schedule,
 ):
     """
-    Build the complete SRBD-MPC quadratic programming problem.
+    Build complete SRBD-MPC QP.
 
     QP:
 
@@ -62,78 +63,6 @@ def build_QP_problem(
             F_Rx, F_Ry, F_Rz,
             M_Rx, M_Ry, M_Rz
         ]
-
-
-    Parameters
-    ----------
-    Phi : np.ndarray
-        Prediction state matrix.
-
-        Shape:
-            (13*N, 13)
-
-    Gamma : np.ndarray
-        Prediction input matrix.
-
-        Shape:
-            (13*N, 12*N)
-
-    x_current : np.ndarray
-        Current augmented SRBD state.
-
-        Shape:
-            (13,)
-
-    X_ref : np.ndarray
-        Reference trajectory over the prediction horizon.
-
-        Shape:
-            (13*N,)
-
-    N : int
-        Prediction horizon.
-
-    L6_R_W : np.ndarray
-        World -> left contact-frame rotation matrix.
-
-        Shape:
-            (3, 3)
-
-    R6_R_W : np.ndarray
-        World -> right contact-frame rotation matrix.
-
-        Shape:
-            (3, 3)
-
-    contact_schedule : np.ndarray
-        Planned contact schedule.
-
-        Shape:
-            (N, 2)
-
-        [:, 0] = left foot
-        [:, 1] = right foot
-
-        1 = stance
-        0 = swing
-
-
-    Returns
-    -------
-    H : np.ndarray
-        QP Hessian.
-
-    f : np.ndarray
-        QP linear cost vector.
-
-    A : np.ndarray
-        Full constraint matrix.
-
-    l : np.ndarray
-        Full lower-bound vector.
-
-    u : np.ndarray
-        Full upper-bound vector.
     """
 
     # ========================================================
@@ -198,24 +127,24 @@ def build_QP_problem(
         N,
         (int, np.integer),
     ):
+
         raise TypeError(
             "N phải là số nguyên."
         )
 
+
     if N <= 0:
+
         raise ValueError(
             "N phải lớn hơn 0."
         )
 
 
-    # --------------------------------------------------------
-    # Phi
-    # --------------------------------------------------------
-
     if Phi.shape != (
         N * nx,
         nx,
     ):
+
         raise ValueError(
             f"Phi phải có shape "
             f"({N * nx}, {nx}), "
@@ -223,14 +152,11 @@ def build_QP_problem(
         )
 
 
-    # --------------------------------------------------------
-    # Gamma
-    # --------------------------------------------------------
-
     if Gamma.shape != (
         N * nx,
         N * nu,
     ):
+
         raise ValueError(
             f"Gamma phải có shape "
             f"({N * nx}, {N * nu}), "
@@ -238,25 +164,19 @@ def build_QP_problem(
         )
 
 
-    # --------------------------------------------------------
-    # Current state
-    # --------------------------------------------------------
-
     if x_current.shape != (
         nx,
     ):
+
         raise ValueError(
             "x_current phải có shape (13,)."
         )
 
 
-    # --------------------------------------------------------
-    # Reference trajectory
-    # --------------------------------------------------------
-
     if X_ref.shape != (
         N * nx,
     ):
+
         raise ValueError(
             f"X_ref phải có shape "
             f"({N * nx},), "
@@ -264,41 +184,38 @@ def build_QP_problem(
         )
 
 
-    # --------------------------------------------------------
-    # Foot rotation matrices
-    # --------------------------------------------------------
-
     if L6_R_W.shape != (
         3,
         3,
     ):
+
         raise ValueError(
             "L6_R_W phải có shape (3, 3)."
         )
+
 
     if R6_R_W.shape != (
         3,
         3,
     ):
+
         raise ValueError(
             "R6_R_W phải có shape (3, 3)."
         )
 
 
-    # --------------------------------------------------------
-    # Contact schedule
-    # --------------------------------------------------------
-
     if contact_schedule.shape != (
         N,
         2,
     ):
+
         raise ValueError(
             "contact_schedule phải có shape "
             f"({N}, 2), "
             f"nhưng nhận được "
             f"{contact_schedule.shape}."
         )
+
 
     if not np.all(
         np.isin(
@@ -309,6 +226,7 @@ def build_QP_problem(
             ],
         )
     ):
+
         raise ValueError(
             "contact_schedule chỉ được chứa 0 hoặc 1."
         )
@@ -319,30 +237,37 @@ def build_QP_problem(
     # --------------------------------------------------------
 
     for name, value in (
+
         (
             "Phi",
             Phi,
         ),
+
         (
             "Gamma",
             Gamma,
         ),
+
         (
             "x_current",
             x_current,
         ),
+
         (
             "X_ref",
             X_ref,
         ),
+
         (
             "L6_R_W",
             L6_R_W,
         ),
+
         (
             "R6_R_W",
             R6_R_W,
         ),
+
     ):
 
         if not np.all(
@@ -350,6 +275,7 @@ def build_QP_problem(
                 value
             )
         ):
+
             raise ValueError(
                 f"{name} chứa NaN hoặc Inf."
             )
@@ -366,27 +292,23 @@ def build_QP_problem(
         _,
         _,
     ) = build_cost_function(
+
         Phi=Phi,
+
         Gamma=Gamma,
+
         x_current=x_current,
+
         X_ref=X_ref,
+
         Q=Q,
+
         R=R,
     )
 
 
     # ========================================================
     # 5. CONSTRAINT BLOCKS
-    #
-    # Each block:
-    #
-    #     (
-    #         name,
-    #         A_constraint,
-    #         l_constraint,
-    #         u_constraint
-    #     )
-    #
     # ========================================================
 
     constraint_blocks = []
@@ -395,15 +317,15 @@ def build_QP_problem(
     # ========================================================
     # 5.1 FORCE CONSTRAINT
     #
-    # Friction pyramid:
-    #
     #     |Fx| <= mu*Fz
     #
     #     |Fy| <= mu*Fz
     #
-    # Normal force:
-    #
     #     0 <= Fz <= Fmax
+    #
+    # 5 constraints / foot
+    #
+    # 10 constraints / prediction step
     # ========================================================
 
     (
@@ -411,43 +333,51 @@ def build_QP_problem(
         l_force,
         u_force,
     ) = build_force_constraints(
+
         N=N,
+
         mu=mu,
+
         Fz_max=Fmax,
+
         Fz_min=0.0,
     )
+
 
     constraint_blocks.append(
         (
             "force",
+
             A_force,
+
             l_force,
+
             u_force,
         )
     )
 
 
     # ========================================================
-    # 5.2 MOMENT / LINE-CONTACT CONSTRAINT
+    # 5.2 MOMENT CONSTRAINT
     #
-    # Relaxed roll moment:
+    # BASELINE:
     #
-    #     -Mx_tolerance
-    #     <=
-    #     Mx_foot
-    #     <=
-    #     Mx_tolerance
+    #     -Mx_tolerance <= Mx <= Mx_tolerance
     #
-    # Toe / heel:
+    #     My - l_h*Fz <= 0
     #
-    #     -l_t*Fz
-    #     <=
-    #     My
-    #     <=
-    #     l_h*Fz
+    #     -My - l_t*Fz <= 0
     #
-    # Additional toe / heel lateral-friction constraints
-    # remain unchanged from the current implementation.
+    # -> 3 constraints / foot
+    #
+    #
+    # EXTENDED:
+    #
+    # if enable_toe_heel_lateral_friction == True:
+    #
+    #     add 4 toe/heel lateral-friction constraints
+    #
+    # -> 7 constraints / foot
     # ========================================================
 
     (
@@ -455,20 +385,35 @@ def build_QP_problem(
         l_moment,
         u_moment,
     ) = build_moment_constraints(
+
         N=N,
+
         L6_R_W=L6_R_W,
+
         R6_R_W=R6_R_W,
+
         l_t=l_t,
+
         l_h=l_h,
+
         mu=mu,
+
         Mx_tolerance=Mx_tolerance,
+
+        enable_toe_heel_lateral_friction=(
+            enable_toe_heel_lateral_friction
+        ),
     )
+
 
     constraint_blocks.append(
         (
             "moment",
+
             A_moment,
+
             l_moment,
+
             u_moment,
         )
     )
@@ -479,16 +424,17 @@ def build_QP_problem(
     #
     #     (1 - c_{k,i}) * u_{k,i} = 0
     #
-    # c = 1:
+    # stance:
     #
-    #     stance
-    #     -> wrench is allowed
+    #     c = 1
     #
-    # c = 0:
+    #     wrench allowed
     #
-    #     swing
-    #     -> complete foot wrench is forced to zero
+    # swing:
     #
+    #     c = 0
+    #
+    #     complete foot wrench = 0
     # ========================================================
 
     (
@@ -496,15 +442,21 @@ def build_QP_problem(
         l_contact,
         u_contact,
     ) = build_contact_constraints(
+
         N=N,
+
         contact_schedule=contact_schedule,
     )
+
 
     constraint_blocks.append(
         (
             "contact",
+
             A_contact,
+
             l_contact,
+
             u_contact,
         )
     )
@@ -521,15 +473,18 @@ def build_QP_problem(
         u_block,
     ) in constraint_blocks:
 
+
         A_block = np.asarray(
             A_block,
             dtype=float,
         )
 
+
         l_block = np.asarray(
             l_block,
             dtype=float,
         ).reshape(-1)
+
 
         u_block = np.asarray(
             u_block,
@@ -537,17 +492,16 @@ def build_QP_problem(
         ).reshape(-1)
 
 
-        # ----------------------------------------------------
-        # Matrix dimensions
-        # ----------------------------------------------------
-
         if A_block.ndim != 2:
+
             raise ValueError(
                 f"Constraint '{name}': "
                 "A phải là ma trận 2 chiều."
             )
 
+
         if A_block.shape[1] != nU:
+
             raise ValueError(
                 f"Constraint '{name}': "
                 f"A phải có {nU} cột, "
@@ -556,51 +510,44 @@ def build_QP_problem(
             )
 
 
-        # ----------------------------------------------------
-        # Bound dimensions
-        # ----------------------------------------------------
-
         if l_block.shape != (
             A_block.shape[0],
         ):
+
             raise ValueError(
                 f"Constraint '{name}': "
                 "dimension của l không khớp A."
             )
 
+
         if u_block.shape != (
             A_block.shape[0],
         ):
+
             raise ValueError(
                 f"Constraint '{name}': "
                 "dimension của u không khớp A."
             )
 
 
-        # ----------------------------------------------------
-        # Bounds consistency
-        # ----------------------------------------------------
-
         if np.any(
             l_block
             >
             u_block
         ):
+
             raise ValueError(
                 f"Constraint '{name}': "
                 "tồn tại lower bound > upper bound."
             )
 
 
-        # ----------------------------------------------------
-        # Matrix finite validation
-        # ----------------------------------------------------
-
         if not np.all(
             np.isfinite(
                 A_block
             )
         ):
+
             raise ValueError(
                 f"Constraint '{name}': "
                 "A chứa NaN hoặc Inf."
@@ -609,6 +556,14 @@ def build_QP_problem(
 
     # ========================================================
     # 7. ASSEMBLE FULL CONSTRAINT MATRIX
+    #
+    # A =
+    #
+    # [
+    #     A_force
+    #     A_moment
+    #     A_contact
+    # ]
     # ========================================================
 
     A = np.vstack(
@@ -618,12 +573,14 @@ def build_QP_problem(
         ]
     )
 
+
     l = np.concatenate(
         [
             block[2]
             for block in constraint_blocks
         ]
     )
+
 
     u = np.concatenate(
         [
@@ -641,6 +598,7 @@ def build_QP_problem(
         nU,
         nU,
     ):
+
         raise ValueError(
             f"H phải có shape "
             f"({nU}, {nU}), "
@@ -648,9 +606,11 @@ def build_QP_problem(
             f"{H.shape}."
         )
 
+
     if f.shape != (
         nU,
     ):
+
         raise ValueError(
             f"f phải có shape "
             f"({nU},), "
@@ -658,61 +618,75 @@ def build_QP_problem(
             f"{f.shape}."
         )
 
+
     if A.ndim != 2:
+
         raise ValueError(
             "A phải là ma trận 2 chiều."
         )
 
+
     if A.shape[1] != nU:
+
         raise ValueError(
             f"A phải có {nU} cột."
         )
 
+
     if l.shape != (
         A.shape[0],
     ):
+
         raise ValueError(
             "Dimension của l không khớp A."
         )
 
+
     if u.shape != (
         A.shape[0],
     ):
+
         raise ValueError(
             "Dimension của u không khớp A."
         )
+
 
     if np.any(
         l
         >
         u
     ):
+
         raise ValueError(
             "Full QP constraints tồn tại "
             "lower bound > upper bound."
         )
+
 
     if not np.all(
         np.isfinite(
             H
         )
     ):
+
         raise ValueError(
             "H chứa NaN hoặc Inf."
         )
+
 
     if not np.all(
         np.isfinite(
             f
         )
     ):
+
         raise ValueError(
             "f chứa NaN hoặc Inf."
         )
 
 
     # ========================================================
-    # 9. RETURN COMPLETE QP PROBLEM
+    # 9. RETURN
     # ========================================================
 
     return (
