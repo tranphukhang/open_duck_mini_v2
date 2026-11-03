@@ -28,9 +28,13 @@ for directory in (
     QP_DIR,
     REF_DIR,
 ):
-    directory_str = str(directory)
+
+    directory_str = str(
+        directory
+    )
 
     if directory_str not in sys.path:
+
         sys.path.insert(
             0,
             directory_str,
@@ -95,7 +99,7 @@ from reference_generator import (
 np.set_printoptions(
     precision=9,
     suppress=True,
-    linewidth=240,
+    linewidth=260,
 )
 
 
@@ -123,13 +127,6 @@ RIGHT = 1
 
 # ============================================================
 # TIMING
-#
-# Return to the lighter baseline:
-#
-# dt_mpc = 0.04
-# N      = 10
-#
-# prediction horizon = 0.4 s
 # ============================================================
 
 CONTROL_DT = 0.001
@@ -162,6 +159,7 @@ if not np.isclose(
     CONTROL_DT,
     MPC_UPDATE_DT,
 ):
+
     raise ValueError(
         "MPC_UPDATE_DT must be an integer multiple "
         "of CONTROL_DT."
@@ -172,21 +170,35 @@ if not np.isclose(
 # GAIT
 #
 # SSP:
+#
 #     6 * 0.04 = 0.24 s
 #
 # DSP:
-#     5 * 0.04 = 0.20 s
 #
-# Startup:
-#     0.25 s
+#     10 * 0.04 = 0.40 s
 #
-# Timeline for first swing leg = R:
 #
-# 0.000 - 0.250 : STARTUP_DS
-# 0.250 - 0.450 : DSP2, transfer to LEFT
-# 0.450 - 0.690 : SSP_L, RIGHT swing
-# 0.690 - 0.890 : DSP1, transfer to RIGHT
-# 0.890 - 1.130 : SSP_R, LEFT swing
+# first_swing_leg = R
+#
+# Timeline:
+#
+# 0.00 - 0.25 : STARTUP_DS
+#
+# 0.25 - 0.65 : DSP2
+#               load transfer:
+#               center -> LEFT
+#
+# 0.65 - 0.89 : SSP_L
+#               RIGHT foot swing
+#
+# 0.89 - 1.29 : DSP1
+#               LEFT -> RIGHT
+#
+# 1.29 - 1.53 : SSP_R
+#               LEFT foot swing
+#
+# 1.53 - ...  : DSP2
+#               RIGHT -> LEFT
 # ============================================================
 
 SSP_DURATIONS = (
@@ -207,14 +219,11 @@ FIRST_SWING_LEG = "R"
 # ============================================================
 # LATERAL LOAD TRANSFER
 #
-# +y -> LEFT foot
-# -y -> RIGHT foot
+# +y:
+#     toward LEFT foot
 #
-# Initial diagnostic amplitude:
-#
-#     +/- 0.04 m
-#
-# Do NOT interpret this as final gait tuning.
+# -y:
+#     toward RIGHT foot
 # ============================================================
 
 LATERAL_SHIFT_AMPLITUDE = 0.040
@@ -223,23 +232,24 @@ LATERAL_SHIFT_AMPLITUDE = 0.040
 # ============================================================
 # TEST DURATION
 #
-# Long enough to attempt:
+# Covers:
 #
 # DSP2
 # SSP_L
 # DSP1
 # SSP_R
+# DSP2
 # ============================================================
 
-TEST_DURATION = 1.7
+TEST_DURATION = 1.700
 
 
 # ============================================================
-# USER COMMAND
+# COMMAND
 #
-# No forward walking command yet.
+# No forward motion yet.
 #
-# This test isolates lateral load transfer.
+# Isolate lateral load transfer.
 # ============================================================
 
 V_DES_BODY_TARGET = np.array(
@@ -258,47 +268,61 @@ YAW_RATE_DES_TARGET = 0.0
 # QP SETTINGS
 # ============================================================
 
-QP_MAX_ITER = 10000
+QP_MAX_ITER = 20000
 
 QP_CONSTRAINT_TOLERANCE = 1e-4
 
 
 # ============================================================
-# PRINT SETTINGS
+# PRINT
 # ============================================================
 
 PRINT_EVERY_N_MPC = 20
 
 
-# ============================================================
-# IMPORTANT TIMES
-# ============================================================
-
 PREDICTION_LOG_TIMES = (
-    0.250,   # begin DSP2 load transfer
-    0.300,
+    0.250,
     0.350,
-    0.400,
-    0.445,   # immediately before SSP_L
-    0.450,   # SSP_L begins
-    0.500,
+    0.450,
     0.600,
-    0.685,   # end SSP_L
-    0.690,   # DSP1 begins
-    0.790,
+
+    0.650,
+
+    0.700,
+    0.800,
+
     0.885,
-    0.890,   # SSP_R begins
+    0.890,
+
+    1.000,
+    1.100,
+    1.200,
+
+    1.290,
+    1.300,
+    1.400,
+    1.500,
+
+    1.530,
+    1.600,
+    1.700,
 )
 
 
 # ============================================================
 # SMOOTHSTEP
 #
+# Current diagnostic profile:
+#
 # h(a) = 3a^2 - 2a^3
 #
-# h(0)=0, h(1)=1
+# NOTE:
 #
-# dh/dt = 0 at both ends.
+# We keep cubic here intentionally so this test remains
+# directly comparable to the previous successful run.
+#
+# After this diagnostic is verified, the next step will be
+# changing the GAIT reference to quintic minimum-jerk.
 # ============================================================
 
 def smoothstep_transition(
@@ -308,13 +332,25 @@ def smoothstep_transition(
     y1,
 ):
 
-    tau = float(tau)
-    duration = float(duration)
-    y0 = float(y0)
-    y1 = float(y1)
+    tau = float(
+        tau
+    )
+
+    duration = float(
+        duration
+    )
+
+    y0 = float(
+        y0
+    )
+
+    y1 = float(
+        y1
+    )
 
 
     if duration <= 0.0:
+
         return (
             y1,
             0.0,
@@ -334,7 +370,9 @@ def smoothstep_transition(
         3.0
         *
         alpha**2
+
         -
+
         2.0
         *
         alpha**3
@@ -345,7 +383,9 @@ def smoothstep_transition(
         6.0
         *
         alpha
+
         -
+
         6.0
         *
         alpha**2
@@ -354,7 +394,9 @@ def smoothstep_transition(
 
     y = (
         y0
+
         +
+
         (
             y1
             -
@@ -371,56 +413,39 @@ def smoothstep_transition(
             -
             y0
         )
+
         *
+
         dh_dalpha
+
         /
+
         duration
     )
 
 
     return (
-        float(y),
-        float(vy),
+        float(
+            y
+        ),
+        float(
+            vy
+        ),
     )
 
 
 # ============================================================
-# LATERAL LOAD-TRANSFER REFERENCE
-#
-# first_swing_leg = R:
-#
-# STARTUP:
-#
-#     y = 0
-#
-# first DSP2:
-#
-#     0 -> +A
-#
-# SSP_L:
-#
-#     +A
-#
-# DSP1:
-#
-#     +A -> -A
-#
-# SSP_R:
-#
-#     -A
-#
-# DSP2:
-#
-#     -A -> +A
-#
-# repeat.
+# LATERAL REFERENCE AT ABSOLUTE TIME
 # ============================================================
 
 def lateral_reference_at_time(
     t,
 ):
 
-    t = float(t)
+    t = float(
+        t
+    )
+
 
     A = float(
         LATERAL_SHIFT_AMPLITUDE
@@ -433,17 +458,20 @@ def lateral_reference_at_time(
         MPC_DT
     )
 
+
     T_ssp_R = (
         SSP_DURATIONS[1]
         *
         MPC_DT
     )
 
+
     T_dsp1 = (
         DSP_DURATIONS[0]
         *
         MPC_DT
     )
+
 
     T_dsp2 = (
         DSP_DURATIONS[1]
@@ -453,7 +481,7 @@ def lateral_reference_at_time(
 
 
     # ========================================================
-    # STARTUP HOLD
+    # STARTUP
     # ========================================================
 
     if t < STARTUP_HOLD_TIME:
@@ -473,13 +501,13 @@ def lateral_reference_at_time(
 
 
     # ========================================================
-    # RIGHT FOOT SWINGS FIRST
+    # FIRST SWING = RIGHT
     # ========================================================
 
     if FIRST_SWING_LEG == "R":
 
         # ----------------------------------------------------
-        # Initial DSP2
+        # Initial DSP2:
         #
         # center -> LEFT
         # ----------------------------------------------------
@@ -493,6 +521,7 @@ def lateral_reference_at_time(
                 y1=+A,
             )
 
+
             return (
                 y,
                 vy,
@@ -505,11 +534,17 @@ def lateral_reference_at_time(
 
         cycle_duration = (
             T_ssp_L
+
             +
+
             T_dsp1
+
             +
+
             T_ssp_R
+
             +
+
             T_dsp2
         )
 
@@ -538,7 +573,7 @@ def lateral_reference_at_time(
 
 
         # ----------------------------------------------------
-        # DSP1
+        # DSP1:
         #
         # LEFT -> RIGHT
         # ----------------------------------------------------
@@ -551,6 +586,7 @@ def lateral_reference_at_time(
                 y0=+A,
                 y1=-A,
             )
+
 
             return (
                 y,
@@ -579,7 +615,7 @@ def lateral_reference_at_time(
 
 
         # ----------------------------------------------------
-        # DSP2
+        # DSP2:
         #
         # RIGHT -> LEFT
         # ----------------------------------------------------
@@ -591,6 +627,7 @@ def lateral_reference_at_time(
             y1=+A,
         )
 
+
         return (
             y,
             vy,
@@ -599,9 +636,7 @@ def lateral_reference_at_time(
 
 
     # ========================================================
-    # LEFT FOOT SWINGS FIRST
-    #
-    # Included for completeness.
+    # FIRST SWING = LEFT
     # ========================================================
 
     if tau < T_dsp1:
@@ -612,6 +647,7 @@ def lateral_reference_at_time(
             y0=0.0,
             y1=-A,
         )
+
 
         return (
             y,
@@ -625,11 +661,17 @@ def lateral_reference_at_time(
 
     cycle_duration = (
         T_ssp_R
+
         +
+
         T_dsp2
+
         +
+
         T_ssp_L
+
         +
+
         T_dsp1
     )
 
@@ -661,6 +703,7 @@ def lateral_reference_at_time(
             y0=-A,
             y1=+A,
         )
+
 
         return (
             y,
@@ -700,16 +743,7 @@ def lateral_reference_at_time(
 
 
 # ============================================================
-# BUILD LOAD-TRANSFER PROFILE
-#
-# Full reference horizon includes:
-#
-# k
-# k+1
-# ...
-# k+N
-#
-# Therefore length = N+1.
+# FULL LATERAL REFERENCE PROFILE
 # ============================================================
 
 def build_lateral_reference_profile(
@@ -721,15 +755,18 @@ def build_lateral_reference_profile(
         dtype=float,
     )
 
+
     y_offset = np.zeros(
         REFERENCE_HORIZON,
         dtype=float,
     )
 
+
     vy_offset = np.zeros(
         REFERENCE_HORIZON,
         dtype=float,
     )
+
 
     labels = []
 
@@ -739,26 +776,44 @@ def build_lateral_reference_profile(
     ):
 
         t_i = (
-            float(t_now)
+            float(
+                t_now
+            )
+
             +
-            float(i)
+
+            float(
+                i
+            )
             *
             MPC_DT
         )
 
 
-        y_i, vy_i, label_i = (
-            lateral_reference_at_time(
-                t_i
-            )
+        (
+            y_i,
+            vy_i,
+            label_i,
+
+        ) = lateral_reference_at_time(
+            t_i
         )
 
 
-        times[i] = t_i
+        times[
+            i
+        ] = t_i
 
-        y_offset[i] = y_i
 
-        vy_offset[i] = vy_i
+        y_offset[
+            i
+        ] = y_i
+
+
+        vy_offset[
+            i
+        ] = vy_i
+
 
         labels.append(
             label_i
@@ -781,7 +836,7 @@ def build_lateral_reference_profile(
 
 
 # ============================================================
-# USER COMMAND
+# COMMAND
 # ============================================================
 
 def get_reference_command(
@@ -837,6 +892,7 @@ def build_runtime_srbd_quantities(
         NX
     )
 
+
     B_inertia_CoM = np.asarray(
         B_inertia_CoM,
         dtype=float,
@@ -851,6 +907,7 @@ def build_runtime_srbd_quantities(
             0:3
         ]
     )
+
 
     W_euler = (
         x_current[
@@ -875,9 +932,13 @@ def build_runtime_srbd_quantities(
 
     W_inertia_CoM = (
         W_R_B
+
         @
+
         B_inertia_CoM
+
         @
+
         W_R_B.T
     )
 
@@ -926,14 +987,10 @@ def build_runtime_srbd_quantities(
 # ============================================================
 # CLOSED-LOOP SRBD PLANT
 #
-# Correct simulation order:
-#
 # x_k
-#   ->
-# compute u_k
-#   ->
+#  ->
 # apply u_k
-#   ->
+#  ->
 # x_(k+1)
 # ============================================================
 
@@ -949,10 +1006,13 @@ def integrate_srbd_plant(
     runtime = (
         build_runtime_srbd_quantities(
             x_current=x_current,
+
             B_inertia_CoM=(
                 B_inertia_CoM
             ),
+
             W_p_L6=W_p_L6,
+
             W_p_R6=W_p_R6,
         )
     )
@@ -963,13 +1023,17 @@ def integrate_srbd_plant(
             Ew_inverse=runtime[
                 "Ew_inverse"
             ],
+
             mass_CoM=mass_CoM,
+
             W_inertia_CoM=runtime[
                 "W_inertia_CoM"
             ],
+
             W_r_L=runtime[
                 "W_r_L"
             ],
+
             W_r_R=runtime[
                 "W_r_R"
             ],
@@ -988,16 +1052,22 @@ def integrate_srbd_plant(
 
     x_next = (
         Ad
+
         @
+
         np.asarray(
             x_current,
             dtype=float,
         ).reshape(
             NX
         )
+
         +
+
         Bd
+
         @
+
         np.asarray(
             held_u,
             dtype=float,
@@ -1007,7 +1077,9 @@ def integrate_srbd_plant(
     )
 
 
-    x_next[12] = 1.0
+    x_next[
+        12
+    ] = 1.0
 
 
     if not np.all(
@@ -1025,7 +1097,7 @@ def integrate_srbd_plant(
 
 
 # ============================================================
-# PREDICTED STATE TRAJECTORY
+# PREDICTED STATE
 # ============================================================
 
 def build_predicted_state_trajectory(
@@ -1040,19 +1112,25 @@ def build_predicted_state_trajectory(
             Phi,
             dtype=float,
         )
+
         @
+
         np.asarray(
             x_current,
             dtype=float,
         ).reshape(
             NX
         )
+
         +
+
         np.asarray(
             Gamma,
             dtype=float,
         )
+
         @
+
         np.asarray(
             U_opt,
             dtype=float,
@@ -1073,12 +1151,31 @@ def build_predicted_state_trajectory(
 
 
 # ============================================================
-# FIRST INPUT METRICS
+# U0 METRICS
+#
+# IMPORTANT:
+#
+# MPC decision variables are WORLD-frame wrench:
+#
+# u =
+#
+# [
+#   F_L_W,
+#   M_L_W,
+#   F_R_W,
+#   M_R_W
+# ]
+#
+# But Mx constraint is applied in FOOT frame:
+#
+# M_foot = R_foot_W @ M_W
 # ============================================================
 
 def compute_u0_metrics(
     u0,
     mass_CoM,
+    L6_R_W,
+    R6_R_W,
 ):
 
     u0 = np.asarray(
@@ -1089,36 +1186,164 @@ def compute_u0_metrics(
     )
 
 
-    Fy_L = float(
-        u0[1]
-    )
-
-    Fz_L = float(
-        u0[2]
-    )
-
-    Mx_L = float(
-        u0[3]
+    L6_R_W = np.asarray(
+        L6_R_W,
+        dtype=float,
+    ).reshape(
+        3,
+        3,
     )
 
 
-    Fy_R = float(
-        u0[7]
+    R6_R_W = np.asarray(
+        R6_R_W,
+        dtype=float,
+    ).reshape(
+        3,
+        3,
     )
 
-    Fz_R = float(
-        u0[8]
+
+    # ========================================================
+    # WORLD FRAME
+    # ========================================================
+
+    F_L_W = (
+        u0[
+            0:3
+        ]
     )
 
-    Mx_R = float(
-        u0[9]
+
+    M_L_W = (
+        u0[
+            3:6
+        ]
+    )
+
+
+    F_R_W = (
+        u0[
+            6:9
+        ]
+    )
+
+
+    M_R_W = (
+        u0[
+            9:12
+        ]
+    )
+
+
+    # ========================================================
+    # FOOT FRAME
+    # ========================================================
+
+    F_L_foot = (
+        L6_R_W
+
+        @
+
+        F_L_W
+    )
+
+
+    M_L_foot = (
+        L6_R_W
+
+        @
+
+        M_L_W
+    )
+
+
+    F_R_foot = (
+        R6_R_W
+
+        @
+
+        F_R_W
+    )
+
+
+    M_R_foot = (
+        R6_R_W
+
+        @
+
+        M_R_W
+    )
+
+
+    # ========================================================
+    # WORLD COMPONENTS
+    # ========================================================
+
+    Fy_L_W = float(
+        F_L_W[
+            1
+        ]
+    )
+
+
+    Fz_L_W = float(
+        F_L_W[
+            2
+        ]
+    )
+
+
+    Mx_L_W = float(
+        M_L_W[
+            0
+        ]
+    )
+
+
+    Fy_R_W = float(
+        F_R_W[
+            1
+        ]
+    )
+
+
+    Fz_R_W = float(
+        F_R_W[
+            2
+        ]
+    )
+
+
+    Mx_R_W = float(
+        M_R_W[
+            0
+        ]
+    )
+
+
+    # ========================================================
+    # FOOT-FRAME Mx
+    # ========================================================
+
+    Mx_L_foot = float(
+        M_L_foot[
+            0
+        ]
+    )
+
+
+    Mx_R_foot = float(
+        M_R_foot[
+            0
+        ]
     )
 
 
     total_fz = (
-        Fz_L
+        Fz_L_W
         +
-        Fz_R
+        Fz_R_W
     )
 
 
@@ -1126,55 +1351,93 @@ def compute_u0_metrics(
         float(
             mass_CoM
         )
+
         *
+
         9.81
     )
 
 
     friction_ratio_L = np.nan
 
-    if Fz_L > 1e-6:
+
+    if Fz_L_W > 1e-6:
 
         friction_ratio_L = (
             abs(
-                Fy_L
+                Fy_L_W
             )
+
             /
-            Fz_L
+
+            Fz_L_W
         )
 
 
     friction_ratio_R = np.nan
 
-    if Fz_R > 1e-6:
+
+    if Fz_R_W > 1e-6:
 
         friction_ratio_R = (
             abs(
-                Fy_R
+                Fy_R_W
             )
+
             /
-            Fz_R
+
+            Fz_R_W
         )
 
 
     return {
-        "Fy_L":
-            Fy_L,
+        "Fy_L_W":
+            Fy_L_W,
 
-        "Fz_L":
-            Fz_L,
+        "Fz_L_W":
+            Fz_L_W,
 
-        "Mx_L":
-            Mx_L,
+        "Mx_L_W":
+            Mx_L_W,
 
-        "Fy_R":
-            Fy_R,
+        "Mx_L_foot":
+            Mx_L_foot,
 
-        "Fz_R":
-            Fz_R,
+        "Fy_R_W":
+            Fy_R_W,
 
-        "Mx_R":
-            Mx_R,
+        "Fz_R_W":
+            Fz_R_W,
+
+        "Mx_R_W":
+            Mx_R_W,
+
+        "Mx_R_foot":
+            Mx_R_foot,
+
+        "F_L_W":
+            F_L_W.copy(),
+
+        "M_L_W":
+            M_L_W.copy(),
+
+        "F_R_W":
+            F_R_W.copy(),
+
+        "M_R_W":
+            M_R_W.copy(),
+
+        "F_L_foot":
+            F_L_foot.copy(),
+
+        "M_L_foot":
+            M_L_foot.copy(),
+
+        "F_R_foot":
+            F_R_foot.copy(),
+
+        "M_R_foot":
+            M_R_foot.copy(),
 
         "total_fz":
             total_fz,
@@ -1191,7 +1454,7 @@ def compute_u0_metrics(
 
 
 # ============================================================
-# PREDICTION LOG
+# PREDICTION DIAGNOSTICS
 # ============================================================
 
 def print_prediction_diagnostics(
@@ -1205,13 +1468,36 @@ def print_prediction_diagnostics(
     contact_schedule,
     lateral_profile,
     mass_CoM,
+    L6_R_W,
+    R6_R_W,
 ):
+
+    L6_R_W = np.asarray(
+        L6_R_W,
+        dtype=float,
+    ).reshape(
+        3,
+        3,
+    )
+
+
+    R6_R_W = np.asarray(
+        R6_R_W,
+        dtype=float,
+    ).reshape(
+        3,
+        3,
+    )
+
 
     X_pred = (
         build_predicted_state_trajectory(
             Phi=Phi,
+
             Gamma=Gamma,
+
             x_current=x_current,
+
             U_opt=U_opt,
         )
     )
@@ -1230,7 +1516,9 @@ def print_prediction_diagnostics(
         float(
             mass_CoM
         )
+
         *
+
         9.81
     )
 
@@ -1238,7 +1526,7 @@ def print_prediction_diagnostics(
     print()
 
     print(
-        "#" * 155
+        "#" * 190
     )
 
     print(
@@ -1246,7 +1534,7 @@ def print_prediction_diagnostics(
     )
 
     print(
-        "#" * 155
+        "#" * 190
     )
 
 
@@ -1255,35 +1543,42 @@ def print_prediction_diagnostics(
         f"{t:.3f} s"
     )
 
+
     print(
         f"current gait phase           : "
         f"{phase_name}"
     )
+
 
     print(
         f"actual y                     : "
         f"{x_current[1]:+.9f} m"
     )
 
+
     print(
         f"actual vy                    : "
         f"{x_current[7]:+.9f} m/s"
     )
+
 
     print(
         f"actual z                     : "
         f"{x_current[2]:+.9f} m"
     )
 
+
     print(
         f"actual vz                    : "
         f"{x_current[8]:+.9f} m/s"
     )
 
+
     print(
         f"shift amplitude              : "
         f"{LATERAL_SHIFT_AMPLITUDE:+.6f} m"
     )
+
 
     print(
         f"robot weight                 : "
@@ -1297,6 +1592,7 @@ def print_prediction_diagnostics(
         "FULL LATERAL REFERENCE INCLUDING CURRENT KNOT:"
     )
 
+
     print(
         "time:"
     )
@@ -1307,6 +1603,7 @@ def print_prediction_diagnostics(
         ]
     )
 
+
     print(
         "y_offset:"
     )
@@ -1316,6 +1613,7 @@ def print_prediction_diagnostics(
             "y_offset"
         ]
     )
+
 
     print(
         "vy_offset:"
@@ -1331,7 +1629,7 @@ def print_prediction_diagnostics(
     print()
 
     print(
-        "-" * 155
+        "-" * 190
     )
 
     print(
@@ -1339,7 +1637,7 @@ def print_prediction_diagnostics(
     )
 
     print(
-        "-" * 155
+        "-" * 190
     )
 
 
@@ -1350,7 +1648,8 @@ def print_prediction_diagnostics(
         "      z_ref      z_pred       e_z |"
         "      Fz_L      Fz_R     Fz_sum |"
         "    FyL/FzL    FyR/FzR |"
-        "      Mx_L      Mx_R"
+        "   MxL_W   MxL_FOOT |"
+        "   MxR_W   MxR_FOOT"
     )
 
 
@@ -1358,17 +1657,25 @@ def print_prediction_diagnostics(
         MPC_HORIZON
     ):
 
-        x_pred = X_pred[
-            j
-        ]
+        x_pred = (
+            X_pred[
+                j
+            ]
+        )
 
-        x_ref = X_ref_mpc[
-            j
-        ]
 
-        u = U[
-            j
-        ]
+        x_ref = (
+            X_ref_mpc[
+                j
+            ]
+        )
+
+
+        u = (
+            U[
+                j
+            ]
+        )
 
 
         cL = int(
@@ -1378,6 +1685,7 @@ def print_prediction_diagnostics(
             ]
         )
 
+
         cR = int(
             contact_schedule[
                 j,
@@ -1386,33 +1694,122 @@ def print_prediction_diagnostics(
         )
 
 
-        Fy_L = float(
-            u[1]
+        # ====================================================
+        # WORLD WRENCH
+        # ====================================================
+
+        F_L_W = np.asarray(
+            u[
+                0:3
+            ],
+            dtype=float,
         )
+
+
+        M_L_W = np.asarray(
+            u[
+                3:6
+            ],
+            dtype=float,
+        )
+
+
+        F_R_W = np.asarray(
+            u[
+                6:9
+            ],
+            dtype=float,
+        )
+
+
+        M_R_W = np.asarray(
+            u[
+                9:12
+            ],
+            dtype=float,
+        )
+
+
+        # ====================================================
+        # FOOT FRAME
+        # ====================================================
+
+        M_L_foot = (
+            L6_R_W
+
+            @
+
+            M_L_W
+        )
+
+
+        M_R_foot = (
+            R6_R_W
+
+            @
+
+            M_R_W
+        )
+
+
+        Fy_L = float(
+            F_L_W[
+                1
+            ]
+        )
+
 
         Fz_L = float(
-            u[2]
-        )
-
-        Mx_L = float(
-            u[3]
+            F_L_W[
+                2
+            ]
         )
 
 
         Fy_R = float(
-            u[7]
+            F_R_W[
+                1
+            ]
         )
+
 
         Fz_R = float(
-            u[8]
+            F_R_W[
+                2
+            ]
         )
 
-        Mx_R = float(
-            u[9]
+
+        Mx_L_W = float(
+            M_L_W[
+                0
+            ]
+        )
+
+
+        Mx_L_foot = float(
+            M_L_foot[
+                0
+            ]
+        )
+
+
+        Mx_R_W = float(
+            M_R_W[
+                0
+            ]
+        )
+
+
+        Mx_R_foot = float(
+            M_R_foot[
+                0
+            ]
         )
 
 
         ratio_L = np.nan
+
 
         if Fz_L > 1e-6:
 
@@ -1420,12 +1817,15 @@ def print_prediction_diagnostics(
                 abs(
                     Fy_L
                 )
+
                 /
+
                 Fz_L
             )
 
 
         ratio_R = np.nan
+
 
         if Fz_R > 1e-6:
 
@@ -1433,7 +1833,9 @@ def print_prediction_diagnostics(
                 abs(
                     Fy_R
                 )
+
                 /
+
                 Fz_R
             )
 
@@ -1441,31 +1843,40 @@ def print_prediction_diagnostics(
         print(
             f"{j:2d} | "
             f"{cL}{cR} | "
+
             f"{x_ref[1]:+10.6f} "
             f"{x_pred[1]:+10.6f} "
             f"{(x_pred[1]-x_ref[1]):+10.6f} | "
+
             f"{x_ref[7]:+10.6f} "
             f"{x_pred[7]:+10.6f} | "
+
             f"{x_ref[2]:+10.6f} "
             f"{x_pred[2]:+10.6f} "
             f"{(x_pred[2]-x_ref[2]):+10.6f} | "
+
             f"{Fz_L:+9.4f} "
             f"{Fz_R:+9.4f} "
             f"{(Fz_L+Fz_R):+9.4f} | "
+
             f"{ratio_L:11.6f} "
             f"{ratio_R:11.6f} | "
-            f"{Mx_L:+10.6f} "
-            f"{Mx_R:+10.6f}"
+
+            f"{Mx_L_W:+8.5f} "
+            f"{Mx_L_foot:+10.6f} | "
+
+            f"{Mx_R_W:+8.5f} "
+            f"{Mx_R_foot:+10.6f}"
         )
 
 
     print(
-        "#" * 155
+        "#" * 190
     )
 
 
 # ============================================================
-# QP FAILURE SUMMARY
+# QP FAILURE
 # ============================================================
 
 def print_qp_failure(
@@ -1497,35 +1908,42 @@ def print_qp_failure(
         f"{t:.3f} s"
     )
 
+
     print(
         f"phase                : "
         f"{phase_name}"
     )
+
 
     print(
         f"OSQP status          : "
         f"{solver_info.get('status')}"
     )
 
+
     print(
         f"status_val           : "
         f"{solver_info.get('status_val')}"
     )
+
 
     print(
         f"iterations           : "
         f"{solver_info.get('iterations')}"
     )
 
+
     print(
         f"primal residual      : "
         f"{solver_info.get('primal_residual')}"
     )
 
+
     print(
         f"dual residual        : "
         f"{solver_info.get('dual_residual')}"
     )
+
 
     print(
         f"post diagnostics     : "
@@ -1540,9 +1958,13 @@ def print_qp_failure(
 
     if (
         qp_solver.A is None
+
         or
+
         qp_solver.l is None
+
         or
+
         qp_solver.u is None
     ):
 
@@ -1562,12 +1984,14 @@ def print_qp_failure(
         dtype=float,
     )
 
+
     lower = np.asarray(
         qp_solver.l,
         dtype=float,
     ).reshape(
         -1
     )
+
 
     upper = np.asarray(
         qp_solver.u,
@@ -1579,7 +2003,9 @@ def print_qp_failure(
 
     value = (
         A
+
         @
+
         U_opt
     )
 
@@ -1587,6 +2013,7 @@ def print_qp_failure(
     lower_violation = np.zeros_like(
         value
     )
+
 
     upper_violation = np.zeros_like(
         value
@@ -1596,6 +2023,7 @@ def print_qp_failure(
     finite_lower = np.isfinite(
         lower
     )
+
 
     finite_upper = np.isfinite(
         upper
@@ -1608,10 +2036,13 @@ def print_qp_failure(
         lower[
             finite_lower
         ]
+
         -
+
         value[
             finite_lower
         ],
+
         0.0,
     )
 
@@ -1622,10 +2053,13 @@ def print_qp_failure(
         value[
             finite_upper
         ]
+
         -
+
         upper[
             finite_upper
         ],
+
         0.0,
     )
 
@@ -1683,7 +2117,7 @@ def print_qp_failure(
 def main():
 
     print(
-        "=" * 120
+        "=" * 130
     )
 
     print(
@@ -1691,7 +2125,7 @@ def main():
     )
 
     print(
-        "=" * 120
+        "=" * 130
     )
 
 
@@ -1700,32 +2134,44 @@ def main():
         f"{XML_PATH}"
     )
 
+
     print(
         "MuJoCo mj_step              : NO"
     )
+
 
     print(
         "Joint torque mapping        : NO"
     )
 
+
     print(
         "Swing controller            : NO"
     )
+
 
     print(
         "SRBD closed-loop plant      : YES"
     )
 
+
     print(
         "Lateral load transfer       : YES"
     )
+
 
     print(
         "MPC core modified           : NO"
     )
 
+
     print(
         "ReferenceGenerator modified : NO"
+    )
+
+
+    print(
+        "Moment diagnostic           : WORLD + FOOT FRAME"
     )
 
 
@@ -1736,20 +2182,24 @@ def main():
         f"{CONTROL_DT:.6f} s"
     )
 
+
     print(
         f"MPC_UPDATE_DT               : "
         f"{MPC_UPDATE_DT:.6f} s"
     )
+
 
     print(
         f"MPC_DT                      : "
         f"{MPC_DT:.6f} s"
     )
 
+
     print(
         f"MPC_HORIZON                 : "
         f"{MPC_HORIZON}"
     )
+
 
     print(
         f"prediction horizon          : "
@@ -1764,15 +2214,18 @@ def main():
         f"{SSP_DURATIONS[0]*MPC_DT:.3f} s"
     )
 
+
     print(
         f"DSP duration                : "
         f"{DSP_DURATIONS[0]*MPC_DT:.3f} s"
     )
 
+
     print(
         f"startup hold                : "
         f"{STARTUP_HOLD_TIME:.3f} s"
     )
+
 
     print(
         f"lateral amplitude           : "
@@ -1787,15 +2240,18 @@ def main():
         f"{mu}"
     )
 
+
     print(
         f"Fmax                        : "
         f"{Fmax} N"
     )
 
+
     print(
-        f"Mx_tolerance                : "
+        f"Mx FOOT tolerance           : "
         f"{Mx_tolerance} N.m"
     )
+
 
     print(
         f"toe/heel lateral friction   : "
@@ -1829,25 +2285,30 @@ def main():
         Q_diag
     )
 
+
     print(
         f"Q_y                         : "
         f"{Q_diag[1]}"
     )
+
 
     print(
         f"Q_vy                        : "
         f"{Q_diag[7]}"
     )
 
+
     print(
         f"Q_z                         : "
         f"{Q_diag[2]}"
     )
 
+
     print(
         f"Q_vz                        : "
         f"{Q_diag[8]}"
     )
+
 
     print(
         "R diagonal:"
@@ -1865,21 +2326,35 @@ def main():
     setup = (
         initialize_simulation(
             xml_path=XML_PATH,
+
             horizon=MPC_HORIZON,
+
             dt_mpc=MPC_DT,
+
             dt_mpc_update=(
                 MPC_UPDATE_DT
             ),
+
             home_key_name="home",
+
             qp_verbose=False,
+
             qp_eps_abs=1e-6,
+
             qp_eps_rel=1e-6,
-            qp_max_iter=20000,
+
+            qp_max_iter=(
+                QP_MAX_ITER
+            ),
+
             qp_polishing=True,
+
             qp_enable_warm_start=False,
+
             qp_constraint_tolerance=(
                 QP_CONSTRAINT_TOLERANCE
             ),
+
             print_initialization=True,
         )
     )
@@ -1888,7 +2363,9 @@ def main():
     initial_geometry = (
         get_current_state_mpc(
             model=setup.model,
+
             data=setup.data,
+
             B_inertia_CoM=(
                 setup.B_inertia_CoM
             ),
@@ -1905,16 +2382,18 @@ def main():
 
 
     # ========================================================
-    # FIX CONTACT POINTS IN WORLD
+    # FIXED CONTACT POINTS
     #
-    # Standalone SRBD diagnostic only.
+    # Standalone SRBD diagnostic.
     # ========================================================
 
     W_p_L6 = (
         x_current[
             0:3
         ]
+
         +
+
         initial_geometry.W_r_L
     )
 
@@ -1923,26 +2402,56 @@ def main():
         x_current[
             0:3
         ]
+
         +
+
         initial_geometry.W_r_R
     )
 
 
-    z_des = float(
-        x_current[2]
+    L6_R_W = np.asarray(
+        initial_geometry.L6_IK_R_W,
+        dtype=float,
+    ).reshape(
+        3,
+        3,
     )
+
+
+    R6_R_W = np.asarray(
+        initial_geometry.R6_IK_R_W,
+        dtype=float,
+    ).reshape(
+        3,
+        3,
+    )
+
+
+    z_des = float(
+        x_current[
+            2
+        ]
+    )
+
 
     roll_des = float(
-        x_current[3]
+        x_current[
+            3
+        ]
     )
 
+
     pitch_des = float(
-        x_current[4]
+        x_current[
+            4
+        ]
     )
 
 
     y_center = float(
-        x_current[1]
+        x_current[
+            1
+        ]
     )
 
 
@@ -1958,6 +2467,7 @@ def main():
         ]
     )
 
+
     print(
         "L6:"
     )
@@ -1965,6 +2475,7 @@ def main():
     print(
         W_p_L6
     )
+
 
     print(
         "R6:"
@@ -1974,15 +2485,42 @@ def main():
         W_p_R6
     )
 
+
+    print()
+
+    print(
+        "L6_R_W:"
+    )
+
+    print(
+        L6_R_W
+    )
+
+
+    print()
+
+    print(
+        "R6_R_W:"
+    )
+
+    print(
+        R6_R_W
+    )
+
+
+    print()
+
     print(
         f"center y                    : "
         f"{y_center:+.9f} m"
     )
 
+
     print(
         f"target LEFT load y          : "
         f"{y_center + LATERAL_SHIFT_AMPLITUDE:+.9f} m"
     )
+
 
     print(
         f"target RIGHT load y         : "
@@ -1997,17 +2535,23 @@ def main():
     gait = (
         GaitScheduler(
             mpc_horizon=MPC_HORIZON,
+
             dsp_durations=(
                 DSP_DURATIONS
             ),
+
             ssp_durations=(
                 SSP_DURATIONS
             ),
+
             control_dt=CONTROL_DT,
+
             dt_mpc=MPC_DT,
+
             startup_hold_time=(
                 STARTUP_HOLD_TIME
             ),
+
             first_swing_leg=(
                 FIRST_SWING_LEG
             ),
@@ -2016,7 +2560,7 @@ def main():
 
 
     # ========================================================
-    # BASE REFERENCE GENERATOR
+    # REFERENCE GENERATOR
     # ========================================================
 
     reference_generator = (
@@ -2024,7 +2568,9 @@ def main():
             horizon_length=(
                 REFERENCE_HORIZON
             ),
+
             dt_mpc=MPC_DT,
+
             reference_update_dt=(
                 MPC_UPDATE_DT
             ),
@@ -2044,6 +2590,7 @@ def main():
 
     previous_phase_name = None
 
+
     total_mpc_solves = 0
 
     hard_solver_failures = 0
@@ -2051,14 +2598,19 @@ def main():
     rejected_solutions = 0
 
 
-    # --------------------------------------------------------
-    # Performance summary
-    # --------------------------------------------------------
+    # ========================================================
+    # METRICS
+    # ========================================================
 
     min_total_fz = np.inf
+
     max_total_fz = -np.inf
 
-    max_abs_mx = 0.0
+
+    max_abs_mx_world = 0.0
+
+    max_abs_mx_foot = 0.0
+
 
     max_friction_ratio = 0.0
 
@@ -2131,14 +2683,18 @@ def main():
 
 
         # ====================================================
-        # C. MPC UPDATE
+        # C. MPC TICK
         # ====================================================
 
         is_mpc_tick = (
             k
+
             %
+
             MPC_UPDATE_DECIMATION
+
             ==
+
             0
         )
 
@@ -2152,14 +2708,19 @@ def main():
             ref_output = (
                 reference_generator.update(
                     x_actual=x_current,
+
                     v_des_body=(
                         v_des_body
                     ),
+
                     yaw_rate_des=(
                         yaw_rate_des
                     ),
+
                     z_des=z_des,
+
                     roll_des=roll_des,
+
                     pitch_des=pitch_des,
                 )
             )
@@ -2185,7 +2746,7 @@ def main():
 
 
             # ================================================
-            # C2. LATERAL LOAD-TRANSFER PROFILE
+            # C2. LATERAL REFERENCE
             # ================================================
 
             lateral_profile = (
@@ -2194,13 +2755,6 @@ def main():
                 )
             )
 
-
-            # -----------------------------------------------
-            # Base persistent center + gait offset.
-            #
-            # y index  = 1
-            # vy index = 7
-            # -----------------------------------------------
 
             X_ref_full[
                 :,
@@ -2225,11 +2779,7 @@ def main():
             # ================================================
             # C3. MPC REFERENCE
             #
-            # Prediction:
-            #
             # x[k+1|k] ... x[k+N|k]
-            #
-            # Therefore skip current knot.
             # ================================================
 
             X_ref_mpc = (
@@ -2281,10 +2831,13 @@ def main():
             runtime = (
                 build_runtime_srbd_quantities(
                     x_current=x_current,
+
                     B_inertia_CoM=(
                         setup.B_inertia_CoM
                     ),
+
                     W_p_L6=W_p_L6,
+
                     W_p_R6=W_p_R6,
                 )
             )
@@ -2295,19 +2848,25 @@ def main():
                     Ew_inverse=runtime[
                         "Ew_inverse"
                     ],
+
                     mass_CoM=(
                         setup.mass_CoM
                     ),
+
                     W_inertia_CoM=runtime[
                         "W_inertia_CoM"
                     ],
+
                     W_r_L=runtime[
                         "W_r_L"
                     ],
+
                     W_r_R=runtime[
                         "W_r_R"
                     ],
+
                     dt_mpc=MPC_DT,
+
                     horizon=(
                         MPC_HORIZON
                     ),
@@ -2329,24 +2888,29 @@ def main():
                 qp_solver=(
                     setup.qp_solver
                 ),
+
                 Phi=Phi,
+
                 Gamma=Gamma,
+
                 x_current=(
                     x_current
                 ),
+
                 X_ref=(
                     X_ref_flat
                 ),
+
                 N=MPC_HORIZON,
-                L6_R_W=(
-                    initial_geometry.L6_IK_R_W
-                ),
-                R6_R_W=(
-                    initial_geometry.R6_IK_R_W
-                ),
+
+                L6_R_W=L6_R_W,
+
+                R6_R_W=R6_R_W,
+
                 contact_schedule=(
                     contact_schedule
                 ),
+
                 print_diagnostics=False,
             )
 
@@ -2355,7 +2919,7 @@ def main():
 
 
             # ================================================
-            # C7. HARD SOLVER FAILURE
+            # C7. HARD FAILURE
             # ================================================
 
             if U_opt is None:
@@ -2365,16 +2929,21 @@ def main():
 
                 print_qp_failure(
                     t=t,
+
                     phase_name=phase_name,
+
                     solver_info=(
                         solver_info
                     ),
+
                     post_diagnostics=(
                         post_diagnostics
                     ),
+
                     qp_solver=(
                         setup.qp_solver
                     ),
+
                     U_opt=None,
                 )
 
@@ -2392,32 +2961,45 @@ def main():
 
                 print_prediction_diagnostics(
                     t=t,
+
                     phase_name=(
                         phase_name
                     ),
+
                     x_current=(
                         x_current
                     ),
+
                     X_ref_mpc=(
                         X_ref_mpc
                     ),
+
                     Phi=Phi,
+
                     Gamma=Gamma,
+
                     U_opt=U_opt,
+
                     contact_schedule=(
                         contact_schedule
                     ),
+
                     lateral_profile=(
                         lateral_profile
                     ),
+
                     mass_CoM=(
                         setup.mass_CoM
                     ),
+
+                    L6_R_W=L6_R_W,
+
+                    R6_R_W=R6_R_W,
                 )
 
 
             # ================================================
-            # C9. POST-SOLVE REJECTION
+            # C9. POST CHECK REJECTION
             # ================================================
 
             if u0_opt is None:
@@ -2425,47 +3007,64 @@ def main():
                 rejected_solutions += 1
 
 
-                # Print full prediction at failure.
                 print_prediction_diagnostics(
                     t=t,
+
                     phase_name=(
                         phase_name
                     ),
+
                     x_current=(
                         x_current
                     ),
+
                     X_ref_mpc=(
                         X_ref_mpc
                     ),
+
                     Phi=Phi,
+
                     Gamma=Gamma,
+
                     U_opt=U_opt,
+
                     contact_schedule=(
                         contact_schedule
                     ),
+
                     lateral_profile=(
                         lateral_profile
                     ),
+
                     mass_CoM=(
                         setup.mass_CoM
                     ),
+
+                    L6_R_W=L6_R_W,
+
+                    R6_R_W=R6_R_W,
                 )
 
 
                 print_qp_failure(
                     t=t,
+
                     phase_name=(
                         phase_name
                     ),
+
                     solver_info=(
                         solver_info
                     ),
+
                     post_diagnostics=(
                         post_diagnostics
                     ),
+
                     qp_solver=(
                         setup.qp_solver
                     ),
+
                     U_opt=U_opt,
                 )
 
@@ -2492,15 +3091,21 @@ def main():
             metrics = (
                 compute_u0_metrics(
                     u0=held_u,
+
                     mass_CoM=(
                         setup.mass_CoM
                     ),
+
+                    L6_R_W=L6_R_W,
+
+                    R6_R_W=R6_R_W,
                 )
             )
 
 
             min_total_fz = min(
                 min_total_fz,
+
                 metrics[
                     "total_fz"
                 ],
@@ -2509,22 +3114,42 @@ def main():
 
             max_total_fz = max(
                 max_total_fz,
+
                 metrics[
                     "total_fz"
                 ],
             )
 
 
-            max_abs_mx = max(
-                max_abs_mx,
+            max_abs_mx_world = max(
+                max_abs_mx_world,
+
                 abs(
                     metrics[
-                        "Mx_L"
+                        "Mx_L_W"
                     ]
                 ),
+
                 abs(
                     metrics[
-                        "Mx_R"
+                        "Mx_R_W"
+                    ]
+                ),
+            )
+
+
+            max_abs_mx_foot = max(
+                max_abs_mx_foot,
+
+                abs(
+                    metrics[
+                        "Mx_L_foot"
+                    ]
+                ),
+
+                abs(
+                    metrics[
+                        "Mx_R_foot"
                     ]
                 ),
             )
@@ -2534,6 +3159,7 @@ def main():
                 metrics[
                     "friction_ratio_L"
                 ],
+
                 metrics[
                     "friction_ratio_R"
                 ],
@@ -2545,13 +3171,13 @@ def main():
 
                     max_friction_ratio = max(
                         max_friction_ratio,
+
                         float(
                             ratio
                         ),
                     )
 
 
-            # Current reference knot approximately at k.
             y_ref_current = float(
                 X_ref_full[
                     0,
@@ -2566,13 +3192,16 @@ def main():
                         1
                     ]
                 )
+
                 -
+
                 y_ref_current
             )
 
 
             max_abs_y_error = max(
                 max_abs_y_error,
+
                 abs(
                     y_error
                 ),
@@ -2580,42 +3209,53 @@ def main():
 
 
             # ================================================
-            # C12. PHASE / PERIODIC STATUS
+            # C12. STATUS
             # ================================================
 
             phase_changed = (
                 phase_name
+
                 !=
+
                 previous_phase_name
             )
 
 
             periodic_print = (
                 total_mpc_solves
+
                 %
+
                 PRINT_EVERY_N_MPC
+
                 ==
+
                 1
             )
 
 
             if (
                 phase_changed
+
                 or
+
                 periodic_print
             ):
 
-                y_offset_now, vy_offset_now, load_label = (
-                    lateral_reference_at_time(
-                        t
-                    )
+                (
+                    y_offset_now,
+                    vy_offset_now,
+                    load_label,
+
+                ) = lateral_reference_at_time(
+                    t
                 )
 
 
                 print()
 
                 print(
-                    "=" * 120
+                    "=" * 130
                 )
 
                 print(
@@ -2623,7 +3263,7 @@ def main():
                 )
 
                 print(
-                    "=" * 120
+                    "=" * 130
                 )
 
 
@@ -2632,10 +3272,12 @@ def main():
                     f"{phase_name}"
                 )
 
+
                 print(
                     f"contact               : "
                     f"{contact_state}"
                 )
+
 
                 print(
                     f"load-transfer phase   : "
@@ -2650,20 +3292,24 @@ def main():
                     f"{x_current[1]:+.9f} m"
                 )
 
+
                 print(
                     f"current y offset ref  : "
                     f"{y_offset_now:+.9f} m"
                 )
+
 
                 print(
                     f"final y ref           : "
                     f"{X_ref_full[0,1]:+.9f} m"
                 )
 
+
                 print(
                     f"actual vy             : "
                     f"{x_current[7]:+.9f} m/s"
                 )
+
 
                 print(
                     f"vy offset ref         : "
@@ -2674,19 +3320,22 @@ def main():
                 print()
 
                 print(
-                    f"Fz L                  : "
-                    f"{metrics['Fz_L']:+.6f} N"
+                    f"Fz L WORLD            : "
+                    f"{metrics['Fz_L_W']:+.6f} N"
                 )
 
+
                 print(
-                    f"Fz R                  : "
-                    f"{metrics['Fz_R']:+.6f} N"
+                    f"Fz R WORLD            : "
+                    f"{metrics['Fz_R_W']:+.6f} N"
                 )
+
 
                 print(
                     f"Fz total              : "
                     f"{metrics['total_fz']:+.6f} N"
                 )
+
 
                 print(
                     f"mg                    : "
@@ -2701,19 +3350,42 @@ def main():
                     f"{metrics['friction_ratio_L']}"
                 )
 
+
                 print(
                     f"|FyR|/FzR             : "
                     f"{metrics['friction_ratio_R']}"
                 )
 
-                print(
-                    f"Mx L                  : "
-                    f"{metrics['Mx_L']:+.9f} N.m"
-                )
+
+                print()
 
                 print(
-                    f"Mx R                  : "
-                    f"{metrics['Mx_R']:+.9f} N.m"
+                    f"Mx L WORLD            : "
+                    f"{metrics['Mx_L_W']:+.9f} N.m"
+                )
+
+
+                print(
+                    f"Mx L FOOT             : "
+                    f"{metrics['Mx_L_foot']:+.9f} N.m"
+                )
+
+
+                print(
+                    f"Mx R WORLD            : "
+                    f"{metrics['Mx_R_W']:+.9f} N.m"
+                )
+
+
+                print(
+                    f"Mx R FOOT             : "
+                    f"{metrics['Mx_R_foot']:+.9f} N.m"
+                )
+
+
+                print(
+                    f"Mx FOOT limit         : "
+                    f"+/-{Mx_tolerance:.9f} N.m"
                 )
 
 
@@ -2724,10 +3396,12 @@ def main():
                     f"{solver_info.get('status')}"
                 )
 
+
                 print(
                     f"iterations            : "
                     f"{solver_info.get('iterations')}"
                 )
+
 
                 print(
                     f"max violation         : "
@@ -2741,35 +3415,43 @@ def main():
 
 
         # ====================================================
-        # D. END SAMPLE
+        # D. FINAL SAMPLE
         # ====================================================
 
         if k == number_of_steps:
+
             break
 
 
         # ====================================================
-        # E. APPLY u_k TO SRBD PLANT
+        # E. APPLY u_k
+        #
+        # x_k -> u_k -> x_(k+1)
         # ====================================================
 
         x_current = (
             integrate_srbd_plant(
                 x_current=x_current,
+
                 held_u=held_u,
+
                 mass_CoM=(
                     setup.mass_CoM
                 ),
+
                 B_inertia_CoM=(
                     setup.B_inertia_CoM
                 ),
+
                 W_p_L6=W_p_L6,
+
                 W_p_R6=W_p_R6,
             )
         )
 
 
         # ====================================================
-        # F. ADVANCE GAIT AFTER STATE UPDATE
+        # F. ADVANCE GAIT
         # ====================================================
 
         gait.advance()
@@ -2782,7 +3464,7 @@ def main():
     print()
 
     print(
-        "=" * 120
+        "=" * 130
     )
 
     print(
@@ -2790,7 +3472,7 @@ def main():
     )
 
     print(
-        "=" * 120
+        "=" * 130
     )
 
 
@@ -2799,10 +3481,12 @@ def main():
         f"{total_mpc_solves}"
     )
 
+
     print(
         f"OSQP hard failures      : "
         f"{hard_solver_failures}"
     )
+
 
     print(
         f"Post-check rejections   : "
@@ -2817,20 +3501,52 @@ def main():
         f"{min_total_fz:.9f} N"
     )
 
+
     print(
         f"maximum applied Fz sum  : "
         f"{max_total_fz:.9f} N"
     )
 
+
+    print()
+
     print(
-        f"maximum applied |Mx|    : "
-        f"{max_abs_mx:.9f} N.m"
+        f"maximum |Mx WORLD|      : "
+        f"{max_abs_mx_world:.9f} N.m"
     )
+
+
+    print(
+        f"maximum |Mx FOOT|       : "
+        f"{max_abs_mx_foot:.9f} N.m"
+    )
+
+
+    print(
+        f"Mx FOOT hard limit      : "
+        f"{Mx_tolerance:.9f} N.m"
+    )
+
+
+    print(
+        f"Mx FOOT excess          : "
+        f"{max(0.0, max_abs_mx_foot-Mx_tolerance):.9e} N.m"
+    )
+
+
+    print()
 
     print(
         f"maximum |Fy|/Fz         : "
         f"{max_friction_ratio:.9f}"
     )
+
+
+    print(
+        f"friction limit mu       : "
+        f"{mu:.9f}"
+    )
+
 
     print(
         f"maximum |y-y_ref|       : "
@@ -2852,14 +3568,91 @@ def main():
     print()
 
     print(
+        "INTERPRETATION:"
+    )
+
+
+    if (
+        hard_solver_failures == 0
+
+        and
+
+        rejected_solutions == 0
+    ):
+
+        print(
+            "QP execution: PASS"
+        )
+
+    else:
+
+        print(
+            "QP execution: FAIL / REJECTED"
+        )
+
+
+    print()
+
+
+    if (
+        max_abs_mx_foot
+        <=
+        Mx_tolerance
+        +
+        QP_CONSTRAINT_TOLERANCE
+    ):
+
+        print(
+            "FOOT-frame Mx diagnostic: PASS"
+        )
+
+    else:
+
+        print(
+            "FOOT-frame Mx diagnostic: FAIL"
+        )
+
+
+    print()
+
+    print(
+        "NOTE:"
+    )
+
+
+    print(
+        "Mx WORLD may be larger than Mx_tolerance."
+    )
+
+
+    print(
+        "The actual constraint is applied to:"
+    )
+
+
+    print(
+        "Mx_L_foot = "
+        "L6_R_W[0,:] @ M_L_W"
+    )
+
+
+    print(
+        "Mx_R_foot = "
+        "R6_R_W[0,:] @ M_R_W"
+    )
+
+
+    print()
+
+    print(
         "TEST PURPOSE:"
     )
 
+
     print(
-        "Check whether an explicit smooth lateral load-transfer "
-        "reference allows the existing SRBD-MPC to pass "
-        "DS -> SSP transitions without changing MPC core "
-        "or contact constraints."
+        "Verify gait-aware lateral load transfer and distinguish "
+        "WORLD-frame moment components from FOOT-frame moment "
+        "components used by the contact constraints."
     )
 
 
