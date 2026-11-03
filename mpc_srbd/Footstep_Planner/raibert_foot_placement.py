@@ -2,227 +2,263 @@ import numpy as np
 
 
 # ============================================================
-# RAIBERT FOOT-PLACEMENT PARAMETERS
-# ============================================================
-#
-# Paper baseline:
-#
-#     k_x = 0.03
-#     k_y = 0.03
-#
-# The original paper implementation uses:
-#
-#     max correction x = 0.30 m
-#     max correction y = 0.30 m
-#
-# However, Open Duck Mini is much smaller.
-#
-# For the first implementation we use provisional values:
-#
-#     x: +/- 2.5 cm
-#     y: +/- 2.0 cm
-#
-# These values are NOT final.
-#
-# They will later be identified using:
-#
-#     Raibert
-#        ->
-#     Bezier
-#        ->
-#     IK
-#        ->
-#     joint-limit / singularity / reachability test
-#
+# DEFAULT RAIBERT PARAMETERS
 # ============================================================
 
 DEFAULT_K_X = 0.03
 DEFAULT_K_Y = 0.03
 
+
+# ============================================================
+# LONGITUDINAL CORRECTION LIMIT
+#
+# Feasibility test:
+#
+#     +/- 2.5 cm : PASS
+#
+# The test remained feasible up to +/- 3 cm,
+# therefore 2.5 cm is kept as a conservative value.
+# ============================================================
+
 DEFAULT_MAX_CORRECTION_X = 0.025
-DEFAULT_MAX_CORRECTION_Y = 0.020
 
 
 # ============================================================
-# VALIDATION
+# LATERAL CORRECTION LIMITS
+#
+# Based on the current Open Duck feasibility test.
+#
+# LEFT LEG:
+#
+#     inward  = -Y
+#     outward = +Y
+#
+# RIGHT LEG:
+#
+#     inward  = +Y
+#     outward = -Y
+#
+# Current conservative values:
+#
+#     inward  = 0.5 cm
+#     outward = 2.0 cm
+#
+# These values are provisional and should later be validated
+# over multiple walking configurations.
 # ============================================================
 
-def _validate_vector3(
-    value,
-    name,
+DEFAULT_MAX_CORRECTION_Y_INWARD = 0.005
+
+DEFAULT_MAX_CORRECTION_Y_OUTWARD = 0.020
+
+
+# ============================================================
+# LEG VALIDATION
+# ============================================================
+
+def validate_leg(
+    leg,
 ):
 
-    value = np.asarray(
-        value,
-        dtype=float,
-    ).reshape(-1)
+    leg = str(
+        leg
+    ).upper()
 
-    if value.shape != (3,):
-
-        raise ValueError(
-            f"{name} phải có shape (3,), "
-            f"nhưng nhận được {value.shape}."
-        )
-
-    if not np.all(
-        np.isfinite(
-            value
-        )
+    if leg not in (
+        "L",
+        "R",
     ):
 
         raise ValueError(
-            f"{name} chứa NaN hoặc Inf."
+            "leg must be 'L' or 'R'."
         )
 
-    return value
+    return leg
 
 
-def _validate_nonnegative_scalar(
-    value,
-    name,
+# ============================================================
+# GET LATERAL CLIP LIMITS
+#
+# World-frame Y convention:
+#
+# LEFT:
+#
+#     inward  = -Y
+#     outward = +Y
+#
+# RIGHT:
+#
+#     inward  = +Y
+#     outward = -Y
+#
+# Returns:
+#
+#     y_min
+#     y_max
+# ============================================================
+
+def get_lateral_correction_limits(
+    leg,
+    max_correction_y_inward=
+        DEFAULT_MAX_CORRECTION_Y_INWARD,
+    max_correction_y_outward=
+        DEFAULT_MAX_CORRECTION_Y_OUTWARD,
 ):
 
-    value = float(
-        value
+    leg = validate_leg(
+        leg
     )
 
-    if (
-        not np.isfinite(
-            value
-        )
-        or
-        value < 0.0
-    ):
 
-        raise ValueError(
-            f"{name} phải hữu hạn và >= 0."
-        )
-
-    return value
-
-
-def _validate_finite_scalar(
-    value,
-    name,
-):
-
-    value = float(
-        value
+    max_correction_y_inward = float(
+        max_correction_y_inward
     )
 
-    if not np.isfinite(
-        value
-    ):
+    max_correction_y_outward = float(
+        max_correction_y_outward
+    )
+
+
+    if max_correction_y_inward < 0.0:
 
         raise ValueError(
-            f"{name} phải hữu hạn."
+            "max_correction_y_inward must be >= 0."
         )
 
-    return value
+
+    if max_correction_y_outward < 0.0:
+
+        raise ValueError(
+            "max_correction_y_outward must be >= 0."
+        )
+
+
+    # --------------------------------------------------------
+    # LEFT LEG
+    #
+    # inward  -> negative Y
+    # outward -> positive Y
+    # --------------------------------------------------------
+
+    if leg == "L":
+
+        y_min = (
+            -max_correction_y_inward
+        )
+
+        y_max = (
+            +max_correction_y_outward
+        )
+
+
+    # --------------------------------------------------------
+    # RIGHT LEG
+    #
+    # outward -> negative Y
+    # inward  -> positive Y
+    # --------------------------------------------------------
+
+    else:
+
+        y_min = (
+            -max_correction_y_outward
+        )
+
+        y_max = (
+            +max_correction_y_inward
+        )
+
+
+    return (
+        float(
+            y_min
+        ),
+        float(
+            y_max
+        ),
+    )
 
 
 # ============================================================
-# RAIBERT FEEDBACK CORRECTION
+# RAIBERT VELOCITY CORRECTION
+#
+# Raw correction:
+#
+#     delta_px = k_x (v_x - v_x_ref)
+#
+#     delta_py = k_y (v_y - v_y_ref)
+#
+# X correction:
+#
+#     symmetric clipping
+#
+# Y correction:
+#
+#     asymmetric clipping according to swing leg geometry
 # ============================================================
 
 def compute_raibert_velocity_correction(
     W_v_actual,
     W_v_ref,
+    leg,
     k_x=DEFAULT_K_X,
     k_y=DEFAULT_K_Y,
-    max_correction_x=DEFAULT_MAX_CORRECTION_X,
-    max_correction_y=DEFAULT_MAX_CORRECTION_Y,
+    max_correction_x=
+        DEFAULT_MAX_CORRECTION_X,
+    max_correction_y_inward=
+        DEFAULT_MAX_CORRECTION_Y_INWARD,
+    max_correction_y_outward=
+        DEFAULT_MAX_CORRECTION_Y_OUTWARD,
 ):
-    """
-    Compute the velocity-feedback correction term used by
-    Raibert foot placement.
-
-    Parameters
-    ----------
-    W_v_actual : array_like, shape (3,)
-        Actual body/CoM velocity expressed in World frame [m/s].
-
-    W_v_ref : array_like, shape (3,)
-        Desired velocity expressed in World frame [m/s].
-
-    k_x : float
-        Raibert feedback gain along World x.
-
-    k_y : float
-        Raibert feedback gain along World y.
-
-    max_correction_x : float
-        Maximum absolute x correction [m].
-
-    max_correction_y : float
-        Maximum absolute y correction [m].
-
-    Returns
-    -------
-    result : dict
-
-        {
-            "raw_correction": ...,
-            "clipped_correction": ...,
-            "velocity_error": ...,
-            "clipped_x": ...,
-            "clipped_y": ...,
-        }
-
-    Notes
-    -----
-    Paper formula:
-
-        correction_x = k_x * (v_x - v_x_ref)
-
-        correction_y = k_y * (v_y - v_y_ref)
-
-    Only the correction term is clipped.
-
-    The entire foothold position is NOT clipped here.
-    """
 
     # ========================================================
-    # INPUTS
+    # INPUT CHECK
     # ========================================================
 
-    W_v_actual = _validate_vector3(
+    leg = validate_leg(
+        leg
+    )
+
+
+    W_v_actual = np.asarray(
         W_v_actual,
-        "W_v_actual",
+        dtype=float,
+    ).reshape(
+        3
     )
 
-    W_v_ref = _validate_vector3(
+
+    W_v_ref = np.asarray(
         W_v_ref,
-        "W_v_ref",
+        dtype=float,
+    ).reshape(
+        3
     )
 
-    k_x = _validate_nonnegative_scalar(
-        k_x,
-        "k_x",
+
+    k_x = float(
+        k_x
     )
 
-    k_y = _validate_nonnegative_scalar(
-        k_y,
-        "k_y",
+    k_y = float(
+        k_y
     )
 
-    max_correction_x = _validate_nonnegative_scalar(
-        max_correction_x,
-        "max_correction_x",
+
+    max_correction_x = float(
+        max_correction_x
     )
 
-    max_correction_y = _validate_nonnegative_scalar(
-        max_correction_y,
-        "max_correction_y",
-    )
+
+    if max_correction_x < 0.0:
+
+        raise ValueError(
+            "max_correction_x must be >= 0."
+        )
 
 
     # ========================================================
     # VELOCITY ERROR
-    #
-    # Same sign convention as the paper:
-    #
-    #     e_v = v_actual - v_ref
     # ========================================================
 
     velocity_error = (
@@ -233,117 +269,272 @@ def compute_raibert_velocity_correction(
 
 
     # ========================================================
-    # RAW FEEDBACK CORRECTION
+    # RAW RAIBERT CORRECTION
     # ========================================================
 
-    correction_raw = np.zeros(
+    raw_correction = np.zeros(
         3,
         dtype=float,
     )
 
-    correction_raw[0] = (
+
+    raw_correction[
+        0
+    ] = (
         k_x
         *
-        velocity_error[0]
+        velocity_error[
+            0
+        ]
     )
 
-    correction_raw[1] = (
+
+    raw_correction[
+        1
+    ] = (
         k_y
         *
-        velocity_error[1]
+        velocity_error[
+            1
+        ]
     )
 
-    # No vertical correction from Raibert
-    correction_raw[2] = 0.0
+
+    # No vertical Raibert correction here.
+    raw_correction[
+        2
+    ] = 0.0
 
 
     # ========================================================
-    # CLIP CORRECTION
+    # X CLIPPING
     # ========================================================
 
-    correction_clipped = (
-        correction_raw.copy()
+    x_min = (
+        -max_correction_x
     )
 
-    correction_clipped[0] = np.clip(
-        correction_raw[0],
-        -max_correction_x,
-        +max_correction_x,
+    x_max = (
+        +max_correction_x
     )
 
-    correction_clipped[1] = np.clip(
-        correction_raw[1],
-        -max_correction_y,
-        +max_correction_y,
+
+    correction_x = np.clip(
+        raw_correction[
+            0
+        ],
+        x_min,
+        x_max,
     )
 
-    correction_clipped[2] = 0.0
+
+    # ========================================================
+    # Y CLIPPING
+    # ========================================================
+
+    (
+        y_min,
+        y_max,
+
+    ) = get_lateral_correction_limits(
+
+        leg=
+            leg,
+
+        max_correction_y_inward=
+            max_correction_y_inward,
+
+        max_correction_y_outward=
+            max_correction_y_outward,
+    )
+
+
+    correction_y = np.clip(
+        raw_correction[
+            1
+        ],
+        y_min,
+        y_max,
+    )
+
+
+    # ========================================================
+    # CLIPPED CORRECTION
+    # ========================================================
+
+    clipped_correction = np.array(
+        [
+            correction_x,
+            correction_y,
+            0.0,
+        ],
+        dtype=float,
+    )
 
 
     # ========================================================
     # CLIPPING FLAGS
     # ========================================================
 
-    clipped_x = bool(
-        not np.isclose(
-            correction_raw[0],
-            correction_clipped[0],
-        )
+    x_was_clipped = not np.isclose(
+        raw_correction[
+            0
+        ],
+        correction_x,
     )
 
-    clipped_y = bool(
-        not np.isclose(
-            correction_raw[1],
-            correction_clipped[1],
-        )
+
+    y_was_clipped = not np.isclose(
+        raw_correction[
+            1
+        ],
+        correction_y,
     )
 
 
     # ========================================================
-    # RETURN
+    # IDENTIFY Y DIRECTION
+    # ========================================================
+
+    if np.isclose(
+        raw_correction[
+            1
+        ],
+        0.0,
+    ):
+
+        lateral_direction = (
+            "none"
+        )
+
+
+    elif leg == "L":
+
+        if raw_correction[
+            1
+        ] > 0.0:
+
+            lateral_direction = (
+                "outward"
+            )
+
+        else:
+
+            lateral_direction = (
+                "inward"
+            )
+
+
+    else:
+
+        if raw_correction[
+            1
+        ] > 0.0:
+
+            lateral_direction = (
+                "inward"
+            )
+
+        else:
+
+            lateral_direction = (
+                "outward"
+            )
+
+
+    # ========================================================
+    # RETURN DIAGNOSTICS
     # ========================================================
 
     return {
 
+        "leg":
+            leg,
+
         "velocity_error":
-            velocity_error.copy(),
+            velocity_error,
 
         "raw_correction":
-            correction_raw.copy(),
+            raw_correction,
 
         "clipped_correction":
-            correction_clipped.copy(),
+            clipped_correction,
 
-        "clipped_x":
-            clipped_x,
-
-        "clipped_y":
-            clipped_y,
-
-        "k_x":
-            float(
-                k_x
+        "x_was_clipped":
+            bool(
+                x_was_clipped
             ),
 
+        "y_was_clipped":
+            bool(
+                y_was_clipped
+            ),
+
+        "lateral_direction":
+            lateral_direction,
+
+        "k_x":
+            k_x,
+
         "k_y":
+            k_y,
+
+        "x_min":
             float(
-                k_y
+                x_min
+            ),
+
+        "x_max":
+            float(
+                x_max
+            ),
+
+        "y_min":
+            float(
+                y_min
+            ),
+
+        "y_max":
+            float(
+                y_max
             ),
 
         "max_correction_x":
+            max_correction_x,
+
+        "max_correction_y_inward":
             float(
-                max_correction_x
+                max_correction_y_inward
             ),
 
-        "max_correction_y":
+        "max_correction_y_outward":
             float(
-                max_correction_y
+                max_correction_y_outward
             ),
     }
 
 
 # ============================================================
-# RAIBERT FOOT PLACEMENT
+# COMPLETE RAIBERT FOOTHOLD
+#
+# Paper-style formulation:
+#
+#     Pf =
+#
+#     Phip
+#     +
+#     0.5 * v_actual * T_remaining
+#     +
+#     correction
+#
+# Then:
+#
+#     Pf_z = foothold_z
+#
+# Important:
+#
+#     T_remaining is the remaining swing time,
+#     NOT the complete swing duration.
 # ============================================================
 
 def compute_raibert_foothold(
@@ -352,158 +543,77 @@ def compute_raibert_foothold(
     W_v_ref,
     T_remaining,
     foothold_z,
+    leg,
     k_x=DEFAULT_K_X,
     k_y=DEFAULT_K_Y,
-    max_correction_x=DEFAULT_MAX_CORRECTION_X,
-    max_correction_y=DEFAULT_MAX_CORRECTION_Y,
+    max_correction_x=
+        DEFAULT_MAX_CORRECTION_X,
+    max_correction_y_inward=
+        DEFAULT_MAX_CORRECTION_Y_INWARD,
+    max_correction_y_outward=
+        DEFAULT_MAX_CORRECTION_Y_OUTWARD,
 ):
-    """
-    Compute desired foothold using the Raibert heuristic.
-
-    Architecture
-    ------------
-
-        W_p_hip
-        W_v_actual
-        W_v_ref
-        T_remaining
-               |
-               v
-           RAIBERT
-               |
-               v
-        W_p_foothold
-               |
-               v
-           BEZIER
-               |
-               v
-              IK
-
-
-    Formula
-    -------
-
-        p_f
-          =
-        p_hip
-          +
-        0.5 * v_actual * T_remaining
-          +
-        k * (v_actual - v_ref)
-
-
-    with the feedback correction clipped along x and y.
-
-
-    Parameters
-    ----------
-    W_p_hip : array_like, shape (3,)
-        Current swing-leg hip position expressed in World frame [m].
-
-    W_v_actual : array_like, shape (3,)
-        Actual body/CoM velocity expressed in World frame [m/s].
-
-    W_v_ref : array_like, shape (3,)
-        Desired body velocity expressed in World frame [m/s].
-
-    T_remaining : float
-        Remaining swing time [s].
-
-        IMPORTANT:
-
-        This follows the paper implementation:
-
-            swingTimes[foot]
-
-        Therefore this quantity decreases during the swing.
-
-        At swing start:
-
-            T_remaining = T_swing
-
-        Near touchdown:
-
-            T_remaining -> 0
-
-
-    foothold_z : float
-        Desired foothold height in World frame [m].
-
-        For current flat-ground simulation this will normally
-        be a constant ground-related value.
-
-
-    Returns
-    -------
-    result : dict
-
-        {
-            "W_p_foothold": ...,
-
-            "W_p_nominal": ...,
-
-            "W_p_hip": ...,
-
-            "velocity_error": ...,
-
-            "raw_correction": ...,
-
-            "clipped_correction": ...,
-
-            "clipped_x": ...,
-
-            "clipped_y": ...,
-
-            "T_remaining": ...,
-        }
-    """
 
     # ========================================================
-    # 1. INPUT VALIDATION
+    # INPUTS
     # ========================================================
 
-    W_p_hip = _validate_vector3(
+    leg = validate_leg(
+        leg
+    )
+
+
+    W_p_hip = np.asarray(
         W_p_hip,
-        "W_p_hip",
+        dtype=float,
+    ).reshape(
+        3
     )
 
-    W_v_actual = _validate_vector3(
+
+    W_v_actual = np.asarray(
         W_v_actual,
-        "W_v_actual",
+        dtype=float,
+    ).reshape(
+        3
     )
 
-    W_v_ref = _validate_vector3(
+
+    W_v_ref = np.asarray(
         W_v_ref,
-        "W_v_ref",
+        dtype=float,
+    ).reshape(
+        3
     )
 
-    T_remaining = _validate_nonnegative_scalar(
-        T_remaining,
-        "T_remaining",
+
+    T_remaining = float(
+        T_remaining
     )
 
-    foothold_z = _validate_finite_scalar(
-        foothold_z,
-        "foothold_z",
+
+    foothold_z = float(
+        foothold_z
     )
+
+
+    if T_remaining < 0.0:
+
+        raise ValueError(
+            "T_remaining must be >= 0."
+        )
 
 
     # ========================================================
-    # 2. NOMINAL RAIBERT LANDING POSITION
+    # NOMINAL RAIBERT TERM
     #
     # Paper:
     #
-    #     Pf_world
+    #     P_nominal =
     #
-    #       =
-    #
-    #     hip_pos
-    #
-    #       +
-    #
-    #     0.5 * vWorld * swingTimeRemaining
-    #
+    #     P_hip
+    #     +
+    #     0.5 * v_actual * T_remaining
     # ========================================================
 
     W_p_nominal = (
@@ -518,7 +628,7 @@ def compute_raibert_foothold(
 
 
     # ========================================================
-    # 3. VELOCITY FEEDBACK CORRECTION
+    # VELOCITY CORRECTION
     # ========================================================
 
     correction_result = (
@@ -530,6 +640,9 @@ def compute_raibert_foothold(
             W_v_ref=
                 W_v_ref,
 
+            leg=
+                leg,
+
             k_x=
                 k_x,
 
@@ -539,8 +652,11 @@ def compute_raibert_foothold(
             max_correction_x=
                 max_correction_x,
 
-            max_correction_y=
-                max_correction_y,
+            max_correction_y_inward=
+                max_correction_y_inward,
+
+            max_correction_y_outward=
+                max_correction_y_outward,
         )
     )
 
@@ -553,7 +669,7 @@ def compute_raibert_foothold(
 
 
     # ========================================================
-    # 4. FINAL FOOTHOLD
+    # FINAL FOOTHOLD
     # ========================================================
 
     W_p_foothold = (
@@ -563,42 +679,26 @@ def compute_raibert_foothold(
     )
 
 
-    # Paper explicitly overwrites foothold z.
-    #
-    # Therefore vertical body velocity does not change the
-    # final foothold height.
-
-    W_p_foothold[2] = (
-        foothold_z
-    )
+    # Paper explicitly overwrites foothold Z.
+    W_p_foothold[
+        2
+    ] = foothold_z
 
 
     # ========================================================
-    # 5. OUTPUT VALIDATION
-    # ========================================================
-
-    if not np.all(
-        np.isfinite(
-            W_p_foothold
-        )
-    ):
-
-        raise RuntimeError(
-            "Raibert sinh foothold chứa NaN hoặc Inf."
-        )
-
-
-    # ========================================================
-    # 6. RETURN
+    # RETURN
     # ========================================================
 
     return {
 
+        "leg":
+            leg,
+
         "W_p_foothold":
-            W_p_foothold.copy(),
+            W_p_foothold,
 
         "W_p_nominal":
-            W_p_nominal.copy(),
+            W_p_nominal,
 
         "W_p_hip":
             W_p_hip.copy(),
@@ -609,58 +709,59 @@ def compute_raibert_foothold(
         "W_v_ref":
             W_v_ref.copy(),
 
+        "T_remaining":
+            T_remaining,
+
+        "foothold_z":
+            foothold_z,
+
         "velocity_error":
             correction_result[
                 "velocity_error"
-            ].copy(),
+            ],
 
         "raw_correction":
             correction_result[
                 "raw_correction"
-            ].copy(),
+            ],
 
         "clipped_correction":
             correction_result[
                 "clipped_correction"
-            ].copy(),
-
-        "clipped_x":
-            correction_result[
-                "clipped_x"
             ],
 
-        "clipped_y":
+        "x_was_clipped":
             correction_result[
-                "clipped_y"
+                "x_was_clipped"
             ],
 
-        "T_remaining":
-            float(
-                T_remaining
-            ),
-
-        "foothold_z":
-            float(
-                foothold_z
-            ),
-
-        "k_x":
+        "y_was_clipped":
             correction_result[
-                "k_x"
+                "y_was_clipped"
             ],
 
-        "k_y":
+        "lateral_direction":
             correction_result[
-                "k_y"
+                "lateral_direction"
             ],
 
-        "max_correction_x":
+        "x_min":
             correction_result[
-                "max_correction_x"
+                "x_min"
             ],
 
-        "max_correction_y":
+        "x_max":
             correction_result[
-                "max_correction_y"
+                "x_max"
+            ],
+
+        "y_min":
+            correction_result[
+                "y_min"
+            ],
+
+        "y_max":
+            correction_result[
+                "y_max"
             ],
     }
