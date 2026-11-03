@@ -38,7 +38,7 @@ Q = np.diag([
 
     10.0,    # vx
     10.0,    # vy
-    1.0,     # vz
+    10.0,     # vz
 
     1.0,     # wx
     1.0,     # wy
@@ -120,11 +120,11 @@ Fmax = 30.0
 # ============================================================
 
 # Point 6 -> toe [m]
-l_t = 0.056
+l_t = 0.064
 
 
 # Point 6 -> heel [m]
-l_h = 0.027
+l_h = 0.038
 
 
 # ============================================================
@@ -149,7 +149,7 @@ l_h = 0.027
 # relaxation while preserving the line-contact approximation.
 # ============================================================
 
-Mx_tolerance = 0.01   # [N.m]
+Mx_tolerance = 0.015   # [N.m]
 
 
 # ============================================================
@@ -193,7 +193,7 @@ Mx_tolerance = 0.01   # [N.m]
 #     and can therefore be enabled again without rewriting code.
 # ============================================================
 
-enable_toe_heel_lateral_friction = True
+enable_toe_heel_lateral_friction = False
 
 
 # ============================================================
@@ -204,7 +204,7 @@ N = 10
 
 
 # Prediction-model discretization step
-dt_mpc = 0.05   # [s]
+dt_mpc = 0.04   # [s]
 
 
 # MPC controller update period
