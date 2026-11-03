@@ -1,76 +1,26 @@
 # ============================================================
 # NUMERICAL IK PARAMETERS
+#
+# Ankle-center IK:
+#   site: L5_ankle / R5_ankle
+#   constraint: q_hip_yaw = HIP_YAW_FIXED
+#   solved variables: [hip_roll, hip_pitch, knee]
+#   solver output: [hip_yaw, hip_roll, hip_pitch, knee]
 # ============================================================
 
+HIP_YAW_FIXED = 0.0
 
-# ============================================================
-# HYBRID METHOD SWITCHING
-#
-# If:
-#
-#     sigma_min > SIGMA_THRESHOLD
-#
-# use pseudo-Newton.
-#
-# Otherwise:
-#
-# use Gradient Descent.
-# ============================================================
-
+# Hybrid switching threshold.
 SIGMA_THRESHOLD = 1e-3
 
-
-# ============================================================
-# PSEUDO-NEWTON STEP SCALE
-#
-#     delta_q_N
-#
-# =
-#
-#     ALPHA_NEWTON
-#     *
-#     J^dagger
-#     *
-#     error
-# ============================================================
-
+# Pseudo-Newton step scale.
 ALPHA_NEWTON = 0.5
 
-
-# ============================================================
-# GRADIENT DESCENT STEP SIZE
-#
-#     delta_q_G
-#
-# =
-#
-#     ETA_GRADIENT
-#     *
-#     J^T
-#     *
-#     error
-# ============================================================
-
+# Jacobian-transpose gradient-descent step size.
 ETA_GRADIENT = 1.0
 
-
-# ============================================================
-# IK CONVERGENCE TOLERANCE
-#
-# Cartesian foot-position error:
-#
-#     || W_p_i6_des - W_p_i6 ||
-#
-# Unit:
-#
-#     [m]
-# ============================================================
-
+# Cartesian ankle-position tolerance [m].
 IK_TOLERANCE = 1e-4
 
-
-# ============================================================
-# MAXIMUM NUMBER OF IK ITERATIONS
-# ============================================================
-
-IK_MAX_ITERATIONS = 30
+# Maximum IK iterations.
+IK_MAX_ITERATIONS = 100
