@@ -193,7 +193,7 @@ Mx_tolerance = 0.01   # [N.m]
 #     and can therefore be enabled again without rewriting code.
 # ============================================================
 
-enable_toe_heel_lateral_friction = False
+enable_toe_heel_lateral_friction = True
 
 
 # ============================================================
