@@ -29,21 +29,21 @@ import numpy as np
 # ============================================================
 
 Q = np.diag([
-    50.0,   # px
-    50.0,   # py
-    150.0,   # pz
+    100.0,   # px
+    100.0,   # py
+    500.0,   # pz
 
-    50.0,   # roll
-    50.0,   # pitch
-    150.0,   # yaw
+    150.0,   # roll
+    150.0,   # pitch
+    250.0,   # yaw
 
-    1.0,     # vx
-    1.0,     # vy
-    1.0,     # vz
+    10.0,     # vx
+    10.0,     # vy
+    10.0,     # vz
 
-    10.0,    # wx
-    10.0,    # wy
-    1.0,     # wz
+    1.0,    # wx
+    1.0,    # wy
+    5.0,     # wz
 
     0.0      # augmented constant
 ])
@@ -68,10 +68,10 @@ Q = np.diag([
 
 R = np.diag([
     1e-4, 1e-4, 1e-4,   # Left foot force
-    1e-4, 1e-4, 1e-4,   # Left foot moment
+    1e-3, 1e-3, 1e-3,   # Left foot moment
 
     1e-4, 1e-4, 1e-4,   # Right foot force
-    1e-4, 1e-4, 1e-4    # Right foot moment
+    1e-3, 1e-3, 1e-3    # Right foot moment
 ])
 
 
@@ -136,4 +136,4 @@ N = 10
 dt_mpc = 0.05   # [s]
 
 # MPC controller update period
-dt_mpc_update = 0.01   # [s]
+dt_mpc_update = 0.005   # [s]

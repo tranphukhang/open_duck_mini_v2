@@ -53,6 +53,7 @@ from simulation_logger import (
     SimulationLogger,
 )
 
+
 # ============================================================
 # STATE
 # ============================================================
@@ -140,7 +141,7 @@ N = 10
 DT_MPC = 0.05
 
 # Actual MPC solve/update period.
-DT_MPC_UPDATE = 0.01
+DT_MPC_UPDATE = 0.005
 
 
 # ============================================================
@@ -175,20 +176,43 @@ GRAVITY = 9.81
 
 def build_standing_contact_schedule(
     horizon,
-    contact_meas,
 ):
     """
-    Standing contact schedule.
+    Build the PLANNED contact schedule for fixed standing.
 
-    Current row:
+    HECTOR / paper convention
+    -------------------------
 
-        c_0 = current physical contact feedback
+    The MPC contact sequence is supplied by the planned gait mode,
+    not directly overwritten by raw measured contact.
 
-    Future rows:
+    For fixed standing, both feet are planned to remain in contact
+    over the complete prediction horizon:
 
-        [1, 1]
+        c_0     = [1, 1]
+        c_1     = [1, 1]
+        ...
+        c_N-1   = [1, 1]
 
-    because standing mode is planned as double support.
+    Therefore:
+
+        contact_schedule.shape = (N, 2)
+
+    with:
+
+        column 0 = left foot
+        column 1 = right foot
+
+        1 = planned stance/contact
+        0 = planned swing/non-contact
+
+    Important
+    ---------
+    Physical contact measurement is still read separately in the
+    simulation for diagnostics and future gait-phase correction.
+
+    However, raw contact measurement does NOT overwrite c_0 in the
+    MPC prediction schedule.
     """
 
     horizon = int(
@@ -200,40 +224,12 @@ def build_standing_contact_schedule(
             "horizon phải > 0."
         )
 
-    contact_meas = np.asarray(
-        contact_meas,
-        dtype=int,
-    ).reshape(-1)
-
-    if contact_meas.shape != (2,):
-        raise ValueError(
-            "contact_meas phải có shape (2,)."
-        )
-
-    if not np.all(
-        np.isin(
-            contact_meas,
-            [
-                0,
-                1,
-            ],
-        )
-    ):
-        raise ValueError(
-            "contact_meas chỉ được chứa 0 hoặc 1."
-        )
-
     contact_schedule = np.ones(
         (
             horizon,
             2,
         ),
         dtype=int,
-    )
-
-    # Current MPC input u0 uses current physical contact.
-    contact_schedule[0] = (
-        contact_meas
     )
 
     return contact_schedule
@@ -389,7 +385,7 @@ def print_status(
     # ========================================================
 
     print(
-        "\ncontact_meas =",
+        "\ncontact_meas [diagnostics only] =",
         [
             contact_state[
                 "c_L"
@@ -401,7 +397,7 @@ def print_status(
     )
 
     print(
-        "contact_schedule[0] =",
+        "planned contact_schedule[0] =",
         contact_schedule[0]
     )
 
@@ -788,7 +784,8 @@ def main():
     )
 
     print(
-        "x_k/contact_k"
+        "x_k"
+        " + planned contact_schedule"
         " -> fixed X_ref"
         " -> build frozen SRBD"
         " -> solve QP"
@@ -846,6 +843,16 @@ def main():
 
                 # =============================================
                 # A1. CURRENT FEEDBACK SNAPSHOT
+                #
+                # Continuous-state feedback used by MPC:
+                #
+                #   x_k
+                #   Ew_inverse(k)
+                #   W_inertia_CoM(k)
+                #   W_r_L(k)
+                #   W_r_R(k)
+                #
+                # No mj_step() occurs here.
                 # =============================================
 
                 current = (
@@ -863,7 +870,19 @@ def main():
                 )
 
                 # =============================================
-                # A2. CURRENT CONTACT FEEDBACK
+                # A2. CURRENT PHYSICAL CONTACT FEEDBACK
+                #
+                # IMPORTANT:
+                #
+                # This measurement is retained for:
+                #
+                #   - diagnostics
+                #   - logging
+                #   - future touchdown/liftoff detection
+                #   - future gait-phase correction
+                #
+                # It does NOT directly overwrite c_0 of the MPC
+                # planned contact schedule.
                 # =============================================
 
                 contact_state = (
@@ -892,15 +911,33 @@ def main():
                     dtype=int,
                 )
 
+                # =============================================
+                # A3. PLANNED CONTACT SCHEDULE
+                #
+                # HECTOR / paper convention:
+                #
+                # The complete MPC contact sequence, including
+                # c_0, comes from the planned gait mode.
+                #
+                # For fixed standing:
+                #
+                #   c_j = [1, 1]
+                #
+                # for:
+                #
+                #   j = 0, ..., N-1
+                #
+                # contact_meas is NOT used here.
+                # =============================================
+
                 contact_schedule = (
                     build_standing_contact_schedule(
                         horizon=N,
-                        contact_meas=contact_meas,
                     )
                 )
 
                 # =============================================
-                # A3. FIXED STANDING TARGET
+                # A4. FIXED STANDING TARGET
                 #
                 # No trajectory/reference generator is used.
                 # X_ref was built once from setup.x_initial.
@@ -911,7 +948,7 @@ def main():
                 )
 
                 # =============================================
-                # A4. BUILD FROZEN SRBD MODEL
+                # A5. BUILD FROZEN SRBD MODEL
                 #
                 # Current feedback values:
                 #
@@ -947,7 +984,25 @@ def main():
                 )
 
                 # =============================================
-                # A5. SOLVE QP
+                # A6. SOLVE QP
+                #
+                # MPC receives:
+                #
+                #   x_k                 <- feedback
+                #
+                #   contact_schedule    <- planned gait mode
+                #
+                # Therefore:
+                #
+                #   (x_k, c_0:N-1)
+                #       ->
+                #   U_opt
+                #
+                # and only:
+                #
+                #   u_0
+                #
+                # is applied.
                 # =============================================
 
                 (
@@ -977,7 +1032,7 @@ def main():
                 )
 
                 # =============================================
-                # A6. QP FAILURE
+                # A7. QP FAILURE
                 # =============================================
 
                 if u0_opt is None:
@@ -1016,7 +1071,7 @@ def main():
                     )
 
                 # =============================================
-                # A7. HOLD FIRST MPC INPUT u_k
+                # A8. HOLD FIRST MPC INPUT u_k
                 # =============================================
 
                 held_u0_MPC = np.asarray(
