@@ -53,11 +53,6 @@ from simulation_logger import (
     SimulationLogger,
 )
 
-from standing_reference import (
-    build_sinusoidal_z_reference,
-)
-
-
 # ============================================================
 # STATE
 # ============================================================
@@ -149,24 +144,10 @@ DT_MPC_UPDATE = 0.01
 
 
 # ============================================================
-# SINUSOIDAL Z REFERENCE PARAMETERS
-# ============================================================
-
-# +/- 5 mm quanh chiều cao CoM ban đầu.
-Z_AMPLITUDE = 0.01
-
-# 0.2 Hz -> chu kỳ 5 s.
-Z_FREQUENCY = 1.0
-
-# Pha ban đầu [rad].
-Z_PHASE = 0.0
-
-
-# ============================================================
 # SIMULATION PARAMETERS
 # ============================================================
 
-# Chạy 2 chu kỳ sin.
+# Thời gian kiểm tra giữ thăng bằng.
 SIM_DURATION = 10.0
 
 PRINT_EVERY_N_MPC = 10
@@ -359,7 +340,7 @@ def print_status(
     contact_schedule,
 ):
     """
-    Runtime diagnostics for sinusoidal-z standing test.
+    Runtime diagnostics for fixed standing test.
     """
 
     (
@@ -400,7 +381,7 @@ def print_status(
     )
 
     print(
-        "mode = STANDING / SINUSOIDAL Z"
+        "mode = FIXED STANDING"
     )
 
     # ========================================================
@@ -446,7 +427,7 @@ def print_status(
     )
 
     # ========================================================
-    # Z TRACKING
+    # Z POSITION
     # ========================================================
 
     print(
@@ -682,6 +663,45 @@ def main():
     )
 
     # ========================================================
+    # FIXED STANDING TARGET
+    #
+    # No external reference generator is used.
+    #
+    # The QP formulation still requires X_ref in the tracking
+    # cost, so the initial standing state is used as one fixed
+    # equilibrium target over the full prediction horizon.
+    # ========================================================
+
+    x_target = np.asarray(
+        setup.x_initial,
+        dtype=float,
+    ).reshape(13).copy()
+
+    X_ref = np.tile(
+        x_target.reshape(
+            1,
+            13,
+        ),
+        (
+            N,
+            1,
+        ),
+    ).reshape(
+        N
+        *
+        13
+    )
+
+    if not np.all(
+        np.isfinite(
+            X_ref
+        )
+    ):
+        raise RuntimeError(
+            "Fixed standing X_ref chứa NaN hoặc Inf."
+        )
+
+    # ========================================================
     # 2. HELD CONTROL
     # ========================================================
 
@@ -719,7 +739,7 @@ def main():
 
     print("\n")
     print("=" * 78)
-    print("STANDING SIMULATION - SINUSOIDAL Z REFERENCE")
+    print("STANDING SIMULATION - FIXED EQUILIBRIUM TARGET")
     print("=" * 78)
 
     print(
@@ -764,48 +784,12 @@ def main():
     )
 
     print(
-        "\nZ_AMPLITUDE =",
-        Z_AMPLITUDE,
-        "m"
-    )
-
-    print(
-        "Z_FREQUENCY =",
-        Z_FREQUENCY,
-        "Hz"
-    )
-
-    print(
-        "Z_PERIOD =",
-        1.0 / Z_FREQUENCY,
-        "s"
-    )
-
-    print(
-        "\nInitial CoM z =",
-        setup.x_initial[2],
-        "m"
-    )
-
-    print(
-        "Expected z range = [",
-        setup.x_initial[2]
-        -
-        Z_AMPLITUDE,
-        ",",
-        setup.x_initial[2]
-        +
-        Z_AMPLITUDE,
-        "] m"
-    )
-
-    print(
         "\nControl order:"
     )
 
     print(
         "x_k/contact_k"
-        " -> build X_ref(t_k)"
+        " -> fixed X_ref"
         " -> build frozen SRBD"
         " -> solve QP"
         " -> u_k"
@@ -916,22 +900,14 @@ def main():
                 )
 
                 # =============================================
-                # A3. SINUSOIDAL Z REFERENCE
+                # A3. FIXED STANDING TARGET
                 #
-                # Rebuild at every MPC tick.
+                # No trajectory/reference generator is used.
+                # X_ref was built once from setup.x_initial.
                 # =============================================
 
-                (
-                    x_ref_current,
-                    X_ref,
-                ) = build_sinusoidal_z_reference(
-                    control_time=control_time,
-                    x_initial=setup.x_initial,
-                    horizon=N,
-                    dt_mpc=DT_MPC,
-                    amplitude_z=Z_AMPLITUDE,
-                    frequency_z=Z_FREQUENCY,
-                    phase_z=Z_PHASE,
+                x_ref_current = (
+                    x_target
                 )
 
                 # =============================================
@@ -1036,7 +1012,7 @@ def main():
                         )
 
                     raise RuntimeError(
-                        "Standing QP không trả về nghiệm hợp lệ."
+                        "Fixed-standing QP không trả về nghiệm hợp lệ."
                     )
 
                 # =============================================
