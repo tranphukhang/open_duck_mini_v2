@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 
-<mujoco model="open_duck_mini_v3">
+<mujoco model="open_duck_mini_v4">
 
     <option timestep="0.0005" integrator="implicitfast" solver="Newton" cone="elliptic" tolerance="1e-10">
         <flag nativeccd="disable"/>
@@ -10,7 +10,7 @@
     <compiler angle="degree" meshdir="assets_v3" inertiafromgeom="auto" inertiagrouprange="2 2"/>
 
     <default>
-        <default class="open_duck_mini_v3">
+        <default class="open_duck_mini_v4">
             <joint frictionloss="0.1" armature="0.005"/>
 
             <default class="visual">
@@ -28,7 +28,7 @@
 
             <joint damping="0.56" frictionloss="0.068" armature="0.027"/>
 
-            <position ctrlrange="-3.23 3.23"/>
+            <position kp="13.37" kv="0.0" forcerange="-3.23 3.23"/>
         </default>
 
         <default class="backlash">
