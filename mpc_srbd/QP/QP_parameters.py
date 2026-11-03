@@ -39,7 +39,7 @@ Q = np.diag([
 
     10.0,     # vx
     10.0,     # vy
-    10.0,     # vz
+    1.0,     # vz
 
     1.0,    # wx
     1.0,    # wy
@@ -67,11 +67,11 @@ Q = np.diag([
 # ============================================================
 
 R = np.diag([
-    1e-4, 1e-4, 1e-4,   # Left foot force
-    1e-3, 1e-3, 1e-3,   # Left foot moment
+    1e-5, 1e-5, 1e-5,   # Left foot force
+    1e-4, 1e-4, 1e-4,   # Left foot moment
 
-    1e-4, 1e-4, 1e-4,   # Right foot force
-    1e-3, 1e-3, 1e-3    # Right foot moment
+    1e-5, 1e-5, 1e-5,   # Right foot force
+    1e-4, 1e-4, 1e-4    # Right foot moment
 ])
 
 
