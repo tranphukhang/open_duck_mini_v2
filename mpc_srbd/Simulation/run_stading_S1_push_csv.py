@@ -670,8 +670,8 @@ def main():
     mpc_tick = 0
     viewer_context = nullcontext(None)
     if args.viewer:
-        import mujoco.viewer
-        viewer_context = mujoco.viewer.launch_passive(model, data)
+        from mujoco import viewer as mj_viewer
+        viewer_context = mj_viewer.launch_passive(model, data)
 
     try:
         with viewer_context as viewer:
