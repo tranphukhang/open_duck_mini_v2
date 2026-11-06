@@ -28,21 +28,21 @@ import numpy as np
 # ============================================================
 
 Q = np.diag([
-    0,# 100.0,   # px
-    0,# 100.0,   # py
-    1,# 500.0,   # pz
+    1,# 100.0,   # px
+    1,# 100.0,   # py
+    5,# 500.0,   # pz
 
     1,# 150.0,   # roll
     1,# 150.0,   # pitch
-    1,# 250.0,   # yaw
+    2,# 250.0,   # yaw
 
-    0,# 10.0,    # vx
-    0,# 10.0,    # vy
-    0,# 10.0,     # vz
+    1,# 10.0,    # vx
+    1,# 10.0,    # vy
+    1,# 10.0,     # vz
 
-    0,# 1.0,     # wx
-    0,# 1.0,     # wy
-    0,# 5.0,     # wz
+    1,# 1.0,     # wx
+    1,# 1.0,     # wy
+    2,# 5.0,     # wz
 
     0.0      # augmented constant
 ])
@@ -193,7 +193,7 @@ Mx_tolerance = 0.17   # [N.m]
 #     and can therefore be enabled again without rewriting code.
 # ============================================================
 
-enable_toe_heel_lateral_friction = True
+enable_toe_heel_lateral_friction = False
 
 
 # ============================================================
