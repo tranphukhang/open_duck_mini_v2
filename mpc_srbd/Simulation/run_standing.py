@@ -170,6 +170,7 @@ QP_CONSTRAINT_TOLERANCE = 1e-4
 GRAVITY = 9.81
 
 
+STANCE_LEG = "L"   # "L" hoặc "R"
 # ============================================================
 # STANDING CONTACT SCHEDULE
 # ============================================================
@@ -233,6 +234,39 @@ def build_standing_contact_schedule(
     )
 
     return contact_schedule
+
+# def build_standing_contact_schedule(
+#     horizon,
+# ):
+#     horizon = int(horizon)
+
+#     if horizon <= 0:
+#         raise ValueError(
+#             "horizon must be > 0."
+#         )
+
+#     contact_schedule = np.zeros(
+#         (horizon, 2),
+#         dtype=int,
+#     )
+
+#     if STANCE_LEG == "L":
+
+#         # Left stance, right swing
+#         contact_schedule[:, 0] = 1
+
+#     elif STANCE_LEG == "R":
+
+#         # Right stance, left swing
+#         contact_schedule[:, 1] = 1
+
+#     else:
+
+#         raise ValueError(
+#             "STANCE_LEG must be 'L' or 'R'."
+#         )
+
+#     return contact_schedule
 
 
 # ============================================================
