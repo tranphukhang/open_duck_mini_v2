@@ -32,7 +32,7 @@ Q = np.diag([
     0,# 100.0,   # py
     1,# 500.0,   # pz
 
-    0.5,# 150.0,   # roll
+    1,# 150.0,   # roll
     1,# 150.0,   # pitch
     1,# 250.0,   # yaw
 
@@ -149,7 +149,7 @@ l_h = 0.038
 # relaxation while preserving the line-contact approximation.
 # ============================================================
 
-Mx_tolerance = 0.015   # [N.m]
+Mx_tolerance = 0.17   # [N.m]
 
 
 # ============================================================
@@ -193,7 +193,7 @@ Mx_tolerance = 0.015   # [N.m]
 #     and can therefore be enabled again without rewriting code.
 # ============================================================
 
-enable_toe_heel_lateral_friction = False
+enable_toe_heel_lateral_friction = True
 
 
 # ============================================================
