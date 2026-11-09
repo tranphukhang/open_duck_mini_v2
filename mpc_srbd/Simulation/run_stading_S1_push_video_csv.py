@@ -1,4 +1,4 @@
-"""S1 - Double-support standing evaluation, SRBD-MPC + MuJoCo.
+"""S1 - Standing DSP + external push + CSV and synchronized MP4 video.
 
 Place this file at:
     open_duck_mini_v2/mpc_srbd/Simulation/run_standing_S1_push_csv.py
@@ -6,7 +6,9 @@ Place this file at:
 Usage:
     python run_standing_S1_push_csv.py
     python run_standing_S1_push_csv.py --duration 10 --output results_s1
-    python run_standing_S1_push_csv.py --viewer
+    python run_stading_S1_push_video_csv.py --viewer --push-force 5
+    python run_stading_S1_push_video_csv.py --no-viewer  # video only
+    python run_stading_S1_push_video_csv.py --no-video   # CSV only
     python run_standing_S1_push_csv.py --push-force 0.3 --viewer
     python run_standing_S1_push_csv.py --no-push    # same baseline, without pulse
 
@@ -14,6 +16,8 @@ Outputs (no MATLAB needed while simulating):
     standing_S1_push_<timestamp>_timeseries.csv
     standing_S1_push_<timestamp>_summary.csv
     standing_S1_push_<timestamp>_config.csv
+    standing_S1_push_<timestamp>_video.mp4
+    standing_S1_push_<timestamp>_video_frames.csv
 
 Sample definition:
     At t_k read x_k + measured contact wrench from MuJoCo (under the
@@ -24,8 +28,12 @@ The logged MuJoCo contact wrench and newly optimized MPC wrench are NOT
 synchronous command/response pairs. The former describes the measured
 force at the beginning of the MPC tick (i.e., after previous inputs).
 
-This script only MEASURES rectangular-foot support margins; it DOES NOT
-replace or extend the QP contact constraints in the repository.
+The ACTIVE support polygon uses only load-bearing soles from the measured
+MuJoCo contact wrench.  Its sole geometry comes from the low-facing vertices
+of compiled collision meshes when available; a declared rectangular model
+is a fallback, NEVER silently interpreted as an exact sole contact patch.
+The 'planned_dsp' polygon uses both feet independently of measured contacts.
+Neither diagnostic changes QP constraints or contact schedule.
 
 Two time-limited, constant-force pushes act at the CURRENT WHOLE-ROBOT
 CoM, via mujoco.mj_applyFT() on the floating-base body. They are applied
@@ -45,6 +53,7 @@ import csv
 from datetime import datetime
 from pathlib import Path
 import math
+import json
 import sys
 import time
 from contextlib import nullcontext
@@ -111,6 +120,218 @@ FOOT_HALF_WIDTH_M = FOOT_WIDTH_M / 2
 # This force threshold is a reporting convention, not a physical fall criterion.
 CONTACT_LOAD_THRESHOLD_N = 0.05
 MIN_NORMAL_FORCE_FOR_COP_N = 0.05
+SOLE_BAND_INITIAL_M = 0.0025  # mesh vertices near lowest surface at home pose
+SOLE_BAND_CANDIDATES_M = (0.0025, 0.005, 0.010, 0.015)
+MIN_SOLE_POLYGON_AREA_M2 = 1e-5
+MAX_CSV_POLYGON_VERTICES = 32   # full vertices also serialized as JSON
+
+
+# -----------------------------------------------------------------------------
+# VISUALIZATION / VIDEO
+# -----------------------------------------------------------------------------
+DEFAULT_VIDEO_FPS = 30
+DEFAULT_VIDEO_WIDTH = 1280
+DEFAULT_VIDEO_HEIGHT = 720
+VIDEO_CAMERA_AZIMUTH_DEG = 145.0
+VIDEO_CAMERA_ELEVATION_DEG = -18.0
+VIDEO_CAMERA_DISTANCE_M = 0.75
+VIDEO_ARROW_LENGTH_PER_N_M = 0.025
+VIDEO_ARROW_LENGTH_MIN_M = 0.07
+VIDEO_ARROW_LENGTH_MAX_M = 0.25
+RED_ARROW_RADIUS_M = 0.008
+ROBOT_COM_MARKER_RADIUS_M = 0.009
+
+
+VISUAL_FLAGS = (
+    mujoco.mjtVisFlag.mjVIS_CONTACTPOINT,
+    mujoco.mjtVisFlag.mjVIS_CONTACTFORCE,
+    mujoco.mjtVisFlag.mjVIS_TRANSPARENT,
+    mujoco.mjtVisFlag.mjVIS_COM,
+)
+
+
+def enable_visual_flags(opt):
+    """Viewer and video use exactly the same MuJoCo visualization flags."""
+    for flag in VISUAL_FLAGS:
+        opt.flags[flag] = 1
+
+
+def add_custom_com_and_push_arrow(scene, data, root_body_id,
+                                  push_force_world, arrow_scale):
+    """Decorations only. NEVER modify forces, model, qpos or any joint state.
+
+    Golden sphere: whole-robot CoM. Red arrow: external force, ONLY while pushed.
+    Arrow starts at instantaneous whole-robot CoM, pointing along World force.
+    The length is illustrative and not a physical displacement.
+    """
+    com = np.asarray(data.subtree_com[root_body_id], dtype=float).reshape(3).copy()
+    if scene.ngeom >= scene.maxgeom:
+        return
+    geom = scene.geoms[scene.ngeom]
+    mujoco.mjv_initGeom(
+        geom, mujoco.mjtGeom.mjGEOM_SPHERE,
+        [ROBOT_COM_MARKER_RADIUS_M, 0.0, 0.0],
+        com, np.eye(3).reshape(-1),
+        [1.0, 0.85, 0.05, 1.0],
+    )
+    scene.ngeom += 1
+
+    F = np.asarray(push_force_world, dtype=float).reshape(3)
+    magnitude = float(np.linalg.norm(F))
+    if magnitude < 1e-10 or scene.ngeom >= scene.maxgeom:
+        return
+    direction = F / magnitude
+    length = float(np.clip(magnitude * arrow_scale,
+                           VIDEO_ARROW_LENGTH_MIN_M, VIDEO_ARROW_LENGTH_MAX_M))
+    end = com + length * direction
+    geom = scene.geoms[scene.ngeom]
+    mujoco.mjv_initGeom(
+        geom, mujoco.mjtGeom.mjGEOM_ARROW,
+        [RED_ARROW_RADIUS_M, RED_ARROW_RADIUS_M, RED_ARROW_RADIUS_M],
+        com, np.eye(3).reshape(-1),
+        [1.0, 0.0, 0.0, 1.0],
+    )
+    mujoco.mjv_connector(
+        geom, mujoco.mjtGeom.mjGEOM_ARROW,
+        RED_ARROW_RADIUS_M, com, end,
+    )
+    scene.ngeom += 1
+
+
+def configure_viewer_visuals(viewer, model, data, root_body_id):
+    """Open viewer with CONTACTPOINT / CONTACTFORCE / TRANSPARENT / COM ON."""
+    if viewer is None:
+        return
+    with viewer.lock():
+        enable_visual_flags(viewer.opt)
+        viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        viewer.cam.lookat[:] = np.asarray(data.subtree_com[root_body_id], dtype=float)
+        viewer.cam.azimuth = VIDEO_CAMERA_AZIMUTH_DEG
+        viewer.cam.elevation = VIDEO_CAMERA_ELEVATION_DEG
+        viewer.cam.distance = VIDEO_CAMERA_DISTANCE_M
+        viewer.user_scn.ngeom = 0
+        add_custom_com_and_push_arrow(
+            viewer.user_scn, data, root_body_id, np.zeros(3),
+            VIDEO_ARROW_LENGTH_PER_N_M,
+        )
+    viewer.sync()
+
+
+def sync_viewer_overlay(viewer, data, root_body_id,
+                        push_force_world, arrow_scale):
+    if viewer is None:
+        return
+    with viewer.lock():
+        viewer.user_scn.ngeom = 0
+        add_custom_com_and_push_arrow(
+            viewer.user_scn, data, root_body_id, push_force_world,
+            arrow_scale,
+        )
+    viewer.sync()
+
+
+class SimulationVideo:
+    """Offscreen MP4 capture at fixed simulation-time FPS, not wall-clock FPS.
+
+    The video is rendered from the same live MjData as the MPC simulation,
+    at the end of selected physics steps. No second simulation is run.
+    """
+
+    def __init__(self, model, data, root_body_id, path, *, fps, width, height,
+                 duration, arrow_scale):
+        try:
+            import imageio.v2 as imageio
+        except ImportError as exc:
+            raise RuntimeError(
+                'Missing video dependency. Run: pip install imageio imageio-ffmpeg'
+            ) from exc
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.root_body_id = int(root_body_id)
+        self.fps = int(fps)
+        self.duration = float(duration)
+        self.arrow_scale = float(arrow_scale)
+        self.frames = []
+        self.frame_index = 0
+        self.renderer = None
+        self.writer = None
+        self.last_error = ''
+
+        if fps <= 0 or width <= 0 or height <= 0:
+            raise ValueError('Video FPS, width and height must be positive')
+        # MuJoCo defaults to a relatively small offscreen framebuffer.
+        # Extend it at runtime without modifying the XML or the dynamics.
+        model.vis.global_.offwidth = max(int(model.vis.global_.offwidth), int(width))
+        model.vis.global_.offheight = max(int(model.vis.global_.offheight), int(height))
+
+        try:
+            self.renderer = mujoco.Renderer(model, width=int(width), height=int(height))
+            self.option = mujoco.MjvOption()
+            enable_visual_flags(self.option)
+            self.camera = mujoco.MjvCamera()
+            mujoco.mjv_defaultFreeCamera(model, self.camera)
+            self.camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+            self.camera.lookat[:] = np.asarray(
+                data.subtree_com[root_body_id], dtype=float).reshape(3)
+            self.camera.distance = VIDEO_CAMERA_DISTANCE_M
+            self.camera.azimuth = VIDEO_CAMERA_AZIMUTH_DEG
+            self.camera.elevation = VIDEO_CAMERA_ELEVATION_DEG
+            self.writer = imageio.get_writer(
+                str(self.path), format='FFMPEG', mode='I', fps=int(fps),
+                codec='libx264', pixelformat='yuv420p', quality=8,
+                macro_block_size=16, ffmpeg_log_level='error',
+            )
+        except Exception as exc:
+            self.close()
+            raise RuntimeError(
+                f'Cannot initialize MP4 recording: {exc}. '
+                'Install imageio-ffmpeg; check OpenGL drivers / GL context, '
+                'or run --no-video to collect CSV only.'
+            ) from exc
+
+    def capture_due(self, data, force_world, event_id):
+        """Capture each frame exactly once on the simulation-time grid."""
+        now = float(data.time)
+        dt_tol = 1e-8
+        while (self.frame_index / self.fps < self.duration - dt_tol
+               and now >= self.frame_index / self.fps - dt_tol):
+            target_time = self.frame_index / self.fps
+            self.renderer.update_scene(
+                data, camera=self.camera, scene_option=self.option,
+            )
+            add_custom_com_and_push_arrow(
+                self.renderer.scene, data, self.root_body_id,
+                force_world, self.arrow_scale,
+            )
+            frame = self.renderer.render()
+            self.writer.append_data(frame)
+            self.frames.append({
+                'frame_index': int(self.frame_index),
+                'target_time_s': float(target_time),
+                'actual_rendered_sim_time_s': float(now),
+                'push_event_id': int(event_id),
+                'push_force_x_N': float(force_world[0]),
+                'push_force_y_N': float(force_world[1]),
+                'push_force_z_N': float(force_world[2]),
+            })
+            self.frame_index += 1
+
+    def close(self):
+        if self.writer is not None:
+            try:
+                self.writer.close()
+            except Exception as exc:
+                self.last_error = str(exc)
+            finally:
+                self.writer = None
+        if self.renderer is not None:
+            try:
+                self.renderer.close()
+            except Exception as exc:
+                self.last_error = str(exc)
+            finally:
+                self.renderer = None
+
 
 
 def create_push_events(args):
@@ -255,6 +476,121 @@ def convex_hull_xy(points):
     return np.asarray(lower[:-1] + upper[:-1], dtype=float)
 
 
+def polygon_area_xy(points):
+    """Polygon area in square meters, valid for a CCW convex hull."""
+    p = np.asarray(points, dtype=float).reshape(-1, 2)
+    if len(p) < 3:
+        return 0.0
+    return abs(float(np.dot(p[:, 0], np.roll(p[:, 1], -1)) -
+                     np.dot(p[:, 1], np.roll(p[:, 0], -1)))) * 0.5
+
+
+def _mesh_vertices_local(model, geom_id):
+    """Compiled MuJoCo mesh_vert are in the corresponding compiled geom frame."""
+    if int(model.geom_type[geom_id]) != int(mujoco.mjtGeom.mjGEOM_MESH):
+        return None
+    mesh_id = int(model.geom_dataid[geom_id])
+    if mesh_id < 0:
+        return None
+    first = int(model.mesh_vertadr[mesh_id])
+    count = int(model.mesh_vertnum[mesh_id])
+    if count <= 0:
+        return None
+    return np.asarray(model.mesh_vert[first:first + count], dtype=float).reshape(-1, 3).copy()
+
+
+def _geom_to_world(data, geom_id, geom_local_vertices):
+    R = np.asarray(data.geom_xmat[int(geom_id)], dtype=float).reshape(3, 3)
+    p = np.asarray(data.geom_xpos[int(geom_id)], dtype=float).reshape(3)
+    return np.asarray(geom_local_vertices) @ R.T + p
+
+
+def select_collision_sole_vertices(model, data, contact_map, side):
+    """Identify bottom-face collision vertices ONCE in the home pose.
+
+    Convex mesh foot collision can include the ankle's 3D volume. Taking
+    all projected vertices would overestimate the sole. We instead find
+    a narrow lowest-Z band at the initial nominal upright pose. The chosen
+    vertices stay attached to each collision geom during the simulation.
+    This is a geometric proxy for the sole, NOT the instantaneous contact patch.
+    """
+    ids = contact_map[f'{"left" if side == "L" else "right"}_foot_geom_ids']
+    meshes = []
+    for gid in ids:
+        verts = _mesh_vertices_local(model, int(gid))
+        if verts is not None:
+            world = _geom_to_world(data, int(gid), verts)
+            meshes.append((int(gid), verts, world))
+    if not meshes:
+        return None, 'no_collision_mesh'
+    min_z = min(float(np.min(w[:, 2])) for _, _, w in meshes)
+    for band in SOLE_BAND_CANDIDATES_M:
+        chosen = []
+        points = []
+        for gid, local, world in meshes:
+            mask = world[:, 2] <= min_z + band + 1e-10
+            if np.any(mask):
+                chosen.append((gid, local[mask].copy()))
+                points.append(world[mask, :2])
+        if not points:
+            continue
+        hull = convex_hull_xy(np.concatenate(points, axis=0))
+        if polygon_area_xy(hull) >= MIN_SOLE_POLYGON_AREA_M2:
+            return chosen, f'collision_mesh_bottom_band_{band:g}m'
+    return None, 'insufficient_bottom_mesh_area'
+
+
+def build_sole_geometries(model, data, contact_map, site_ids, preferred_source):
+    """Initialize sole models; explicit source selection and fallback reason."""
+    out = {}
+    for side, site_name, ik_name in (("L", "L6", "L6_IK"),
+                                     ("R", "R6", "R6_IK")):
+        candidates, reason = (None, 'rectangle_selected')
+        if preferred_source == 'collision':
+            candidates, reason = select_collision_sole_vertices(
+                model, data, contact_map, side)
+        out[side] = {'mesh_vertices': candidates,
+                     'source': reason if candidates else
+                     f'nominal_rectangle_fallback_{reason}',
+                     'site_id': site_ids[site_name],
+                     'ik_site_id': site_ids[ik_name]}
+    return out
+
+
+def sole_polygon_current(model, data, sole):
+    """Sole area projected into horizontal world XY, expressed as CCW hull."""
+    if sole['mesh_vertices']:
+        projected = []
+        for gid, local_vertices in sole['mesh_vertices']:
+            projected.append(_geom_to_world(data, gid, local_vertices)[:, :2])
+        pts = np.vstack(projected)
+        return convex_hull_xy(pts)
+    return convex_hull_xy(foot_geometry_from_sites(
+        data, sole['site_id'], sole['ik_site_id'])['corners'])
+
+
+def active_support_from_load(poly_left, poly_right, contact_left, contact_right):
+    """Current measured load-bearing support, not planned contact schedule."""
+    if contact_left and contact_right:
+        return 'DSP', convex_hull_xy(np.vstack([poly_left, poly_right]))
+    if contact_left:
+        return 'SSP_L', convex_hull_xy(poly_left)
+    if contact_right:
+        return 'SSP_R', convex_hull_xy(poly_right)
+    return 'NONE', np.empty((0, 2), dtype=float)
+
+
+def write_polygon_vertices(row, prefix, hull, max_vertices=MAX_CSV_POLYGON_VERTICES):
+    arr = np.asarray(hull, dtype=float).reshape(-1, 2)
+    row[f'{prefix}_vertex_count'] = int(len(arr))
+    row[f'{prefix}_vertices_xy_json'] = json.dumps(arr.tolist(), separators=(',', ':'))
+    row[f'{prefix}_vertex_columns_truncated'] = int(len(arr) > max_vertices)
+    row[f'{prefix}_area_m2'] = polygon_area_xy(arr)
+    for k in range(max_vertices):
+        row[f'{prefix}_v{k + 1}_x_m'] = float(arr[k, 0]) if k < len(arr) else np.nan
+        row[f'{prefix}_v{k + 1}_y_m'] = float(arr[k, 1]) if k < len(arr) else np.nan
+
+
 def signed_polygon_margin(point_xy, polygon):
     """Signed minimum Euclidean distance to polygon boundary, inside positive."""
     point = np.asarray(point_xy, dtype=float).reshape(2)
@@ -296,6 +632,7 @@ def extract_contact_wrenches(model, data, contact_state, floor_height):
         total_F = np.zeros(3)
         total_M0 = np.zeros(3)
         num_active = 0
+        actual_contact_points = []
         for entry in contact_state[key]:
             ci = int(entry["contact_index"])
             con = data.contact[ci]
@@ -312,6 +649,8 @@ def extract_contact_wrenches(model, data, contact_state, floor_height):
             total_F += F
             total_M0 += np.cross(arm, F) + M
             num_active += 1
+            if F[2] > CONTACT_LOAD_THRESHOLD_N:
+                actual_contact_points.append(p[:2].copy())
         Fz = float(total_F[2])
         if Fz > MIN_NORMAL_FORCE_FOR_COP_N:
             cop = np.array([-total_M0[1] / Fz, total_M0[0] / Fz])
@@ -322,6 +661,7 @@ def extract_contact_wrenches(model, data, contact_state, floor_height):
             "M_origin_world": total_M0,
             "cop_world_xy": cop,
             "active_points": num_active,
+            "loaded_contact_points_xy": np.asarray(actual_contact_points, dtype=float).reshape(-1, 2),
             "has_load": int(Fz > CONTACT_LOAD_THRESHOLD_N),
         }
     total_F = out["L"]["F_world"] + out["R"]["F_world"]
@@ -362,7 +702,7 @@ def mpc_local_wrench(u0, world_to_left, world_to_right):
 def add_snapshot(row, *, model, data, current, contact_map, u0, tau_raw,
                  tau_limited, actuator_ids, joint_addrs, x_target,
                  solver_info, post_diag, compute_time, step_no, qp_mode,
-                 fallback_count, mass, ground_z, site_ids,
+                 fallback_count, mass, ground_z, site_ids, sole_models,
                  push_force_world, push_event_id, push_point_world,
                  push_impulse_cumulative_world, dt_sim):
     """Add a consistent pre-physics x_k snapshot and current control u_k."""
@@ -421,14 +761,56 @@ def add_snapshot(row, *, model, data, current, contact_map, u0, tau_raw,
     row["actual_total_Fz_minus_mg_N"] = float(fsum[2] - row["robot_weight_N"])
     geom_l = foot_geometry_from_sites(data, site_ids["L6"], site_ids["L6_IK"])
     geom_r = foot_geometry_from_sites(data, site_ids["R6"], site_ids["R6_IK"])
-    hull = convex_hull_xy(np.concatenate((geom_l["corners"], geom_r["corners"]), axis=0))
+    poly_l = sole_polygon_current(model, data, sole_models["L"])
+    poly_r = sole_polygon_current(model, data, sole_models["R"])
+
+    # Two different geometric concepts must never be conflated:
+    #  1. Active support: load-bearing feet detected from MuJoCo, changes
+    #     DSP -> SSP_L/SSP_R -> NONE regardless of planned contact schedule.
+    #  2. Planned DSP: both nominal soles, only for comparison/visualization.
+    support_mode, hull = active_support_from_load(
+        poly_l, poly_r, actual["L"]["has_load"], actual["R"]["has_load"])
+    planned_hull = convex_hull_xy(np.vstack([poly_l, poly_r]))
+    row["support_mode"] = support_mode
+    row["support_loaded_feet"] = int(actual["L"]["has_load"] + actual["R"]["has_load"])
+    row["support_polygon_is_measured_load_based"] = 1
+    row["support_polygon_source_L"] = sole_models["L"]["source"]
+    row["support_polygon_source_R"] = sole_models["R"]["source"]
     row["com_support_margin_m"] = signed_polygon_margin(state[:2], hull)
     row["actual_cop_support_margin_m"] = signed_polygon_margin(cop_total, hull)
-    row["support_polygon_vertex_count"] = len(hull)
-    # 8 vertices is max possible from two rectangles; pad missing ones with NaN.
+    row["com_planned_dsp_margin_m"] = signed_polygon_margin(state[:2], planned_hull)
+    row["actual_cop_planned_dsp_margin_m"] = signed_polygon_margin(cop_total, planned_hull)
+
+    # Preserve legacy support_v1...support_v8 columns for MATLAB compatibility:
+    # their meaning is now ACTUAL LOADED support, not always DSP.
+    row["support_polygon_vertex_count"] = int(len(hull))
+    row["support_polygon_area_m2"] = polygon_area_xy(hull)
     for i in range(8):
-        row[f"support_v{i+1}_x_m"] = float(hull[i, 0]) if i < len(hull) else np.nan
-        row[f"support_v{i+1}_y_m"] = float(hull[i, 1]) if i < len(hull) else np.nan
+        row[f"support_v{i+1}_x_m"] = float(hull[i, 0]) if i < min(len(hull), 8) else np.nan
+        row[f"support_v{i+1}_y_m"] = float(hull[i, 1]) if i < min(len(hull), 8) else np.nan
+
+    # Full polygon export, including collision-foot contours with >4 vertices.
+    write_polygon_vertices(row, 'support_active', hull)
+    write_polygon_vertices(row, 'support_planned_dsp', planned_hull)
+    write_polygon_vertices(row, 'sole_L', poly_l)
+    write_polygon_vertices(row, 'sole_R', poly_r)
+
+    # Secondary, conservative diagnostic: convex hull of contact-point
+    # positions carrying normal load in the CURRENT MuJoCo manifold.
+    # If 0-2 independent points exist, this hull has no defined 2D area.
+    # It must NOT be presented as a fully resolved pressure-contact patch.
+    manifold_points = np.vstack([
+        actual['L']['loaded_contact_points_xy'],
+        actual['R']['loaded_contact_points_xy'],
+    ])
+    manifold_hull = convex_hull_xy(manifold_points)
+    write_polygon_vertices(row, 'contact_point_hull', manifold_hull)
+    row['contact_point_hull_is_2d'] = int(
+        polygon_area_xy(manifold_hull) >= MIN_SOLE_POLYGON_AREA_M2)
+    row['com_contact_point_hull_margin_m'] = signed_polygon_margin(
+        state[:2], manifold_hull) if row['contact_point_hull_is_2d'] else np.nan
+    row['actual_cop_contact_point_hull_margin_m'] = signed_polygon_margin(
+        cop_total, manifold_hull) if row['contact_point_hull_is_2d'] else np.nan
     mpc_foot = mpc_local_wrench(u0, current.L6_IK_R_W, current.R6_IK_R_W)
     for side, geom in (("L", geom_l), ("R", geom_r)):
         phy = actual[side]
@@ -441,6 +823,8 @@ def add_snapshot(row, *, model, data, current, contact_map, u0, tau_raw,
         row[f"actual_cop_{side}_foot_x_m"] = cx
         row[f"actual_cop_{side}_foot_y_m"] = cy
         row[f"actual_cop_{side}_rectangle_margin_m"] = local_margin
+        row[f"actual_cop_{side}_sole_margin_m"] = signed_polygon_margin(
+            phy["cop_world_xy"], poly_l if side == "L" else poly_r)
         put_xyz(row, f"foot_site_{side}", geom["origin"], "m")
         for i, corner in enumerate(geom["corners"], 1):
             row[f"foot_{side}_corner{i}_x_m"] = float(corner[0])
@@ -532,6 +916,12 @@ def make_summary(rows, stop_reason, duration, mass, config):
             s[f"{name}_rms"] = float(np.sqrt(np.mean(arr**2)))
     s["full_DSP_geom_fraction"] = float(np.mean((vals("contact_geom_L") > 0) & (vals("contact_geom_R") > 0)))
     s["full_DSP_loaded_fraction"] = float(np.mean((vals("actual_contact_load_L") > 0) & (vals("actual_contact_load_R") > 0)))
+    for mode in ('DSP', 'SSP_L', 'SSP_R', 'NONE'):
+        s[f'active_support_mode_{mode}_ticks'] = sum(r.get('support_mode') == mode for r in rows)
+        s[f'active_support_mode_{mode}_fraction'] = float(
+            s[f'active_support_mode_{mode}_ticks'] / len(rows))
+    s['com_active_support_margin_valid_ticks'] = int(np.sum(np.isfinite(vals('com_support_margin_m'))))
+    s['cop_active_support_margin_valid_ticks'] = int(np.sum(np.isfinite(vals('actual_cop_support_margin_m'))))
     s["solver_fallback_ticks"] = int(sum(r["qp_mode"] == "fallback" for r in rows))
     s["solver_failed_and_stopped_ticks"] = int(sum(r["qp_mode"] == "failed_stop" for r in rows))
     s["total_actuator_clip_events"] = int(sum(int(r["torque_clip_count"]) for r in rows))
@@ -559,7 +949,22 @@ def make_summary(rows, stop_reason, duration, mass, config):
 def main():
     parser = argparse.ArgumentParser(description="S1: DSP standing + detailed CSV for MATLAB")
     parser.add_argument("--duration", type=float, default=SIM_DURATION)
-    parser.add_argument("--viewer", action="store_true", help="Open passive MuJoCo GUI; default headless")
+    viewer_flags = parser.add_mutually_exclusive_group()
+    viewer_flags.add_argument('--viewer', dest='viewer', action='store_true',
+                              default=True, help='Show MuJoCo GUI (default ON)')
+    viewer_flags.add_argument('--no-viewer', dest='viewer', action='store_false',
+                              help='Disable GUI; still record MP4 unless --no-video')
+    video_flags = parser.add_mutually_exclusive_group()
+    video_flags.add_argument('--video', dest='video', action='store_true',
+                             default=True, help='Record MP4 (default ON)')
+    video_flags.add_argument('--no-video', dest='video', action='store_false',
+                             help='Disable MP4 but still export CSV')
+    parser.add_argument('--video-fps', type=int, default=DEFAULT_VIDEO_FPS)
+    parser.add_argument('--video-width', type=int, default=DEFAULT_VIDEO_WIDTH)
+    parser.add_argument('--video-height', type=int, default=DEFAULT_VIDEO_HEIGHT)
+    parser.add_argument('--arrow-scale', type=float,
+                        default=VIDEO_ARROW_LENGTH_PER_N_M,
+                        help='Arrow length [m/N] (clamped for visibility)')
     parser.add_argument("--realtime", action="store_true", help="Throttle to wall-time (GUI) if possible")
     parser.add_argument("--max-fallbacks", type=int, default=MAX_CONSECUTIVE_QP_FALLBACK)
     parser.add_argument("--output", type=Path, default=SIMULATION_DIR / "results_s1")
@@ -575,11 +980,18 @@ def main():
                         help="Only apply first (+world Y) push")
     parser.add_argument("--no-push", action="store_true",
                         help="Disable all pushes, for a baseline control experiment")
+    parser.add_argument("--sole-source", choices=("collision", "rectangle"),
+                        default="collision",
+                        help="Support-sole geometry: MuJoCo collision mesh lowest surface "
+                             "(preferred) or nominal L6-based rectangle")
     parser.add_argument("--fall-angle-deg", type=float, default=FALL_ANGLE_DEG,
                         help="Abort and save CSV if abs(roll or pitch) exceeds limit")
     parser.add_argument("--fall-height-ratio", type=float, default=FALL_COM_HEIGHT_RATIO,
                         help="Abort if CoM z < ratio * initial CoM z")
     args = parser.parse_args()
+    if (args.video_fps <= 0 or args.video_width <= 0 or args.video_height <= 0
+            or args.arrow_scale <= 0):
+        parser.error('Video fps/dimensions and arrow-scale must be > 0')
     if args.duration <= 0 or args.max_fallbacks < 0:
         parser.error("duration must be > 0 and max-fallbacks must be >= 0")
     if (args.push_force < 0 or args.push_duration <= 0 or
@@ -599,6 +1011,15 @@ def main():
     actuator_ids = get_actuator_ids(model)
     joint_addrs = get_actuator_joint_addresses(model, actuator_ids)
     site_ids = {name: get_site_id(model, name) for name in ("L6", "R6", "L6_IK", "R6_IK")}
+    sole_models = build_sole_geometries(
+        model, data, setup.contact_map, site_ids, args.sole_source)
+    for side in ('L', 'R'):
+        poly = sole_polygon_current(model, data, sole_models[side])
+        print(f"[SOLE {side}] source={sole_models[side]['source']}, "
+              f"area={polygon_area_xy(poly):.8f}m^2, "
+              f"vertices={len(poly)}")
+        if polygon_area_xy(poly) < MIN_SOLE_POLYGON_AREA_M2:
+            raise RuntimeError(f'Sole {side} has degenerate polygon at initial pose')
     root_body_id = int(mujoco.mj_name2id(
         model, mujoco.mjtObj.mjOBJ_BODY, PUSH_BODY_NAME))
     if root_body_id <= 0:
@@ -651,7 +1072,14 @@ def main():
         "note_actual_wrench": "Measured x_k before new tau_k; depends on preceding held command",
         "note_QP_contact": "Do not interpret CoP diagnostics as complete rectangular CWC enforcement",
         "note_DSP": "Planned [1,1] remains constant for all prediction steps",
-        "note_support_polygon": "Convex hull of two nominal 23-mm-wide rectangular sole regions",
+        "note_support_polygon": "ACTIVE support uses current measured load flags, DSP/SSP/NONE; also exports PLANNED DSP",
+        "sole_source_requested": args.sole_source,
+        "sole_source_L_actual": sole_models["L"]["source"],
+        "sole_source_R_actual": sole_models["R"]["source"],
+        "sole_mesh_bottom_band_candidates_m": repr(SOLE_BAND_CANDIDATES_M),
+        "support_polygon_measurement_threshold_N": CONTACT_LOAD_THRESHOLD_N,
+        "note_mesh_geometry": "Low-facing compiled collision mesh vertices at initial home pose; attached to moving foot. Approximate sole, not exact manifold.",
+        "note_contact_point_hull": "Convex hull of MuJoCo enforced contact-point positions with positive measured Fz; may be point/line, not true finite patch.",
     }
     print("\n=== S1 DSP STANDING: CSV DATA ACQUISITION ===")
     print(f"duration={args.duration}s, dt_sim={setup.dt_sim}s, dt_update={DT_MPC_UPDATE}s")
@@ -668,13 +1096,46 @@ def main():
     steps_per_mpc = int(setup.steps_per_mpc_update)
     physics_step = 0
     mpc_tick = 0
+    video = None
+    video_path = output_dir / f'{prefix}_video.mp4'
+    video_frames_path = output_dir / f'{prefix}_video_frames.csv'
+    config.update({
+        'video_requested': int(args.video),
+        'video_fps': int(args.video_fps),
+        'video_width': int(args.video_width),
+        'video_height': int(args.video_height),
+        'video_path': str(video_path) if args.video else '',
+        'video_camera_azimuth_deg': VIDEO_CAMERA_AZIMUTH_DEG,
+        'video_camera_elevation_deg': VIDEO_CAMERA_ELEVATION_DEG,
+        'video_camera_distance_m': VIDEO_CAMERA_DISTANCE_M,
+        'video_contactpoint': 1, 'video_contactforce': 1,
+        'video_transparent': 1, 'video_center_of_mass': 1,
+        'video_arrow_world_frame': 1,
+        'video_arrow_scale_m_per_N': float(args.arrow_scale),
+        'video_time_base': 'simulation time; fixed fps; not screen capture',
+    })
+    if args.video:
+        video = SimulationVideo(
+            model, data, root_body_id, video_path,
+            fps=args.video_fps, width=args.video_width,
+            height=args.video_height, duration=args.duration,
+            arrow_scale=args.arrow_scale,
+        )
+        # Capture initial state t=0 before any mj_step.
+        video.capture_due(data, np.zeros(3), 0)
+        print(f'[VIDEO] MP4 recording started: {video_path} '
+              f'({args.video_width}x{args.video_height}, {args.video_fps} FPS)')
     viewer_context = nullcontext(None)
     if args.viewer:
+        # Import the viewer under an alias so 'mujoco' stays the global module
+        # throughout main(). 'import mujoco.viewer' here would bind 'mujoco'
+        # as a local variable and cause UnboundLocalError earlier in main().
         from mujoco import viewer as mj_viewer
         viewer_context = mj_viewer.launch_passive(model, data)
 
     try:
         with viewer_context as viewer:
+            configure_viewer_visuals(viewer, model, data, root_body_id)
             while float(data.time) < float(args.duration) - setup.dt_sim * 0.1:
                 if viewer is not None and not viewer.is_running():
                     stop_reason = "viewer_closed"
@@ -764,7 +1225,7 @@ def main():
                         step_no=physics_step, qp_mode=qp_mode,
                         fallback_count=fail_streak,
                         mass=setup.mass_CoM, ground_z=ground_z,
-                        site_ids=site_ids,
+                        site_ids=site_ids, sole_models=sole_models,
                         push_force_world=push_force_world,
                         push_event_id=push_event_id,
                         push_point_world=push_point_world,
@@ -800,8 +1261,14 @@ def main():
                 if push_event_id:
                     push_applied_physics_steps[push_event_id] += 1
                 physics_step += 1
-                if viewer is not None and physics_step % max(1, int(round(0.02 / setup.dt_sim))) == 0:
-                    viewer.sync()
+                # VIDEO: capture at fixed simulation-time FPS; no extra mj_step.
+                if video is not None:
+                    video.capture_due(data, push_force_world, push_event_id)
+                # VIEWER: same COM and red push-arrow annotations as MP4.
+                if (viewer is not None and
+                        physics_step % max(1, int(round(0.02 / setup.dt_sim))) == 0):
+                    sync_viewer_overlay(viewer, data, root_body_id,
+                                        push_force_world, args.arrow_scale)
                 if args.realtime:
                     remaining = float(setup.dt_sim) - (time.perf_counter() - wall_start)
                     if remaining > 0:
@@ -813,6 +1280,12 @@ def main():
         print(f"\n[ERROR] {stop_reason}")
         raise
     finally:
+        if video is not None:
+            video.close()  # Flush MP4 file even on early termination.
+            if video.frames:
+                write_csv(video_frames_path, video.frames)
+            config['video_frames_written'] = len(video.frames)
+            config['video_close_error'] = video.last_error
         # Save partial data even when a QP failure or external exception occurs.
         output_dir.mkdir(parents=True, exist_ok=True)
         ts_path = output_dir / f"{prefix}_timeseries.csv"
@@ -821,6 +1294,10 @@ def main():
         if rows:
             write_csv(ts_path, rows)
         summary = make_summary(rows, stop_reason, args.duration, setup.mass_CoM, config)
+        summary['video_enabled'] = int(args.video)
+        summary['video_frames_written'] = int(len(video.frames)) if video is not None else 0
+        summary['video_expected_frames'] = int(math.ceil(args.duration * args.video_fps)) if args.video else 0
+        summary['video_path'] = str(video_path) if args.video else ''
         for axis, value in zip("xyz", push_impulse_cumulative_world):
             summary[f"push_impulse_applied_total_{axis}_Ns"] = float(value)
         summary["push_impulse_applied_total_norm_Ns"] = float(
@@ -838,10 +1315,18 @@ def main():
         print("Time-series CSV:", ts_path if rows else "no samples")
         print("Summary CSV:", sum_path)
         print("Config CSV:", cfg_path)
+        if video is not None:
+            print('Video MP4:', video_path)
+            print('Video frame timestamps CSV:', video_frames_path)
+            print('Recorded video frames:', len(video.frames))
+            if video.last_error:
+                print('VIDEO CLOSE WARNING:', video.last_error)
         if rows:
             print("Full-DSP measured load fraction:", f"{summary.get('full_DSP_loaded_fraction',np.nan):.4f}")
             print("QP fallback ticks:", summary.get("solver_fallback_ticks", 0))
-            print("Min CoM support margin (m):", summary.get("com_support_margin_m_min", np.nan))
+            print("Min CoM ACTIVE support margin (m):", summary.get("com_support_margin_m_min", np.nan))
+            for mode in ('DSP', 'SSP_L', 'SSP_R', 'NONE'):
+                print(f"support mode {mode} samples:", summary.get(f'active_support_mode_{mode}_ticks', 0))
             print("Applied impulse (world, N.s):", push_impulse_cumulative_world)
             print("Each push is a timed force, NOT an infinite instantaneous impulse.")
 

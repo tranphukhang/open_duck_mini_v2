@@ -1,0 +1,60 @@
+parameter,value
+experiment,S1_DSP_standing_with_pulse
+xml,E:\TPK\conda_env\open_duck_mini_v2\xmls\scene_flat_terrian_v3.xml
+push_enabled,1
+push_force_N,5.0
+push_duration_s,0.12
+push_events,"[{'id': 1, 'time_s': 3.0, 'duration_s': 0.12, 'force_world_N': [0.0, 5.0, 0.0]}, {'id': 2, 'time_s': 6.0, 'duration_s': 0.12, 'force_world_N': [5.0, 0.0, 0.0]}]"
+push_force_coordinate_frame,MuJoCo world frame
+push_apply_point,current whole-robot CoM via mj_applyFT on base_link
+push_unmodeled_feedforward,1
+fall_angle_diagnostic_limit_deg,35.0
+fall_com_height_diagnostic_ratio,0.65
+duration_s,10.0
+dt_sim_s,0.0005
+dt_prediction_s,0.05
+dt_mpc_update_s,0.005
+prediction_N,10
+mass_kg,1.5000000000000002
+gravity_z_m_s2,-9.81
+foot_width_assumed_m,0.023
+foot_toe_distance_from_L6_m,0.064
+foot_heel_distance_from_L6_m,0.038
+footprint_is_approx_rectangle,1
+contact_friction_mu_for_reporting,0.6
+contact_min_load_for_cop_N,0.05
+qp_abs_tol,1e-05
+qp_rel_tol,1e-05
+qp_postcheck_constraint_tol,0.0001
+qp_max_iter,10000
+max_consecutive_solver_fallbacks,3
+Q_diagonal,"[1.0, 1.0, 5.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 0.0]"
+R_diagonal,"[1e-05, 1e-05, 1e-05, 0.0001, 0.0001, 0.0001, 1e-05, 1e-05, 1e-05, 0.0001, 0.0001, 0.0001]"
+note_actual_wrench,Measured x_k before new tau_k; depends on preceding held command
+note_QP_contact,Do not interpret CoP diagnostics as complete rectangular CWC enforcement
+note_DSP,"Planned [1,1] remains constant for all prediction steps"
+note_support_polygon,"ACTIVE support uses current measured load flags, DSP/SSP/NONE; also exports PLANNED DSP"
+sole_source_requested,collision
+sole_source_L_actual,collision_mesh_bottom_band_0.0025m
+sole_source_R_actual,collision_mesh_bottom_band_0.0025m
+sole_mesh_bottom_band_candidates_m,"(0.0025, 0.005, 0.01, 0.015)"
+support_polygon_measurement_threshold_N,0.05
+note_mesh_geometry,"Low-facing compiled collision mesh vertices at initial home pose; attached to moving foot. Approximate sole, not exact manifold."
+note_contact_point_hull,"Convex hull of MuJoCo enforced contact-point positions with positive measured Fz; may be point/line, not true finite patch."
+video_requested,1
+video_fps,30
+video_width,1280
+video_height,720
+video_path,E:\TPK\conda_env\open_duck_mini_v2\mpc_srbd\Simulation\results_s1\standing_S1_push_20261106_180719_video.mp4
+video_camera_azimuth_deg,145.0
+video_camera_elevation_deg,-18.0
+video_camera_distance_m,0.75
+video_contactpoint,1
+video_contactforce,1
+video_transparent,1
+video_center_of_mass,1
+video_arrow_world_frame,1
+video_arrow_scale_m_per_N,0.025
+video_time_base,simulation time; fixed fps; not screen capture
+video_frames_written,300
+video_close_error,
