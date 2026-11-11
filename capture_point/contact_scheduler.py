@@ -82,3 +82,9 @@ class ContactScheduler:
         contact_condition[b, swing] = ~ss_condition
 
         return contact_condition # ["chân trái", "chân phải"]
+
+    # Phát hiện sự kiện bắt đầu bước mới (Chạy theo chu kì điều khiển (hiện tại là 0.02s))
+    def new_step_event(self, j_now, last_step):
+        new_step = (j_now >= 0) & (j_now != last_step)
+
+        return new_step
