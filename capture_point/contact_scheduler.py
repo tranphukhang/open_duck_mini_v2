@@ -54,6 +54,7 @@ class ContactScheduler:
 
         return local_time
 
+    # Xác định trạng thái của pha (Shift, Double Support, Swing)
     def phase_state(self, j, local_time):
         ds = self.double_support * self.period_phase
         eps = 1e-3 * self.dt
@@ -65,4 +66,9 @@ class ContactScheduler:
         
 
         return shift_condition, ds_condition, ss_condition
-        
+
+    # Xác định chân stance theo chỉ số bước
+    def stance_feet(self, j):
+        stance = torch.remainder(j.clamp_min(0), 2) # stance = 0 (chân trái) nếu j chẵn, stance = 1 (chân phải) nếu j lẻ
+
+        return stance
