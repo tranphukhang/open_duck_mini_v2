@@ -41,4 +41,13 @@ class ContactScheduler:
 
         return j
 
+    # Xác định thời gian cục bộ trong bước hiện tại
+    def local_time_phase(self, t, j):
+        half_period_phase = self.period_phase / 2.0
+
+        # Thời gian cục bộ trong bước hiện tại (Chuyển tâm khối lượng thì thời gian cục bộ là 0)
+        local_time = ((t - self.shift) - j * half_period_phase).clamp(min=0.0)
+        local_time = torch.where(j == -1, t, local_time)
+
+        return local_time
         
