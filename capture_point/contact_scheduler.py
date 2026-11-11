@@ -64,7 +64,6 @@ class ContactScheduler:
         ss_condition = (j >= 0) & (local_time + eps >= ds)
         ds_condition = (j >= 0) & ~ss_condition
         
-
         return shift_condition, ds_condition, ss_condition
 
     # Xác định chân stance theo chỉ số bước
@@ -72,3 +71,14 @@ class ContactScheduler:
         stance = torch.remainder(j.clamp_min(0), 2) # stance = 0 (chân trái) nếu j chẵn, stance = 1 (chân phải) nếu j lẻ
 
         return stance
+
+    # Xác định trạng thái tiếp xúc của hai chân
+    def contact_state(self, stance, ss_condition):
+        # Xác định chân Swing
+        swing = 1 - stance # 0 là chân trái swing, 1 là chân phải swing
+
+        contact_condition = torch.ones(stance.shape[0], 2, dtype=torch.bool, device=stance.device)
+        b = torch.arange(stance.shape[0], device=stance.device)
+        contact_condition[b, swing] = ~ss_condition
+
+        return contact_condition # ["chân trái", "chân phải"]
