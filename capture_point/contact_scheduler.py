@@ -1,7 +1,7 @@
 import torch
 
 class ContactScheduler:
-    def __init__(self, dt=0.02, period_phase=0.4, shift=0.4, num_envs=1, device="cpu"):
+    def __init__(self, dt=0.02, period_phase=0.4, shift=0.4, double_support=0.1, num_envs=1, device="cpu"):
         
         # Thời gian
         self.dt = dt
@@ -12,6 +12,9 @@ class ContactScheduler:
         # Chỉ số bước
         self.period_phase = period_phase
         self.shift = shift
+
+        # Trạng thái của pha
+        self.double_support = double_support # Phần trăm thời gian DS trong một pha
 
     # Reset thời gian đã trôi về 0
     def reset(self, env_ids=None):
@@ -50,4 +53,14 @@ class ContactScheduler:
         local_time = torch.where(j == -1, t, local_time)
 
         return local_time
+
+    def phase_state(self, j, local_time):
+        ds = self.double_support * self.period_phase
+
+        # Trạng thái của pha
+        shift_condition = j < 0
+        ds_condition = (j >= 0) & (local_time < ds)
+        ss_condition = (j >= 0) & (local_time >= ds)
+
+        return shift_condition, ds_condition, ss_condition
         
