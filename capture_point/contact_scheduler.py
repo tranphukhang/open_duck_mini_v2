@@ -36,8 +36,8 @@ class ContactScheduler:
         j = torch.floor((t - self.shift + eps) / half_period_phase).long()
 
         # Nếu chưa hoàn thành giai đoạn chuyển tâm khối lượng thì chỉ số bước là -1
-        shift = (t - self.shift) < -eps
-        j = torch.where(shift, torch.full_like(j, -1), j)
+        shift_condition = (t - self.shift) < -eps
+        j = torch.where(shift_condition, torch.full_like(j, -1), j)
 
         return j
 
