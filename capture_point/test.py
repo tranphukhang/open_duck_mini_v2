@@ -3,47 +3,71 @@ import torch
 from contact_scheduler import ContactScheduler
 
 
-def test_local_time_phase():
+def test_phase_state():
     scheduler = ContactScheduler(
         dt=0.02,
         period_phase=0.4,
-        shift=0.4
+        shift=0.4,
+        double_support=0.1
     )
 
-    times = torch.tensor([
-        0.00, 0.20, 0.38,
-        0.40, 0.42, 0.58,
-        0.60, 0.70, 0.78,
-        0.80, 1.00
+    # Du lieu dau vao
+    j = torch.tensor([-1, -1, 0, 0, 0, 0, 1, 1])
+
+    local_time = torch.tensor([
+        0.00, 0.20,
+        0.00, 0.02, 0.039, 0.041,
+        0.00, 0.18
     ])
 
-    expected = torch.tensor([
-        0.00, 0.20, 0.38,
-        0.00, 0.02, 0.18,
-        0.00, 0.10, 0.18,
-        0.00, 0.00
-    ])
+    # Ket qua mong doi
+    expected_shift = torch.tensor(
+        [1, 1, 0, 0, 0, 0, 0, 0], dtype=torch.bool
+    )
+    expected_ds = torch.tensor(
+        [0, 0, 1, 1, 1, 0, 1, 0], dtype=torch.bool
+    )
+    expected_ss = torch.tensor(
+        [0, 0, 0, 0, 0, 1, 0, 1], dtype=torch.bool
+    )
 
-    j = scheduler.step_index(times)
-    local = scheduler.local_time_phase(times, j)
+    # Goi ham can kiem tra
+    shift, ds, ss = scheduler.phase_state(j, local_time)
 
-    print("Time (s) | Step j | Local (s) | Expected (s)")
-    print("-" * 48)
+    print(" j | Local (s) | Shift | DSP | Swing")
+    print("-" * 40)
 
-    for t, index, value, exp in zip(times, j, local, expected):
+    for i in range(len(j)):
         print(
-            f"{t.item():8.2f} | "
-            f"{index.item():6d} | "
-            f"{value.item():9.5f} | "
-            f"{exp.item():12.5f}"
+            f"{j[i].item():2d} | "
+            f"{local_time[i].item():9.3f} | "
+            f"{int(shift[i]):5d} | "
+            f"{int(ds[i]):3d} | "
+            f"{int(ss[i]):5d}"
         )
 
-    torch.testing.assert_close(
-        local, expected, atol=1e-6, rtol=0
+    assert torch.equal(shift, expected_shift), "Shift FAIL"
+    assert torch.equal(ds, expected_ds), "DSP FAIL"
+    assert torch.equal(ss, expected_ss), "Swing FAIL"
+
+    print("\nTEST phase_state: PASS")
+
+    # Kiem tra them sai so so hoc tai ranh gioi DSP/Swing
+    boundary_j = torch.tensor([0])
+    local_boundary = torch.tensor([0.44]) - 0.4
+
+    _, ds_boundary, ss_boundary = scheduler.phase_state(
+        boundary_j, local_boundary
     )
 
-    print("\nTEST local_time_phase: PASS")
+    print("\nBoundary check at t = 0.44 s")
+    print(f"Local time: {local_boundary.item():.10f}")
+    print(f"DSP: {ds_boundary.item()}")
+    print(f"Swing: {ss_boundary.item()}")
+
+    if ds_boundary.item():
+        print("WARNING: Float32 rounding affects the boundary.")
 
 
 if __name__ == "__main__":
-    test_local_time_phase()
+    test_phase_state()

@@ -56,11 +56,13 @@ class ContactScheduler:
 
     def phase_state(self, j, local_time):
         ds = self.double_support * self.period_phase
+        eps = 1e-3 * self.dt
 
         # Trạng thái của pha
         shift_condition = j < 0
-        ds_condition = (j >= 0) & (local_time < ds)
-        ss_condition = (j >= 0) & (local_time >= ds)
+        ss_condition = (j >= 0) & (local_time + eps >= ds)
+        ds_condition = (j >= 0) & ~ss_condition
+        
 
         return shift_condition, ds_condition, ss_condition
         
