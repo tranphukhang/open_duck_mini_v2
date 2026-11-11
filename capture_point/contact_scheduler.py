@@ -88,3 +88,11 @@ class ContactScheduler:
         new_step = (j_now >= 0) & (j_now != last_step)
 
         return new_step
+
+    # Kiểm tra điều kiện cho phép hiệu chỉnh vị trí đặt chân (Chạy theo chu kì điều khiển (hiện tại là 0.02s))
+    def allow_footstep_adjust(self, t, j_now):
+        # Không cho phép hiệu chỉnh vị trí đặt chân khi chân swing còn 0.02s nữa là chạm đất
+        j_next = self.step_index(t + self.dt)
+        adjust_condition = (j_next >= 0) & (j_next == j_now)
+
+        return adjust_condition

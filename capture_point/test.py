@@ -3,51 +3,69 @@ import torch
 from contact_scheduler import ContactScheduler
 
 
-def test_contact_state():
-    scheduler = ContactScheduler(num_envs=6)
+def test_new_step_event():
+    scheduler = ContactScheduler()
 
-    # 0 = chan trai, 1 = chan phai
-    stance = torch.tensor([0, 0, 0, 1, 1, 1])
-    ss_condition = torch.tensor([
-        False, False, True, False, True, True
-    ])
+    # TEST 1: Kiem tra cac truong hop
+    j_now = torch.tensor([-1, -1, 0, 0, 1, 1, 2, 3])
+    last_step = torch.tensor([-3, -1, -1, 0, 0, 1, 1, 2])
 
-    # Contact = [chan trai, chan phai]
     expected = torch.tensor([
-        [True, True],    # Initial Shift
-        [True, True],    # DSP, stance trai
-        [True, False],   # SSP, stance trai
-        [True, True],    # DSP, stance phai
-        [False, True],   # SSP, stance phai
-        [False, True]    # SSP, stance phai
+        False, False, True, False,
+        True, False, True, True
     ])
 
-    # Goi ham can kiem tra
-    result = scheduler.contact_state(stance, ss_condition)
+    result = scheduler.new_step_event(j_now, last_step)
 
-    print("Stance | SSP | Contact [L, R] | Result")
-    print("-" * 48)
+    print("TEST 1: New Step Event")
+    print("j_now | last_step | new_step")
+    print("-" * 30)
 
-    for i in range(len(stance)):
-        status = (
-            "PASS"
-            if torch.equal(result[i], expected[i])
-            else "FAIL"
-        )
-
+    for j, last, new in zip(j_now, last_step, result):
         print(
-            f"{stance[i].item():6d} | "
-            f"{str(ss_condition[i].item()):5s} | "
-            f"{str(result[i].tolist()):17s} | "
-            f"{status}"
+            f"{j.item():5d} | "
+            f"{last.item():9d} | "
+            f"{str(new.item()):8s}"
         )
 
-    assert result.shape == (6, 2)
-    assert result.dtype == torch.bool
-    assert torch.equal(result, expected), "Contact State FAIL"
+    assert torch.equal(result, expected)
+    print("TEST 1: PASS\n")
 
-    print("\nTEST contact_state: PASS")
+    # TEST 2: Kiem tra theo chu ky dieu khien 0.02 s
+    scheduler.reset()
+    last_step = torch.tensor([-3])
+
+    print("TEST 2: Time Sequence")
+    print("Time (s) | j_now | New Step")
+    print("-" * 34)
+
+    detected_ticks = []
+
+    for k in range(45):
+        j = scheduler.step_index(scheduler.t)
+        new = scheduler.new_step_event(j, last_step)
+
+        if new.item():
+            detected_ticks.append(k)
+            print(
+                f"{scheduler.t.item():8.2f} | "
+                f"{j.item():5d} | "
+                f"{str(new.item()):8s}"
+            )
+
+        # Cap nhat last_step sau khi kiem tra su kien
+        last_step = torch.where(
+            j >= 0, j, torch.full_like(j, -1)
+        )
+
+        scheduler.count()
+
+    # Su kien tai 0.4, 0.6, 0.8 s
+    assert detected_ticks == [20, 30, 40]
+
+    print("TEST 2: PASS")
+    print("\nALL TESTS PASSED")
 
 
 if __name__ == "__main__":
-    test_contact_state()
+    test_new_step_event()
