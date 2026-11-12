@@ -79,6 +79,31 @@ class FootstepPlanner:
         self.nominal_landing = torch.where(new_step[:, None], land, self.nominal_landing)
         self.updated_landing = torch.where(new_step[:, None], land, self.updated_landing)
 
+    # Hiệu chỉnh vị trí lập kế hoạch theo phương x sau khi hoàn thành một bước dựa trên FK (Ảnh hưởng đến từ WBIK và low-level dẫn đến vị trí đặt chân thực tế sai lệch so với kế hoạch)
+    def reanchor_x(self, j_now, new_step, stance, com_relative_to_feet, fk_valid):
+        # Xác định chân stance trước thời điểm hoàn thành bước (chân này sẽ trở thành swing trong bước tiếp theo)
+        swing = 1 - stance
+
+        b = torch.arange(self.feet_start.shape[0], device=self.feet_start.device)
+
+        # Ước lượng vị trí đặt chân của chân swing trước thời điểm hoàn thành bước (chân này hiện đã trở thành stance)
+        landed_x = self.feet_start[b, swing, 0] + com_relative_to_feet[b, swing, 0] - com_relative_to_feet[b, stance, 0]
+
+        # Chỉ hiệu chỉnh khi đã hoàn thành ít nhất một bước và dữ liệu FK hợp lệ
+        condition = new_step & (j_now > 0) & fk_valid
+
+        # Sai lệch giữa vị trí tiếp đất ước lượng từ FK và vị trí đã lập kế hoạch
+        delta_x = torch.where(condition, landed_x - self.feet_start[b, stance, 0], torch.zeros_like(landed_x))
+
+        # Hiệu chỉnh đồng bộ các vị trí lập kế hoạch theo phương x
+        self.feet_start[:, :, 0] += delta_x[:, None]
+        self.nominal_landing[:, 0] += delta_x
+        self.updated_landing[:, 0] += delta_x
+
+        return delta_x
+
+
+
         
 
     
