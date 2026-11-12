@@ -102,6 +102,10 @@ class FootstepPlanner:
 
         return delta_x
 
+    # Cập nhật vị trí đặt chân sau khi được hiệu chỉnh bởi Capture Point
+    def set_landing(self, corrected_landing, allow_adjust):
+        self.updated_landing = torch.where(allow_adjust[:, None], corrected_landing, self.updated_landing)
+
 
 
         

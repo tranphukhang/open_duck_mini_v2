@@ -1,153 +1,243 @@
-"""Integration-style unit tests for FootstepPlanner.update_new_step().
+"""Kiem thu FootstepPlanner.reanchor_x() - Open Duck Mini V2.
 
-Place this file next to footstep_planner.py and run:
-    python test_footstep_planner_update_new_step.py
+Dat file nay cung thu muc voi footstep_planner.py, sau do chay:
+    python test_footstep_planner_reanchor_x.py
 
-All coordinates are illustrative foot-site positions in the planning frame {P}.
-No MuJoCo or real FK is required.
+Quy uoc:
+    L = 0 (chan trai), R = 1 (chan phai)
+    stance: chan stance cua buoc VUA BAT DAU,
+            tuc la chan swing cua buoc VUA HOAN THANH.
+    swing = 1 - stance: chan stance cua buoc VUA HOAN THANH.
+    feet_start, nominal_landing, updated_landing: toa do trong {P}.
+    com_relative_to_feet[b, i] = p_CoM - p_foot_i, tu FK voi truc cung huong {P}.
+    Gia su cac truc {K} va {P} duoc can chinh de cong truc tiep delta X.
+
+Ky vong: reanchor chi xay ra khi new_step=True, j_now>0 va fk_valid=True.
+Chung ta chi test FootstepPlanner; vi tri CoM trong MPC do module dieu phoi cap nhat
+bang delta_x tra ve.
 """
 
 import unittest
-
 import torch
+
 from footstep_planner import FootstepPlanner
 
 
-def make_planner(num_envs=1):
-    planner = FootstepPlanner(num_envs=num_envs, period_phase=0.4, device="cpu")
-    foot = torch.tensor(
-        [[[0.00, 0.06, 0.01], [0.00, -0.06, 0.02]]],
-        dtype=torch.float32,
-    ).repeat(num_envs, 1, 1)
-    planner.reset(torch.arange(num_envs), foot)
-    return planner, foot
+class TestReanchorX(unittest.TestCase):
+    def make_planner(self, num_envs=1):
+        planner = FootstepPlanner(num_envs=num_envs, period_phase=0.4)
+        feet_pos = torch.tensor(
+            [[[0.0, 0.06, 0.005], [0.0, -0.06, 0.015]]],
+            dtype=torch.float32,
+        ).repeat(num_envs, 1, 1)
+        planner.reset(torch.arange(num_envs), feet_pos)
+        return planner
 
+    def assert_tensor(self, actual, expected, message=""):
+        torch.testing.assert_close(
+            actual,
+            torch.as_tensor(expected, dtype=actual.dtype, device=actual.device),
+            rtol=0,
+            atol=1e-6,
+            msg=message or None,
+        )
 
-def check(actual, expected, message=""):
-    torch.testing.assert_close(
-        actual,
-        torch.as_tensor(expected, dtype=actual.dtype, device=actual.device),
-        rtol=0,
-        atol=1e-6,
-        msg=message or None,
-    )
+    def test_1_reanchor_after_completed_step_with_cp_adjusted_landing(self):
+        """j=1: landing da hieu chinh tu CP, FK cho vi tri thuc te khac plan."""
+        planner = self.make_planner()
+        vx_cmd = torch.tensor([[0.20, 0.00]])
 
-
-class TestUpdateNewStep(unittest.TestCase):
-
-    def test_01_first_step(self):
-        """j=0: left stance, right swing, nominal landing from feet0."""
-        p, foot = make_planner()
-        p.update_new_step(
+        # Bat dau buoc j=0: trai stance, phai swing. Landing danh dinh R_x=0.04 m.
+        planner.update_new_step(
             j_now=torch.tensor([0]),
             new_step=torch.tensor([True]),
             stance=torch.tensor([0]),
-            cmd=torch.tensor([[0.10, 0.00]]),
+            cmd=vx_cmd,
         )
-        check(p.feet_start, foot)
-        check(p.nominal_landing, [[0.02, -0.06, 0.02]])
-        check(p.updated_landing, [[0.02, -0.06, 0.02]])
-        check(p.feet0, foot)
-        check(p.feet_offset0, [[-0.12, 0.01]])
+        self.assert_tensor(planner.nominal_landing[:, 0], [0.04])
 
-    def test_02_later_step_uses_corrected_previous_landing(self):
-        """j=1: previous corrected right landing becomes right stance."""
-        p, foot = make_planner()
-        p.update_new_step(
-            torch.tensor([0]), torch.tensor([True]),
-            torch.tensor([0]), torch.tensor([[0.10, 0.00]]),
-        )
-        # Simulate a CP correction previously accepted for the right foot.
-        p.updated_landing[0] = torch.tensor([0.035, -0.068, 0.025])
-        p.update_new_step(
+        # Gia lap CP chinh landing cua chan phai len 0.05 m truoc khi tiep dat.
+        planner.updated_landing[:, 0] = 0.05
+
+        # Bat dau buoc j=1: phai stance, trai chuan bi swing.
+        # update_new_step() phai duoc goi TRUOC reanchor_x().
+        planner.update_new_step(
             j_now=torch.tensor([1]),
             new_step=torch.tensor([True]),
             stance=torch.tensor([1]),
-            cmd=torch.tensor([[0.10, 0.00]]),
+            cmd=vx_cmd,
         )
-        check(p.feet_start[0, 0], foot[0, 0])
-        check(p.feet_start[0, 1], [0.035, -0.068, 0.025])
-        # Left swings: x +0.02, y +0.12, z -0.01.
-        check(p.nominal_landing[0], [0.055, 0.052, 0.015])
-        check(p.updated_landing, p.nominal_landing)
+        self.assert_tensor(planner.feet_start[0, :, 0], [0.0, 0.05])
+        self.assert_tensor(planner.nominal_landing[:, 0], [0.09])
 
-        # j=2: the corrected/accepted left landing becomes left stance.
-        p.updated_landing[0] = torch.tensor([0.060, 0.050, 0.018])
-        p.update_new_step(
-            torch.tensor([2]), torch.tensor([True]),
-            torch.tensor([0]), torch.tensor([[0.10, 0.00]]),
+        # FK: khoang cach R-L = r_L - r_R = 0.100 - 0.055 = 0.045 m.
+        # Vi tri R uoc luong = 0 + 0.045 = 0.045 m; plan = 0.05 m.
+        com_relative_to_feet = torch.tensor(
+            [[[0.100, 0.02, 0.03], [0.055, 0.02, 0.03]]]
         )
-        check(p.feet_start[0, 0], [0.060, 0.050, 0.018])
-        check(p.feet_start[0, 1], [0.035, -0.068, 0.025])
-        # Right swings: x +0.02, y -0.12, z +0.01.
-        check(p.nominal_landing[0], [0.080, -0.070, 0.028])
-        check(p.updated_landing, p.nominal_landing)
+        yz_feet_before = planner.feet_start[:, :, 1:].clone()
+        yz_nominal_before = planner.nominal_landing[:, 1:].clone()
+        yz_updated_before = planner.updated_landing[:, 1:].clone()
+        feet0_before = planner.feet0.clone()
+        rel_before = com_relative_to_feet.clone()
 
-    def test_03_no_event_preserves_state(self):
-        """Outside new-step events no stored positions should be overwritten."""
-        p, _ = make_planner()
-        p.updated_landing[0] = torch.tensor([0.035, -0.068, 0.025])
-        before = {name: getattr(p, name).clone() for name in (
-            "feet0", "feet_offset0", "feet_start",
-            "nominal_landing", "updated_landing",
-        )}
-        for j, st in ((-1, 0), (0, 0), (1, 1)):
-            p.update_new_step(
-                j_now=torch.tensor([j]),
-                new_step=torch.tensor([False]),
-                stance=torch.tensor([st]),
-                cmd=torch.tensor([[0.25, -0.08]]),
+        delta_x = planner.reanchor_x(
+            j_now=torch.tensor([1]),
+            new_step=torch.tensor([True]),
+            stance=torch.tensor([1]),
+            com_relative_to_feet=com_relative_to_feet,
+            fk_valid=torch.tensor([True]),
+        )
+
+        self.assert_tensor(delta_x, [-0.005])
+        self.assert_tensor(planner.feet_start[0, :, 0], [-0.005, 0.045])
+        self.assert_tensor(planner.nominal_landing[:, 0], [0.085])
+        self.assert_tensor(planner.updated_landing[:, 0], [0.085])
+
+        # Reanchor chi dich X; Y, Z va du lieu FK khong duoc thay doi.
+        self.assertTrue(torch.equal(planner.feet_start[:, :, 1:], yz_feet_before))
+        self.assertTrue(torch.equal(planner.nominal_landing[:, 1:], yz_nominal_before))
+        self.assertTrue(torch.equal(planner.updated_landing[:, 1:], yz_updated_before))
+        self.assertTrue(torch.equal(planner.feet0, feet0_before))
+        self.assertTrue(torch.equal(com_relative_to_feet, rel_before))
+
+    def test_2_positive_delta_x_when_left_becomes_stance(self):
+        """j=2: trai la stance; vi tri trai FK lon hon vi tri plan 2 cm."""
+        planner = self.make_planner()
+        planner.feet_start[0, :, 0] = torch.tensor([0.04, 0.08])
+        planner.nominal_landing[0, 0] = 0.10
+        planner.updated_landing[0, 0] = 0.11
+
+        # Trai vua tiep dat, phai la stance truoc do.
+        # r_R - r_L = 0.07 - 0.09 = -0.02 => landed_L=0.08-0.02=0.06.
+        rel = torch.tensor([[[0.09, 0., 0.], [0.07, 0., 0.]]])
+        delta_x = planner.reanchor_x(
+            torch.tensor([2]), torch.tensor([True]), torch.tensor([0]),
+            rel, torch.tensor([True]),
+        )
+        self.assert_tensor(delta_x, [0.02])
+        self.assert_tensor(planner.feet_start[0, :, 0], [0.06, 0.10])
+        self.assert_tensor(planner.nominal_landing[:, 0], [0.12])
+        self.assert_tensor(planner.updated_landing[:, 0], [0.13])
+
+        # Phep dich dong bo khong lam thay doi khoang cach hai chan trong plan.
+        self.assert_tensor(
+            planner.feet_start[:, 1, 0] - planner.feet_start[:, 0, 0],
+            [0.04],
+        )
+
+    def test_3_no_reanchor_at_first_step_j0(self):
+        """j=0 chi bat dau buoc dau tien, chua co buoc truoc de reanchor."""
+        planner = self.make_planner()
+        planner.update_new_step(
+            torch.tensor([0]), torch.tensor([True]), torch.tensor([0]),
+            torch.tensor([[0.20, 0.0]]),
+        )
+        before = self.snapshot(planner)
+        rel = torch.tensor([[[0.10, 0., 0.], [0.01, 0., 0.]]])
+        delta_x = planner.reanchor_x(
+            torch.tensor([0]), torch.tensor([True]), torch.tensor([0]),
+            rel, torch.tensor([True]),
+        )
+        self.assert_tensor(delta_x, [0.0])
+        self.assert_unchanged(planner, before)
+
+    def test_4_no_reanchor_without_new_step(self):
+        """Trong buoc hien tai, ham co the duoc goi moi dt=0.02 s nhung khong dich."""
+        planner = self.make_planner()
+        planner.feet_start[0, :, 0] = torch.tensor([0.00, 0.04])
+        before = self.snapshot(planner)
+        rel = torch.tensor([[[0.10, 0., 0.], [0.01, 0., 0.]]])
+        delta_x = planner.reanchor_x(
+            torch.tensor([1]), torch.tensor([False]), torch.tensor([1]),
+            rel, torch.tensor([True]),
+        )
+        self.assert_tensor(delta_x, [0.0])
+        self.assert_unchanged(planner, before)
+
+    def test_5_no_reanchor_with_invalid_fk(self):
+        """FK khong hop le thi giu nguyen toan bo vi tri du da co new_step."""
+        planner = self.make_planner()
+        planner.feet_start[0, :, 0] = torch.tensor([0.00, 0.04])
+        before = self.snapshot(planner)
+        # Khong dung NaN tai day de kiem tra ca dau ra delta_x la huu han.
+        rel = torch.tensor([[[0.10, 0., 0.], [0.01, 0., 0.]]])
+        delta_x = planner.reanchor_x(
+            torch.tensor([1]), torch.tensor([True]), torch.tensor([1]),
+            rel, torch.tensor([False]),
+        )
+        self.assert_tensor(delta_x, [0.0])
+        self.assert_unchanged(planner, before)
+
+    def test_6_batch_independence_mixed_conditions(self):
+        """Nhieu robot: j=1, j=2, j=0, no event, invalid FK cung mot batch."""
+        planner = self.make_planner(num_envs=5)
+        planner.feet_start[:, :, 0] = torch.tensor([
+            [0.00, 0.04],  # env0: j1, delta_x=-0.01
+            [0.04, 0.08],  # env1: j2, delta_x=+0.02
+            [0.00, 0.04],  # env2: j0, khong reanchor
+            [0.00, 0.04],  # env3: khong co new_step
+            [0.00, 0.04],  # env4: FK khong hop le
+        ])
+        planner.nominal_landing[:, 0] = 0.10
+        planner.updated_landing[:, 0] = 0.11
+
+        before = self.snapshot(planner)
+        rel = torch.zeros(5, 2, 3)
+        rel[:, 0, 0] = torch.tensor([0.08, 0.09, 0.10, 0.10, 0.10])
+        rel[:, 1, 0] = torch.tensor([0.05, 0.07, 0.01, 0.01, 0.01])
+        delta_x = planner.reanchor_x(
+            j_now=torch.tensor([1, 2, 0, 1, 1]),
+            new_step=torch.tensor([True, True, True, False, True]),
+            stance=torch.tensor([1, 0, 0, 1, 1]),
+            com_relative_to_feet=rel,
+            fk_valid=torch.tensor([True, True, True, True, False]),
+        )
+        self.assert_tensor(delta_x, [-0.01, 0.02, 0.0, 0.0, 0.0])
+        self.assert_tensor(planner.feet_start[:, :, 0], [
+            [-0.01, 0.03],
+            [0.06, 0.10],
+            [0.00, 0.04],
+            [0.00, 0.04],
+            [0.00, 0.04],
+        ])
+        self.assert_tensor(planner.nominal_landing[:, 0], [0.09, 0.12, 0.10, 0.10, 0.10])
+        self.assert_tensor(planner.updated_landing[:, 0], [0.10, 0.13, 0.11, 0.11, 0.11])
+        self.assertTrue(torch.equal(planner.feet_start[:, :, 1:], before["feet_start"][:, :, 1:]))
+        self.assertTrue(torch.equal(planner.nominal_landing[:, 1:], before["nominal_landing"][:, 1:]))
+        self.assertTrue(torch.equal(planner.updated_landing[:, 1:], before["updated_landing"][:, 1:]))
+        self.assertTrue(torch.equal(planner.feet0, before["feet0"]))
+
+    def test_7_relative_fk_is_invariant_to_common_translation(self):
+        """Tinh vi tri tu CHENH LECH FK: cong mot offset cho hai chan khong doi delta_x."""
+        planner_a = self.make_planner()
+        planner_b = self.make_planner()
+        for planner in (planner_a, planner_b):
+            planner.feet_start[0, :, 0] = torch.tensor([0.0, 0.04])
+        rel = torch.tensor([[[0.08, 0.01, 0.02], [0.05, -0.03, 0.02]]])
+        same_translation = torch.tensor([[[0.37, -0.10, 0.15]]])
+        args = (torch.tensor([1]), torch.tensor([True]), torch.tensor([1]))
+
+        delta_a = planner_a.reanchor_x(*args, rel, torch.tensor([True]))
+        delta_b = planner_b.reanchor_x(*args, rel + same_translation, torch.tensor([True]))
+        self.assert_tensor(delta_a, [-0.01])
+        self.assert_tensor(delta_b, [-0.01])
+        self.assertTrue(torch.allclose(planner_a.feet_start, planner_b.feet_start))
+
+    @staticmethod
+    def snapshot(planner):
+        return {
+            name: getattr(planner, name).clone()
+            for name in ("feet0", "feet_offset0", "feet_start",
+                         "nominal_landing", "updated_landing")
+        }
+
+    def assert_unchanged(self, planner, snapshot):
+        for name, before in snapshot.items():
+            self.assertTrue(
+                torch.equal(getattr(planner, name), before),
+                msg=f"{name} bi thay doi trong khi delta_x phai bang 0",
             )
-        for name, expected in before.items():
-            check(getattr(p, name), expected, name)
-
-    def test_04_batch_mixed_events(self):
-        """Only environments with new_step=True change their state."""
-        p, foot = make_planner(num_envs=4)
-        p.updated_landing[2] = torch.tensor([0.120, 0.090, 0.015])
-        p.updated_landing[1] = torch.tensor([0.200, -0.100, 0.030])
-        p.updated_landing[3] = torch.tensor([0.400, -0.050, 0.030])
-        old = {name: getattr(p, name).clone() for name in (
-            "feet0", "feet_offset0", "feet_start",
-            "nominal_landing", "updated_landing",
-        )}
-        p.update_new_step(
-            j_now=torch.tensor([0, -1, 2, 1]),
-            new_step=torch.tensor([True, False, True, False]),
-            stance=torch.tensor([0, 0, 0, 1]),
-            cmd=torch.tensor([
-                [0.10, 0.00], [0.20, 0.10], [-0.05, 0.02], [0.00, 0.00],
-            ]),
-        )
-        # Env 0: first step, left stance -> right swing.
-        check(p.nominal_landing[0], [0.020, -0.060, 0.020])
-        check(p.feet_start[0], foot[0])
-        # Env 2: later step, left stance takes previously updated landing.
-        check(p.feet_start[2, 0], [0.120, 0.090, 0.015])
-        check(p.feet_start[2, 1], foot[2, 1])
-        check(p.nominal_landing[2], [0.110, -0.026, 0.025])
-        check(p.updated_landing[0], p.nominal_landing[0])
-        check(p.updated_landing[2], p.nominal_landing[2])
-        # Envs 1 and 3 must be exactly unchanged.
-        for env in (1, 3):
-            for name, expected in old.items():
-                check(getattr(p, name)[env], expected[env], f"{name}[{env}]")
-        check(p.feet0, old["feet0"])
-        check(p.feet_offset0, old["feet_offset0"])
-
-    def test_05_first_step_reinitializes_old_step_data(self):
-        """j=0 must use feet0, even if feet_start is stale."""
-        p, foot = make_planner()
-        p.feet_start[:] = 7.0
-        p.nominal_landing[:] = 8.0
-        p.updated_landing[:] = 9.0
-        p.update_new_step(
-            torch.tensor([0]), torch.tensor([True]),
-            torch.tensor([0]), torch.tensor([[0.0, 0.0]]),
-        )
-        check(p.feet_start, foot)
-        check(p.nominal_landing, [[0.0, -0.06, 0.02]])
-        check(p.updated_landing, p.nominal_landing)
 
 
 if __name__ == "__main__":
