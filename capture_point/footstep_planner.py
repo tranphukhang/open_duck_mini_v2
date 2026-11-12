@@ -44,7 +44,7 @@ class FootstepPlanner:
         # Xác định dấu theo chân swing
         sign = torch.where(swing == 1, 1.0, -1.0)
 
-        # Vector độ dịch chuyển đặt chân danh định
+        # Vector độ dịch chuyển đặt chân danh định thông qua vận tốc đặt từ người dùng
         offset = torch.zeros(cmd.shape[0], 3,dtype=cmd.dtype, device=cmd.device)
         offset[:, 0] = cmd[:, 0] * half_period_phase
         offset[:, 1] = sign * self.feet_offset0[:, 0] + cmd[:, 1] * half_period_phase
@@ -52,6 +52,32 @@ class FootstepPlanner:
 
         return offset
 
+    # Cập nhật vị trí đặt chân khi bắt đầu bước mới
+    def update_new_step(self, j_now, new_step, stance, cmd):
+        # Xác định chân swing
+        swing = 1 - stance
+
+        # Xác định bước đầu tiên và bước tiếp theo
+        first = new_step & (j_now == 0) # Bước đầu tiên sau shift, j = 0
+        later = new_step & (j_now > 0) # Các bước tiếp theo, j = 1,...
+
+        # Lấy vị trí hai chân tại đầu bước
+        fs = self.feet_start.clone()
+        b = torch.arange(fs.shape[0], device=fs.device)
+
+        # Khi j > 0: Chân swing trước đó trở thành chân stance
+        fs[b, stance] = torch.where(later[:, None], self.updated_landing, fs[b, stance])
+
+        # Khi j = 0: Sử dụng vị trí hai chân ban đầu
+        fs = torch.where(first[:, None, None], self.feet0, fs)
+
+        # Tính vị trí đặt chân danh định cho bước mới
+        land = fs[b, stance] + self.step_offset(swing, cmd)
+
+        # Chỉ cập nhật thì có sự kiện new step
+        self.feet_start = torch.where(new_step[:, None, None], fs, self.feet_start)
+        self.nominal_landing = torch.where(new_step[:, None], land, self.nominal_landing)
+        self.updated_landing = torch.where(new_step[:, None], land, self.updated_landing)
 
         
 
