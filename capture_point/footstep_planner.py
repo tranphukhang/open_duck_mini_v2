@@ -1,9 +1,12 @@
 import torch
 
 class FootstepPlanner:
-    def __init__(self, num_envs=1, period_phase=0.4, device="cpu"):
+    def __init__(self, num_envs=1, period_phase=0.4, num_footsteps=14, device="cpu"):
         # Chu kì pha
         self.period_phase = period_phase
+
+        # Chuỗi vị trí đặt chân dự kiến
+        self.num_footsteps = num_footsteps
 
         # Vị trí ban đầu của hai chân
         self.feet0 = torch.zeros(num_envs, 2, 3, dtype=torch.float32, device=device)
@@ -105,6 +108,47 @@ class FootstepPlanner:
     # Cập nhật vị trí đặt chân sau khi được hiệu chỉnh bởi Capture Point
     def set_landing(self, corrected_landing, allow_adjust):
         self.updated_landing = torch.where(allow_adjust[:, None], corrected_landing, self.updated_landing)
+
+    # Tạo chuỗi 14 vị trí đặt chân dự kiến trong hệ tọa độ {P}
+    def footstep_sequence(self, j_now, cmd):
+        num_footsteps = self.num_footstep
+
+        # Khi j = -1: Dự đoán từ bước j = 0
+        j_base = j_now.clamp_min(0)
+
+        # Xác định chân stance và swing của bước cơ sở
+        stance = torch.remainder(j_base, 2)
+        swing = 1 - stance
+
+        b = torch.arange(self.feet_start.shape[0], device=self.feet_start.device)
+
+        # Vị trí chân swing tại đầu bước
+        p_minus_1 = self.feet_start[b, swing]
+
+        # Vị trí chân stance tại đầu bước
+        p0 = self.feet_start[b, stance]
+
+        # Vị trí tiếp đất của chân swing hiện tại
+        # Khi Shift: tính danh định từ step_offset()
+        # Khi Walking: sử dụng updated_landing (có thể đã hiệu chỉnh CP)
+        p1 = torch.where((j_now >= 0)[:, None], self.updated_landing, p0 + self.step_offset(swing, cmd))
+
+        # Vector dịch chuyển đặt chân cho các bước tiếp theo
+        # Chân stance hiện tại sẽ swing ở bước kế tiếp
+        offset = torch.stack([self.step_offset(stance, cmd), self.step_offset(swing, cmd)], dim=1)
+
+        # Tạo chỉ số luân phiên chân: 0, 1, 0, 1, ...
+        alternate = torch.arange(num_footsteps - 3, device=self.feet_start.device) % 2
+
+        # Tính các vị trí tiếp đất từ p2 đến p12
+        later = p1[:, None, :] + torch.cumsum(offset[:, alternate, :], dim=1)
+
+        # Ghép thành chuỗi 14 vị trí từ p-1 đến p12
+        footsteps = torch.cat([p_minus_1[:, None, :], p0[:, None, :], p1[:, None, :], later], dim=1)
+
+        return footsteps, j_base
+
+
 
 
 
