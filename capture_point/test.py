@@ -1,20 +1,17 @@
-"""Kiem thu FootstepPlanner.reanchor_x() - Open Duck Mini V2.
+"""Kiem thu FootstepPlanner.footstep_sequence() cho Open Duck Mini V2.
 
-Dat file nay cung thu muc voi footstep_planner.py, sau do chay:
-    python test_footstep_planner_reanchor_x.py
+Dat file trong thu muc capture_point/ cung footstep_planner.py, sau do chay:
+    python test_footstep_planner_footstep_sequence.py
 
 Quy uoc:
-    L = 0 (chan trai), R = 1 (chan phai)
-    stance: chan stance cua buoc VUA BAT DAU,
-            tuc la chan swing cua buoc VUA HOAN THANH.
-    swing = 1 - stance: chan stance cua buoc VUA HOAN THANH.
-    feet_start, nominal_landing, updated_landing: toa do trong {P}.
-    com_relative_to_feet[b, i] = p_CoM - p_foot_i, tu FK voi truc cung huong {P}.
-    Gia su cac truc {K} va {P} duoc can chinh de cong truc tiep delta X.
+    0 = chan trai (L), 1 = chan phai (R)
+    j = -1: shift ban dau, 2 chan van tiep xuc
+    j =  0: chan trai stance, chan phai swing
+    j =  1: chan phai stance, chan trai swing
+    Tat ca vi tri (x, y, z) trong he lap ke hoach {P}; don vi met.
 
-Ky vong: reanchor chi xay ra khi new_step=True, j_now>0 va fk_valid=True.
-Chung ta chi test FootstepPlanner; vi tri CoM trong MPC do module dieu phoi cap nhat
-bang delta_x tra ve.
+Test tinh gia tri mong doi doc lap (khong dung footstep_sequence
+hoac step_offset de tinh expected), ngoai cac phep so sanh batch.
 """
 
 import unittest
@@ -23,221 +20,200 @@ import torch
 from footstep_planner import FootstepPlanner
 
 
-class TestReanchorX(unittest.TestCase):
-    def make_planner(self, num_envs=1):
-        planner = FootstepPlanner(num_envs=num_envs, period_phase=0.4)
-        feet_pos = torch.tensor(
-            [[[0.0, 0.06, 0.005], [0.0, -0.06, 0.015]]],
-            dtype=torch.float32,
-        ).repeat(num_envs, 1, 1)
-        planner.reset(torch.arange(num_envs), feet_pos)
+class TestFootstepSequence(unittest.TestCase):
+    @staticmethod
+    def default_feet():
+        # L: y = +0.09, z = 0.005; R: y = -0.09, z = 0.015.
+        return torch.tensor([[[0.0, 0.09, 0.005],
+                              [0.0, -0.09, 0.015]]], dtype=torch.float32)
+
+    def make_planner(self, feet=None, period_phase=0.4, num_footsteps=14):
+        if feet is None:
+            feet = self.default_feet()
+        planner = FootstepPlanner(
+            num_envs=feet.shape[0], period_phase=period_phase,
+            num_footsteps=num_footsteps, device="cpu"
+        )
+        planner.reset(torch.arange(feet.shape[0]), feet)
         return planner
 
-    def assert_tensor(self, actual, expected, message=""):
-        torch.testing.assert_close(
-            actual,
-            torch.as_tensor(expected, dtype=actual.dtype, device=actual.device),
-            rtol=0,
-            atol=1e-6,
-            msg=message or None,
-        )
+    def assert_tensor(self, actual, expected, atol=1e-6):
+        expected = torch.as_tensor(expected, dtype=actual.dtype, device=actual.device)
+        torch.testing.assert_close(actual, expected, atol=atol, rtol=0)
 
-    def test_1_reanchor_after_completed_step_with_cp_adjusted_landing(self):
-        """j=1: landing da hieu chinh tu CP, FK cho vi tri thuc te khac plan."""
+    def test_01_shift_initial_sequence(self):
+        """j=-1: p[-1]=R0, p[0]=L0, p[1] du doan tu lenh van toc."""
         planner = self.make_planner()
-        vx_cmd = torch.tensor([[0.20, 0.00]])
+        cmd = torch.tensor([[0.10, 0.02]])  # T_step=0.2; dx=0.02; dy_cmd=0.004
+        points, j_base = planner.footstep_sequence(torch.tensor([-1]), cmd)
 
-        # Bat dau buoc j=0: trai stance, phai swing. Landing danh dinh R_x=0.04 m.
-        planner.update_new_step(
-            j_now=torch.tensor([0]),
-            new_step=torch.tensor([True]),
-            stance=torch.tensor([0]),
-            cmd=vx_cmd,
-        )
-        self.assert_tensor(planner.nominal_landing[:, 0], [0.04])
-
-        # Gia lap CP chinh landing cua chan phai len 0.05 m truoc khi tiep dat.
-        planner.updated_landing[:, 0] = 0.05
-
-        # Bat dau buoc j=1: phai stance, trai chuan bi swing.
-        # update_new_step() phai duoc goi TRUOC reanchor_x().
-        planner.update_new_step(
-            j_now=torch.tensor([1]),
-            new_step=torch.tensor([True]),
-            stance=torch.tensor([1]),
-            cmd=vx_cmd,
-        )
-        self.assert_tensor(planner.feet_start[0, :, 0], [0.0, 0.05])
-        self.assert_tensor(planner.nominal_landing[:, 0], [0.09])
-
-        # FK: khoang cach R-L = r_L - r_R = 0.100 - 0.055 = 0.045 m.
-        # Vi tri R uoc luong = 0 + 0.045 = 0.045 m; plan = 0.05 m.
-        com_relative_to_feet = torch.tensor(
-            [[[0.100, 0.02, 0.03], [0.055, 0.02, 0.03]]]
-        )
-        yz_feet_before = planner.feet_start[:, :, 1:].clone()
-        yz_nominal_before = planner.nominal_landing[:, 1:].clone()
-        yz_updated_before = planner.updated_landing[:, 1:].clone()
-        feet0_before = planner.feet0.clone()
-        rel_before = com_relative_to_feet.clone()
-
-        delta_x = planner.reanchor_x(
-            j_now=torch.tensor([1]),
-            new_step=torch.tensor([True]),
-            stance=torch.tensor([1]),
-            com_relative_to_feet=com_relative_to_feet,
-            fk_valid=torch.tensor([True]),
-        )
-
-        self.assert_tensor(delta_x, [-0.005])
-        self.assert_tensor(planner.feet_start[0, :, 0], [-0.005, 0.045])
-        self.assert_tensor(planner.nominal_landing[:, 0], [0.085])
-        self.assert_tensor(planner.updated_landing[:, 0], [0.085])
-
-        # Reanchor chi dich X; Y, Z va du lieu FK khong duoc thay doi.
-        self.assertTrue(torch.equal(planner.feet_start[:, :, 1:], yz_feet_before))
-        self.assertTrue(torch.equal(planner.nominal_landing[:, 1:], yz_nominal_before))
-        self.assertTrue(torch.equal(planner.updated_landing[:, 1:], yz_updated_before))
-        self.assertTrue(torch.equal(planner.feet0, feet0_before))
-        self.assertTrue(torch.equal(com_relative_to_feet, rel_before))
-
-    def test_2_positive_delta_x_when_left_becomes_stance(self):
-        """j=2: trai la stance; vi tri trai FK lon hon vi tri plan 2 cm."""
-        planner = self.make_planner()
-        planner.feet_start[0, :, 0] = torch.tensor([0.04, 0.08])
-        planner.nominal_landing[0, 0] = 0.10
-        planner.updated_landing[0, 0] = 0.11
-
-        # Trai vua tiep dat, phai la stance truoc do.
-        # r_R - r_L = 0.07 - 0.09 = -0.02 => landed_L=0.08-0.02=0.06.
-        rel = torch.tensor([[[0.09, 0., 0.], [0.07, 0., 0.]]])
-        delta_x = planner.reanchor_x(
-            torch.tensor([2]), torch.tensor([True]), torch.tensor([0]),
-            rel, torch.tensor([True]),
-        )
-        self.assert_tensor(delta_x, [0.02])
-        self.assert_tensor(planner.feet_start[0, :, 0], [0.06, 0.10])
-        self.assert_tensor(planner.nominal_landing[:, 0], [0.12])
-        self.assert_tensor(planner.updated_landing[:, 0], [0.13])
-
-        # Phep dich dong bo khong lam thay doi khoang cach hai chan trong plan.
-        self.assert_tensor(
-            planner.feet_start[:, 1, 0] - planner.feet_start[:, 0, 0],
-            [0.04],
-        )
-
-    def test_3_no_reanchor_at_first_step_j0(self):
-        """j=0 chi bat dau buoc dau tien, chua co buoc truoc de reanchor."""
-        planner = self.make_planner()
-        planner.update_new_step(
-            torch.tensor([0]), torch.tensor([True]), torch.tensor([0]),
-            torch.tensor([[0.20, 0.0]]),
-        )
-        before = self.snapshot(planner)
-        rel = torch.tensor([[[0.10, 0., 0.], [0.01, 0., 0.]]])
-        delta_x = planner.reanchor_x(
-            torch.tensor([0]), torch.tensor([True]), torch.tensor([0]),
-            rel, torch.tensor([True]),
-        )
-        self.assert_tensor(delta_x, [0.0])
-        self.assert_unchanged(planner, before)
-
-    def test_4_no_reanchor_without_new_step(self):
-        """Trong buoc hien tai, ham co the duoc goi moi dt=0.02 s nhung khong dich."""
-        planner = self.make_planner()
-        planner.feet_start[0, :, 0] = torch.tensor([0.00, 0.04])
-        before = self.snapshot(planner)
-        rel = torch.tensor([[[0.10, 0., 0.], [0.01, 0., 0.]]])
-        delta_x = planner.reanchor_x(
-            torch.tensor([1]), torch.tensor([False]), torch.tensor([1]),
-            rel, torch.tensor([True]),
-        )
-        self.assert_tensor(delta_x, [0.0])
-        self.assert_unchanged(planner, before)
-
-    def test_5_no_reanchor_with_invalid_fk(self):
-        """FK khong hop le thi giu nguyen toan bo vi tri du da co new_step."""
-        planner = self.make_planner()
-        planner.feet_start[0, :, 0] = torch.tensor([0.00, 0.04])
-        before = self.snapshot(planner)
-        # Khong dung NaN tai day de kiem tra ca dau ra delta_x la huu han.
-        rel = torch.tensor([[[0.10, 0., 0.], [0.01, 0., 0.]]])
-        delta_x = planner.reanchor_x(
-            torch.tensor([1]), torch.tensor([True]), torch.tensor([1]),
-            rel, torch.tensor([False]),
-        )
-        self.assert_tensor(delta_x, [0.0])
-        self.assert_unchanged(planner, before)
-
-    def test_6_batch_independence_mixed_conditions(self):
-        """Nhieu robot: j=1, j=2, j=0, no event, invalid FK cung mot batch."""
-        planner = self.make_planner(num_envs=5)
-        planner.feet_start[:, :, 0] = torch.tensor([
-            [0.00, 0.04],  # env0: j1, delta_x=-0.01
-            [0.04, 0.08],  # env1: j2, delta_x=+0.02
-            [0.00, 0.04],  # env2: j0, khong reanchor
-            [0.00, 0.04],  # env3: khong co new_step
-            [0.00, 0.04],  # env4: FK khong hop le
+        self.assertEqual(tuple(points.shape), (1, 14, 3))
+        self.assertEqual(j_base.tolist(), [0])
+        # Thu tu: p[-1], p[0], p[1], p[2], p[3], p[4].
+        self.assert_tensor(points[0, :6], [
+            [0.00, -0.090, 0.015],  # p[-1]: R bat dau
+            [0.00, +0.090, 0.005],  # p[0]: L stance
+            [0.02, -0.086, 0.015],  # p[1]: R du doan
+            [0.04, +0.098, 0.005],  # p[2]: L du doan
+            [0.06, -0.078, 0.015],  # p[3]: R du doan
+            [0.08, +0.106, 0.005],  # p[4]: L du doan
         ])
-        planner.nominal_landing[:, 0] = 0.10
-        planner.updated_landing[:, 0] = 0.11
 
-        before = self.snapshot(planner)
-        rel = torch.zeros(5, 2, 3)
-        rel[:, 0, 0] = torch.tensor([0.08, 0.09, 0.10, 0.10, 0.10])
-        rel[:, 1, 0] = torch.tensor([0.05, 0.07, 0.01, 0.01, 0.01])
-        delta_x = planner.reanchor_x(
-            j_now=torch.tensor([1, 2, 0, 1, 1]),
-            new_step=torch.tensor([True, True, True, False, True]),
-            stance=torch.tensor([1, 0, 0, 1, 1]),
-            com_relative_to_feet=rel,
-            fk_valid=torch.tensor([True, True, True, True, False]),
+    def test_02_shift_ignores_updated_landing(self):
+        """Trong shift, p[1] phai tinh danh dinh, khong lay updated_landing."""
+        planner = self.make_planner()
+        planner.set_landing(
+            torch.tensor([[0.75, -0.50, 0.02]]),
+            torch.tensor([True])
         )
-        self.assert_tensor(delta_x, [-0.01, 0.02, 0.0, 0.0, 0.0])
-        self.assert_tensor(planner.feet_start[:, :, 0], [
-            [-0.01, 0.03],
-            [0.06, 0.10],
-            [0.00, 0.04],
-            [0.00, 0.04],
-            [0.00, 0.04],
+        points, _ = planner.footstep_sequence(
+            torch.tensor([-1]), torch.tensor([[0.10, 0.00]])
+        )
+        self.assert_tensor(points[0, 2], [0.02, -0.09, 0.015])
+        self.assert_tensor(planner.updated_landing[0], [0.75, -0.50, 0.02])
+
+    def test_03_first_step_matches_shift_prediction(self):
+        """Chuyen shift -> j=0, voi cmd khong doi: chuoi trung nhau."""
+        planner = self.make_planner()
+        cmd = torch.tensor([[0.10, 0.02]])
+        shift_points, _ = planner.footstep_sequence(torch.tensor([-1]), cmd)
+        planner.update_new_step(
+            j_now=torch.tensor([0]), new_step=torch.tensor([True]),
+            stance=torch.tensor([0]), cmd=cmd
+        )
+        walking_points, j_base = planner.footstep_sequence(torch.tensor([0]), cmd)
+        self.assertEqual(j_base.tolist(), [0])
+        self.assert_tensor(walking_points, shift_points)
+        self.assert_tensor(walking_points[0, 2], planner.updated_landing[0])
+
+    def test_04_cp_correction_propagates_to_all_future_steps(self):
+        """j=0: cap nhat CP p[1], cac vi tri p[2]... duoc tinh tu p[1]."""
+        planner = self.make_planner()
+        cmd = torch.tensor([[0.10, 0.0]])
+        planner.update_new_step(torch.tensor([0]), torch.tensor([True]),
+                                torch.tensor([0]), cmd)
+        before, _ = planner.footstep_sequence(torch.tensor([0]), cmd)
+        nominal_before = planner.nominal_landing.clone()
+
+        correction = torch.tensor([[+0.013, -0.007, 0.0]])
+        planner.set_landing(planner.nominal_landing + correction, torch.tensor([True]))
+        after, _ = planner.footstep_sequence(torch.tensor([0]), cmd)
+
+        self.assert_tensor(after[:, :2], before[:, :2])  # p[-1] va p[0] giu nguyen
+        self.assert_tensor(after[:, 2:] - before[:, 2:],
+                           correction[:, None, :].expand(1, 12, 3))
+        self.assert_tensor(planner.nominal_landing, nominal_before)
+        self.assert_tensor(after[:, 2], planner.updated_landing)
+
+    def test_05_second_step_switches_stance_and_swing(self):
+        """j=1: chan phai stance; chan trai swing; p[1] la landing chan trai."""
+        planner = self.make_planner()
+        cmd = torch.tensor([[0.10, 0.00]])
+        planner.update_new_step(torch.tensor([0]), torch.tensor([True]),
+                                torch.tensor([0]), cmd)
+        # Gia lap landing chan phai (bước j=0) duoc CP hieu chinh theo X.
+        planner.set_landing(torch.tensor([[0.03, -0.09, 0.015]]),
+                            torch.tensor([True]))
+        planner.update_new_step(torch.tensor([1]), torch.tensor([True]),
+                                torch.tensor([1]), cmd)
+        points, j_base = planner.footstep_sequence(torch.tensor([1]), cmd)
+
+        self.assertEqual(j_base.tolist(), [1])
+        self.assert_tensor(points[0, :5], [
+            [0.00, +0.09, 0.005],  # p[-1]: chan trai, swing moi
+            [0.03, -0.09, 0.015],  # p[0]: chan phai, stance moi
+            [0.05, +0.09, 0.005],  # p[1]: landing chan trai
+            [0.07, -0.09, 0.015],  # p[2]: landing chan phai
+            [0.09, +0.09, 0.005],  # p[3]: landing chan trai
         ])
-        self.assert_tensor(planner.nominal_landing[:, 0], [0.09, 0.12, 0.10, 0.10, 0.10])
-        self.assert_tensor(planner.updated_landing[:, 0], [0.10, 0.13, 0.11, 0.11, 0.11])
-        self.assertTrue(torch.equal(planner.feet_start[:, :, 1:], before["feet_start"][:, :, 1:]))
-        self.assertTrue(torch.equal(planner.nominal_landing[:, 1:], before["nominal_landing"][:, 1:]))
-        self.assertTrue(torch.equal(planner.updated_landing[:, 1:], before["updated_landing"][:, 1:]))
-        self.assertTrue(torch.equal(planner.feet0, before["feet0"]))
 
-    def test_7_relative_fk_is_invariant_to_common_translation(self):
-        """Tinh vi tri tu CHENH LECH FK: cong mot offset cho hai chan khong doi delta_x."""
-        planner_a = self.make_planner()
-        planner_b = self.make_planner()
-        for planner in (planner_a, planner_b):
-            planner.feet_start[0, :, 0] = torch.tensor([0.0, 0.04])
-        rel = torch.tensor([[[0.08, 0.01, 0.02], [0.05, -0.03, 0.02]]])
-        same_translation = torch.tensor([[[0.37, -0.10, 0.15]]])
-        args = (torch.tensor([1]), torch.tensor([True]), torch.tensor([1]))
+    def test_06_zero_command_preserves_alternating_initial_feet(self):
+        """Khi vx=vy=0, chuoi chi luan phien vi tri L va R."""
+        planner = self.make_planner()
+        points, _ = planner.footstep_sequence(
+            torch.tensor([-1]), torch.tensor([[0.0, 0.0]])
+        )
+        for i in range(14):
+            expected = planner.feet0[0, 1 if i % 2 == 0 else 0]
+            self.assert_tensor(points[0, i], expected)
 
-        delta_a = planner_a.reanchor_x(*args, rel, torch.tensor([True]))
-        delta_b = planner_b.reanchor_x(*args, rel + same_translation, torch.tensor([True]))
-        self.assert_tensor(delta_a, [-0.01])
-        self.assert_tensor(delta_b, [-0.01])
-        self.assertTrue(torch.allclose(planner_a.feet_start, planner_b.feet_start))
+    def test_07_custom_num_footsteps_and_period(self):
+        """So diem va khoang buoc phai theo tham so, khong hard-code 14/0.2."""
+        planner = self.make_planner(period_phase=0.6, num_footsteps=5)
+        cmd = torch.tensor([[0.10, 0.00]])  # T_step = 0.3, dx = 0.03
+        points, j_base = planner.footstep_sequence(torch.tensor([-1]), cmd)
+        self.assertEqual(tuple(points.shape), (1, 5, 3))
+        self.assertEqual(j_base.tolist(), [0])
+        self.assert_tensor(points[0], [
+            [0.00, -0.09, 0.015],
+            [0.00, +0.09, 0.005],
+            [0.03, -0.09, 0.015],
+            [0.06, +0.09, 0.005],
+            [0.09, -0.09, 0.015],
+        ])
 
-    @staticmethod
-    def snapshot(planner):
-        return {
-            name: getattr(planner, name).clone()
-            for name in ("feet0", "feet_offset0", "feet_start",
-                         "nominal_landing", "updated_landing")
-        }
+    def test_08_batch_independent_environments(self):
+        """Ba moi truong co j, lenh, hinh hoc va landing khac nhau."""
+        feet = torch.tensor([
+            [[0.00, +0.09, 0.005], [0.00, -0.09, 0.015]],
+            [[0.05, +0.07, 0.020], [0.04, -0.08, 0.000]],
+            [[0.10, +0.10, 0.010], [0.12, -0.09, 0.020]],
+        ])
+        cmd = torch.tensor([[0.10, 0.02], [-0.05, -0.02], [0.20, 0.01]])
+        j_now = torch.tensor([-1, 0, 1], dtype=torch.long)
+        planner = self.make_planner(feet=feet)
+        # Cau hinh gia lap sau update_new_step va CP feedback tai tung env.
+        planner.updated_landing[1] = torch.tensor([0.025, -0.088, 0.000])
+        planner.updated_landing[2] = torch.tensor([0.170, +0.110, 0.010])
+        planner.feet_start[2, 1] = torch.tensor([0.145, -0.09, 0.020])
 
-    def assert_unchanged(self, planner, snapshot):
-        for name, before in snapshot.items():
+        batch_points, batch_jbase = planner.footstep_sequence(j_now, cmd)
+        self.assertEqual(tuple(batch_points.shape), (3, 14, 3))
+        self.assertEqual(batch_jbase.tolist(), [0, 0, 1])
+        for i in range(3):
+            single = self.make_planner(feet=feet[i:i+1])
+            single.feet_start[:] = planner.feet_start[i:i+1]
+            single.updated_landing[:] = planner.updated_landing[i:i+1]
+            single_points, single_jbase = single.footstep_sequence(j_now[i:i+1], cmd[i:i+1])
+            self.assert_tensor(batch_points[i:i+1], single_points)
+            self.assert_tensor(batch_jbase[i:i+1], single_jbase)
+
+    def test_09_function_does_not_modify_planner_state(self):
+        """footstep_sequence chi tinh chuoi, khong sua cac bien noi bo."""
+        planner = self.make_planner()
+        cmd = torch.tensor([[0.10, -0.04]])
+        planner.update_new_step(torch.tensor([0]), torch.tensor([True]),
+                                torch.tensor([0]), cmd)
+        names = ("feet0", "feet_offset0", "feet_start",
+                 "nominal_landing", "updated_landing")
+        before = {name: getattr(planner, name).clone() for name in names}
+
+        _ = planner.footstep_sequence(torch.tensor([0]), cmd)
+        _ = planner.footstep_sequence(torch.tensor([-1]), cmd)
+
+        for name in names:
             self.assertTrue(
-                torch.equal(getattr(planner, name), before),
-                msg=f"{name} bi thay doi trong khi delta_x phai bang 0",
+                torch.equal(getattr(planner, name), before[name]),
+                msg=f"footstep_sequence() da thay doi {name}"
             )
+
+    def test_10_last_prediction_and_step_alternation(self):
+        """Kiem tra diem cuoi p[12] va thu tu 14 diem khong bi lech index."""
+        planner = self.make_planner()
+        cmd = torch.tensor([[0.10, 0.00]])
+        points, _ = planner.footstep_sequence(torch.tensor([-1]), cmd)
+        # 14 diem p[-1]..p[12], chi so tensor 13 -> p[12].
+        self.assert_tensor(points[0, 13], [0.24, +0.09, 0.005])
+        # p1..p12: x tang 0.02 tung buoc; y/z luan phien.
+        for k in range(1, 13):
+            p = points[0, k + 1]  # p_k
+            self.assertAlmostEqual(p[0].item(), 0.02 * k, delta=1e-6)
+            if k % 2 == 1:
+                self.assertAlmostEqual(p[1].item(), -0.09, delta=1e-6)
+                self.assertAlmostEqual(p[2].item(), 0.015, delta=1e-6)
+            else:
+                self.assertAlmostEqual(p[1].item(), +0.09, delta=1e-6)
+                self.assertAlmostEqual(p[2].item(), 0.005, delta=1e-6)
 
 
 if __name__ == "__main__":
