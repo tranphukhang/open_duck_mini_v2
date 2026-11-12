@@ -111,7 +111,7 @@ class FootstepPlanner:
 
     # Tạo chuỗi 14 vị trí đặt chân dự kiến trong hệ tọa độ {P}
     def footstep_sequence(self, j_now, cmd):
-        num_footsteps = self.num_footstep
+        num_footsteps = self.num_footsteps
 
         # Khi j = -1: Dự đoán từ bước j = 0
         j_base = j_now.clamp_min(0)
