@@ -1,165 +1,148 @@
-"""Kiem thu + ve do thi ZMPGenerator.smoothstep().
+"""Test ham ZMPGenerator.zmp_point() trong capture_point/zmp_generator.py.
 
-Dat file nay o MOT trong hai vi tri:
-  A. open_duck_mini_v2/capture_point/test_zmp_generator_smoothstep.py
-  B. open_duck_mini_v2/test_zmp_generator_smoothstep.py
+Dat file nay cung thu muc voi zmp_generator.py, sau do chay:
+    python test_zmp_generator_zmp_point.py
 
-Chay:
-    python test_zmp_generator_smoothstep.py
-
-Yeu cau: torch, matplotlib. Khong can pytest, MuJoCo hay Isaac Lab.
-Chi hien thi do thi; KHONG luu CSV, anh hoac file ket qua.
+Khong mo do thi, khong tao CSV va khong luu anh.
 """
 
-from pathlib import Path
-import importlib.util
 import unittest
-
 import torch
 
-
-def load_zmp_generator():
-    """Tim zmp_generator.py khi test nam o thu muc goc hoac capture_point/."""
-    here = Path(__file__).resolve().parent
-    candidates = [
-        here / "zmp_generator.py",
-        here / "capture_point" / "zmp_generator.py",
-        here.parent / "capture_point" / "zmp_generator.py",
-    ]
-    for path in candidates:
-        if path.is_file():
-            spec = importlib.util.spec_from_file_location("zmp_generator_local", path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            print(f"Dang kiem thu: {path}", flush=True)
-            return module.ZMPGenerator
-    raise FileNotFoundError(
-        "Khong tim thay zmp_generator.py. Hay dat file test trong thu muc "
-        "capture_point/ (cung cap zmp_generator.py) hoac tai thu muc goc repo "
-        "open_duck_mini_v2/.\nDa tim tai:\n  "
-        + "\n  ".join(str(path) for path in candidates)
-    )
+from zmp_generator import ZMPGenerator
 
 
-ZMPGenerator = load_zmp_generator()
+class TestZMPPoint(unittest.TestCase):
+    def setUp(self):
+        self.generator = ZMPGenerator()
 
+    def assertTensorClose(self, actual, expected, atol=1e-7):
+        self.assertEqual(tuple(actual.shape), tuple(expected.shape))
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=atol)
 
-class TestSmoothstep(unittest.TestCase):
-    def test_01_gia_tri_bien(self):
-        s = torch.tensor([0.0, 1.0], dtype=torch.float64)
-        expected = torch.tensor([0.0, 1.0], dtype=torch.float64)
-        torch.testing.assert_close(ZMPGenerator.smoothstep(s), expected)
+    def test_01_default_offsets(self):
+        """Gia tri default giong walker.py cua tac gia."""
+        self.assertEqual(self.generator.zmp_offset_x, 0.005)
+        self.assertEqual(self.generator.zmp_offset_y_out, 0.007)
 
-    def test_02_cac_diem_dac_trung(self):
-        s = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], dtype=torch.float64)
-        expected = torch.tensor([0.0, 0.15625, 0.5, 0.84375, 1.0], dtype=torch.float64)
-        torch.testing.assert_close(ZMPGenerator.smoothstep(s), expected, rtol=0, atol=1e-12)
+    def test_02_left_foot_positive_y(self):
+        """Chan trai (side=0): +5 mm theo X, +7 mm theo Y."""
+        foot = torch.tensor([[0.0, 0.09, 0.03]])
+        side = torch.tensor([0], dtype=torch.long)
+        expected = torch.tensor([[0.005, 0.097]])
+        self.assertTensorClose(self.generator.zmp_point(foot, side), expected)
 
-    def test_03_clamp_ngoai_khoang(self):
-        s = torch.tensor([-2.0, -0.1, 0.0, 1.0, 1.1, 2.0])
-        expected = torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-        torch.testing.assert_close(ZMPGenerator.smoothstep(s), expected)
+    def test_03_right_foot_negative_y(self):
+        """Chan phai (side=1): +5 mm theo X, -7 mm theo Y."""
+        foot = torch.tensor([[0.0, -0.09, 0.03]])
+        side = torch.tensor([1], dtype=torch.long)
+        expected = torch.tensor([[0.005, -0.097]])
+        self.assertTensorClose(self.generator.zmp_point(foot, side), expected)
 
-    def test_04_tensor_scalar(self):
-        result = ZMPGenerator.smoothstep(torch.tensor(0.5))
-        self.assertEqual(result.ndim, 0)
-        self.assertAlmostEqual(result.item(), 0.5, places=7)
+    def test_04_both_feet_in_one_batch(self):
+        """Hai chan co the xu ly cung luc, khong bi dao dau offset Y."""
+        foot = torch.tensor([
+            [0.10,  0.09, 0.00],
+            [0.12, -0.09, 0.00],
+        ])
+        side = torch.tensor([0, 1], dtype=torch.long)
+        expected = torch.tensor([
+            [0.105,  0.097],
+            [0.125, -0.097],
+        ])
+        self.assertTensorClose(self.generator.zmp_point(foot, side), expected)
 
-    def test_05_tensor_batch_horizon(self):
-        # Kiem thu dang du lieu se dung o MPC: B=3, N=80.
-        s = torch.linspace(-0.2, 1.2, 80, dtype=torch.float64).repeat(3, 1)
-        result = ZMPGenerator.smoothstep(s)
-        s_clip = s.clamp(0.0, 1.0)
-        expected = 3.0 * s_clip**2 - 2.0 * s_clip**3
-        self.assertEqual(tuple(result.shape), (3, 80))
-        torch.testing.assert_close(result, expected, rtol=0, atol=1e-12)
+    def test_05_custom_offsets(self):
+        """Thay doi tham so offset ma khong sua ham zmp_point()."""
+        gen = ZMPGenerator(zmp_offset_x=0.012, zmp_offset_y_out=0.020)
+        foot = torch.tensor([[0.20, 0.08, 0.0], [0.20, -0.08, 0.0]])
+        side = torch.tensor([0, 1], dtype=torch.long)
+        expected = torch.tensor([[0.212, 0.100], [0.212, -0.100]])
+        self.assertTensorClose(gen.zmp_point(foot, side), expected)
 
-    def test_06_don_dieu_va_gioi_han(self):
-        s = torch.linspace(0.0, 1.0, 1001, dtype=torch.float64)
-        y = ZMPGenerator.smoothstep(s)
-        self.assertTrue(bool(torch.all(y[1:] >= y[:-1] - 1e-12)))
-        self.assertTrue(bool(torch.all((y >= 0.0) & (y <= 1.0))))
+    def test_06_zero_offsets(self):
+        """Khi offset = 0, ZMP dung tai vi tri foot site tren mat phang XY."""
+        gen = ZMPGenerator(zmp_offset_x=0.0, zmp_offset_y_out=0.0)
+        foot = torch.tensor([[0.15, 0.07, 0.02], [-0.10, -0.07, 0.05]])
+        side = torch.tensor([0, 1])
+        self.assertTensorClose(gen.zmp_point(foot, side), foot[:, :2])
 
-    def test_07_tinh_doi_xung(self):
-        s = torch.linspace(0.0, 1.0, 101, dtype=torch.float64)
-        y = ZMPGenerator.smoothstep(s) + ZMPGenerator.smoothstep(1.0 - s)
-        torch.testing.assert_close(y, torch.ones_like(y), rtol=0, atol=1e-12)
+    def test_07_z_coordinate_does_not_affect_zmp(self):
+        """Thay doi Z cua ban chan khong lam thay doi ZMP tham chieu XY."""
+        a = torch.tensor([[0.2, 0.1, -0.10], [0.3, -0.1, 0.01]])
+        b = a.clone()
+        b[:, 2] = torch.tensor([0.50, 1.20])
+        side = torch.tensor([0, 1])
+        self.assertTensorClose(self.generator.zmp_point(a, side), self.generator.zmp_point(b, side))
 
-    def test_08_dao_ham_hai_dau(self):
-        s = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64, requires_grad=True)
-        y = ZMPGenerator.smoothstep(s)
-        grad = torch.autograd.grad(y.sum(), s)[0]
-        expected = torch.tensor([0.0, 1.5, 0.0], dtype=torch.float64)
-        torch.testing.assert_close(grad, expected, rtol=0, atol=1e-12)
+    def test_08_batched_horizon_80_samples(self):
+        """Kich thuoc (B,N,3) -> (B,N,2), B=3, N=80."""
+        batch, horizon = 3, 80
+        foot = torch.zeros(batch, horizon, 3)
+        foot[..., 0] = torch.arange(horizon).float()[None, :] * 0.01
+        foot[..., 1] = torch.tensor([0.09, -0.09, 0.05])[:, None]
+        side = (torch.arange(horizon)[None, :] + torch.arange(batch)[:, None]) % 2
+        actual = self.generator.zmp_point(foot, side)
+        expected = foot[..., :2].clone()
+        expected[..., 0] += 0.005
+        expected[..., 1] += torch.where(side == 0, 0.007, -0.007)
+        self.assertTensorClose(actual, expected)
+        self.assertEqual(tuple(actual.shape), (3, 80, 2))
 
-    def test_09_khong_thay_doi_input(self):
-        s = torch.tensor([[-0.5, 0.3], [0.8, 1.5]])
-        before = s.clone()
-        _ = ZMPGenerator.smoothstep(s)
-        torch.testing.assert_close(s, before)
+    def test_09_single_foot_scalar_side(self):
+        """Ho tro tensor mot ban chan (3,) va chi so chan vo huong ()."""
+        foot = torch.tensor([0.04, -0.10, 0.02])
+        side = torch.tensor(1)
+        expected = torch.tensor([0.045, -0.107])
+        self.assertTensorClose(self.generator.zmp_point(foot, side), expected)
 
-    @unittest.skipUnless(torch.cuda.is_available(), "May khong co CUDA")
-    def test_10_cuda(self):
-        s = torch.tensor([0.0, 0.5, 1.0], device="cuda")
-        result = ZMPGenerator.smoothstep(s)
-        self.assertEqual(result.device.type, "cuda")
-        torch.testing.assert_close(result.cpu(), torch.tensor([0.0, 0.5, 1.0]))
+    def test_10_does_not_modify_inputs(self):
+        """Khong thay doi tensor foot va side ban dau."""
+        foot = torch.tensor([[0.0, 0.09, 0.01], [0.0, -0.09, 0.02]])
+        side = torch.tensor([0, 1])
+        original_foot, original_side = foot.clone(), side.clone()
+        _ = self.generator.zmp_point(foot, side)
+        self.assertTrue(torch.equal(foot, original_foot))
+        self.assertTrue(torch.equal(side, original_side))
 
+    def test_11_preserves_floating_dtype(self):
+        """Tinh toan cho foot float32 va float64."""
+        for dtype in (torch.float32, torch.float64):
+            with self.subTest(dtype=str(dtype)):
+                foot = torch.tensor([[0.1, 0.09, 0.0], [0.2, -0.09, 0.0]], dtype=dtype)
+                side = torch.tensor([0, 1])
+                actual = self.generator.zmp_point(foot, side)
+                expected = torch.tensor([[0.105, 0.097], [0.205, -0.097]], dtype=dtype)
+                self.assertEqual(actual.dtype, dtype)
+                self.assertTensorClose(actual, expected)
 
-def plot_results():
-    """Ve ba do thi de quan sat; khong ghi file."""
-    import matplotlib.pyplot as plt
+    def test_12_gradient_through_foot_position(self):
+        """Gia tri ZMP cho phep lan truyen dao ham theo toa do XY."""
+        foot = torch.tensor([[0.1, 0.09, 0.02]], requires_grad=True)
+        side = torch.tensor([0])
+        self.generator.zmp_point(foot, side).sum().backward()
+        expected_grad = torch.tensor([[1.0, 1.0, 0.0]])
+        self.assertTensorClose(foot.grad, expected_grad)
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
+    def test_13_reference_formula_random_batch(self):
+        """Doi chieu 100 mau voi cong thuc zmp = foot_xy + [dx, +/-dy]."""
+        g = torch.Generator().manual_seed(2026)
+        foot = torch.randn(100, 3, generator=g)
+        side = torch.randint(0, 2, (100,), generator=g)
+        expected = torch.stack([
+            foot[:, 0] + 0.005,
+            foot[:, 1] + torch.where(side == 0, 0.007, -0.007),
+        ], dim=-1)
+        self.assertTensorClose(self.generator.zmp_point(foot, side), expected)
 
-    # (1) Do thi noi suy va clamp o ngoai [0, 1].
-    s = torch.linspace(-0.2, 1.2, 500, dtype=torch.float64)
-    y = ZMPGenerator.smoothstep(s)
-    axes[0].plot(s.numpy(), y.numpy(), linewidth=2, label="Smoothstep")
-    axes[0].plot([0, 1], [0, 1], "--", label="Linear interpolation")
-    axes[0].axvline(0, linestyle=":", alpha=0.7)
-    axes[0].axvline(1, linestyle=":", alpha=0.7)
-    axes[0].set_title("1. Smoothstep & clamp")
-    axes[0].set_xlabel("s - normalized time")
-    axes[0].set_ylabel("sigma(s)")
-    axes[0].grid(alpha=0.3)
-    axes[0].legend()
-
-    # (2) Dao ham: sigma'(s) = 6s - 6s^2; tai hai dau bang 0.
-    s2 = torch.linspace(0, 1, 500, dtype=torch.float64)
-    slope = 6 * s2 * (1 - s2)
-    axes[1].plot(s2.numpy(), slope.numpy(), linewidth=2, label="d sigma / ds")
-    axes[1].scatter([0, 1], [0, 0], zorder=3, label="Zero slope endpoints")
-    axes[1].set_title("2. Derivative of smoothstep")
-    axes[1].set_xlabel("s - normalized time")
-    axes[1].set_ylabel("d sigma / ds")
-    axes[1].grid(alpha=0.3)
-    axes[1].legend()
-
-    # (3) Cung cong thuc, nhung so mau khac nhau vi T_shift != T_DSP.
-    dt = 0.02
-    for label, duration in (("Shift (0.4 s)", 0.4), ("DSP (0.04 s)", 0.04)):
-        num_intervals = round(duration / dt)
-        time = torch.arange(num_intervals + 1, dtype=torch.float64) * dt
-        phase = time / duration
-        y_phase = ZMPGenerator.smoothstep(phase)
-        axes[2].plot(phase.numpy(), y_phase.numpy(), "o-", label=f"{label}: {len(time)} samples")
-    axes[2].set_title("3. MPC sampling, dt = 0.02 s")
-    axes[2].set_xlabel("t / T_phase")
-    axes[2].set_ylabel("sigma(t / T_phase)")
-    axes[2].grid(alpha=0.3)
-    axes[2].legend()
-
-    fig.suptitle("Test ZMPGenerator.smoothstep()", fontsize=13)
-    fig.tight_layout()
-    # Chi hien thi trong cua so Matplotlib; KHONG goi savefig/to_csv.
-    plt.show()
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA khong kha dung")
+    def test_14_cuda(self):
+        """Kiem tra batch tren GPU khi may co CUDA."""
+        foot = torch.tensor([[0.10, 0.09, 0.0], [0.10, -0.09, 0.0]], device="cuda")
+        side = torch.tensor([0, 1], device="cuda")
+        expected = torch.tensor([[0.105, 0.097], [0.105, -0.097]], device="cuda")
+        self.assertTensorClose(self.generator.zmp_point(foot, side), expected)
 
 
 if __name__ == "__main__":
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestSmoothstep)
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if not result.wasSuccessful():
-        raise SystemExit(1)
-    print("\nTests PASS. Mo cua so do thi Matplotlib...", flush=True)
-    plot_results()
+    unittest.main(verbosity=2)

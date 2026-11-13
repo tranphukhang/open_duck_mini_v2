@@ -26,3 +26,24 @@ class ZMPGenerator:
         zmp = foot[..., :2] + torch.stack([torch.full_like(sign, self.zmp_offset_x), sign * self.zmp_offset_y_out], dim=-1)
 
         return zmp
+
+    # Tạo ZMP tham chiếu trong giai đoạn Shift ban đầu
+    def zmp_shift(self, feet0, local_future, shift_duration):
+        # Chỉ số chân trái và chân phải
+        left = torch.zeros(feet0.shape[0], dtype=torch.long, device=feet0.device)
+        right = torch.ones_like(left)
+
+        # ZMP tham chiếu tại hai chân ban đầu
+        zmp_left = self.zmp_point(feet0[:, 0], left)
+        zmp_right = self.zmp_point(feet0[:, 1], right)
+
+        # Trung điểm ZMP của hai chân
+        zmp_mid = 0.5 * (zmp_left + zmp_right)
+
+        # Hệ số nội suy theo thời gian Shift
+        s = self.smoothstep(local_future / shift_duration)[..., None]
+
+        # Nội suy ZMP từ trung điểm sang chân trái
+        zmp_shift = ((1.0 - s) * zmp_mid[:, None, :]+ s * zmp_left[:, None, :])
+
+        return zmp_shift
