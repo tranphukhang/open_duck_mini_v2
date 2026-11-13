@@ -47,3 +47,34 @@ class ZMPGenerator:
         zmp_shift = ((1.0 - s) * zmp_mid[:, None, :]+ s * zmp_left[:, None, :])
 
         return zmp_shift
+
+    # Tạo ZMP tham chiếu trong giai đoạn Double Support và Single Support
+    def zmp_walk(self, footsteps, j_base, j_future, local_future, ds_duration):
+        b = torch.arange(footsteps.shape[0], device=footsteps.device)[:, None]
+
+        # Chỉ số bước tương đối so với bước cơ sở
+        i = (j_future - j_base[:, None]).clamp(0, footsteps.shape[1] - 3)
+
+        # Xác định chân stance tại từng thời điểm dự đoán
+        stance = torch.remainder(j_future.clamp_min(0), 2)
+
+        # ZMP của chân stance hiện tại
+        zmp_stance = self.zmp_point(footsteps[b, i + 1], stance)
+
+        # ZMP của chân stance trước đó
+        zmp_old = self.zmp_point(footsteps[b, i], 1 - stance)
+
+        # Hệ số nội suy trong giai đoạn Double Support
+        s = self.smoothstep(local_future / ds_duration)
+
+        # Bước đầu tiên j = 0 không thực hiện nội suy DS
+        s = torch.where(j_future > 0, s, torch.ones_like(s))
+
+        # Nội suy ZMP giữa chân stance trước và chân stance hiện tại
+        zmp_ds = ((1.0 - s[..., None]) * zmp_old + s[..., None] * zmp_stance)
+
+        # DS: sử dụng ZMP nội suy
+        # SS: giữ ZMP tại chân stance hiện tại
+        zmp_walk = torch.where((local_future < ds_duration)[..., None], zmp_ds, zmp_stance)
+
+        return zmp_walk
