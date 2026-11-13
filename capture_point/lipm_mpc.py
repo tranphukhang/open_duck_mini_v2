@@ -96,3 +96,38 @@ class LIPMMPC:
         # Ma trận dự đoán vận tốc CoM
         self.V_x = Phi[:, 1, :].clone()
         self.V_u = Gamma[:, 1, :].clone()
+
+
+    # Tính trước các ma trận gain tối ưu của MPC
+    def precompute_gains(self):
+        # Ma trận dự đoán ZMP và vận tốc
+        # Sử dụng float64 để tăng độ chính xác khi giải hệ
+        Z_u = self.Z_u.to(torch.float64)
+        V_u = self.V_u.to(torch.float64)
+
+        # Các trọng số hàm chi phí
+        q_zmp = self.q_zmp
+        q_vel = self.q_vel
+        r_jerk = self.r_jerk
+
+        # Số bước dự đoán
+        N = self.horizon
+
+        # Ma trận Hessian
+        H = (
+            q_zmp * (Z_u.T @ Z_u)
+            + q_vel * (V_u.T @ V_u)
+            + r_jerk * torch.eye(N, dtype=Z_u.dtype, device=self.device)
+        )
+
+        # Tính gain bằng cách giải hệ phương trình tuyến tính
+        K_z = torch.linalg.solve(H, q_zmp * Z_u.T)
+        K_v = torch.linalg.solve(H, q_vel * V_u.T)
+
+        # Chuyển về float32 để sử dụng khi MPC hoạt động
+        self.K_z = K_z.to(torch.float32)
+        self.K_v = K_v.to(torch.float32)
+
+        # Lấy hàng đầu tiên để tính jerk tại chu kỳ hiện tại
+        self.K_z0 = self.K_z[0, :].clone()
+        self.K_v0 = self.K_v[0, :].clone()
