@@ -1,12 +1,15 @@
 import torch
 
 class ZMPGenerator:
-    def __init__(self, zmp_offset_x=0.005, zmp_offset_y_out=0.007):
+    def __init__(self, zmp_offset_x=0.005, zmp_offset_y_out=0.007, horizon=80):
         # Độ lệch ZMP tham chiếu so với feet site theo phương x
         self.zmp_offset_x = zmp_offset_x
 
         # Độ lệch ZMP về phía mép ngoài bàn chân so với feet site theo phương y
         self.zmp_offset_y_out = zmp_offset_y_out
+
+        # Số mẫu dự đoán MPC
+        self.horizon = horizon
 
     # Hàm nội suy trơn ZMP trong giai đoạn Shift và DS
     @staticmethod
@@ -91,3 +94,28 @@ class ZMPGenerator:
         zmp_ref = torch.where((j_future < 0)[..., None], zmp_shift, zmp_walk)
 
         return zmp_ref
+
+    # Tạo chuỗi ZMP tham chiếu trong horizon MPC
+    def generate(self, footsteps, feet0, j_base, scheduler):
+        # Thời gian hiện tại
+        t = scheduler.t
+
+        # Tạo N thời điểm dự đoán trong tương lai
+        k = torch.arange(1, self.horizon + 1, device=t.device, dtype=t.dtype)
+        t_future = t[:, None] + scheduler.dt * k[None, :]
+
+        # Xác định chỉ số bước tại từng thời điểm dự đoán
+        j_future = scheduler.step_index(t_future)
+
+        # Xác định thời gian cục bộ tại từng thời điểm dự đoán
+        local_future = scheduler.local_time_phase(t_future, j_future)
+
+        # Lấy thời gian Shift và Double Support
+        shift_duration = scheduler.shift
+        ds_duration = (scheduler.double_support * scheduler.period_phase)
+
+        # Tạo chuỗi ZMP tham chiếu
+        zmp_ref = self.zmp_reference(footsteps, feet0, j_base, j_future, local_future, shift_duration, ds_duration)
+
+        return zmp_ref
+
