@@ -131,3 +131,26 @@ class LIPMMPC:
         # Lấy hàng đầu tiên để tính jerk tại chu kỳ hiện tại
         self.K_z0 = self.K_z[0, :].clone()
         self.K_v0 = self.K_v[0, :].clone()
+
+
+    # Tính chuỗi jerk tối ưu và trạng thái CoM dự đoán
+    def solve(self, x0, zref, vref):
+        # x0:   (B, 3) - Trạng thái CoM ban đầu
+        # zref: (B, N) - Chuỗi ZMP tham chiếu
+        # vref: (B, N) - Chuỗi vận tốc tham chiếu
+
+        # Đáp ứng tự do khi chưa áp dụng jerk
+        z_free = x0 @ self.Z_x.T
+        v_free = x0 @ self.V_x.T
+
+        # Sai lệch so với quỹ đạo tham chiếu
+        e_z = zref - z_free
+        e_v = vref - v_free
+
+        # Tính toàn bộ chuỗi jerk tối ưu
+        U = e_z @ self.K_z.T + e_v @ self.K_v.T
+
+        # Dự đoán toàn bộ trạng thái CoM trong horizon
+        X = (torch.einsum("kij,bj->bki", self.Phi, x0) + torch.einsum("kin,bn->bki", self.Gamma, U))
+
+        return U, X
