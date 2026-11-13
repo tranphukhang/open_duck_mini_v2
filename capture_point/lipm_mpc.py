@@ -154,3 +154,36 @@ class LIPMMPC:
         X = (torch.einsum("kij,bj->bki", self.Phi, x0) + torch.einsum("kin,bn->bki", self.Gamma, U))
 
         return U, X
+
+
+    # Tính jerk tối ưu đầu tiên và cập nhật trạng thái CoM
+    def step(self, com_state, zmp_ref, vel_ref):
+        # com_state: (B, 2, 3) - Trạng thái CoM hai trục X/Y
+        # zmp_ref:   (B, N, 2) - Chuỗi ZMP tham chiếu
+        # vel_ref:   (B, N, 2) - Chuỗi vận tốc tham chiếu
+
+        # Chuyển tham chiếu về dạng (B, 2, N)
+        zref = zmp_ref.transpose(1, 2)
+        vref = vel_ref.transpose(1, 2)
+
+        # Đáp ứng tự do của ZMP và vận tốc CoM
+        z_free = com_state @ self.Z_x.T
+        v_free = com_state @ self.V_x.T
+
+        # Sai lệch so với tham chiếu
+        e_z = zref - z_free
+        e_v = vref - v_free
+
+        # Tính jerk tối ưu đầu tiên cho hai trục X/Y
+        u0 = (
+            (e_z * self.K_z0).sum(dim=-1)
+            + (e_v * self.K_v0).sum(dim=-1)
+        )
+
+        # Cập nhật trạng thái CoM sau một chu kỳ điều khiển
+        com_state_next = (
+            com_state @ self.A.T
+            + u0.unsqueeze(-1) * self.B
+        )
+
+        return com_state_next
