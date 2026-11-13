@@ -79,3 +79,20 @@ class LIPMMPC:
             for j in range(i + 1):
                 self.Gamma[i, :, j] = powers[i - j] @ B
 
+
+    # Xây dựng các ma trận dự đoán ZMP và vận tốc CoM
+    def build_output_prediction(self):
+        # Ma trận đầu ra ZMP
+        C = self.C
+
+        # Ma trận dự đoán trạng thái CoM
+        Phi = self.Phi
+        Gamma = self.Gamma
+
+        # Ma trận dự đoán ZMP
+        self.Z_x = torch.einsum("i,kij->kj", C, Phi)
+        self.Z_u = torch.einsum("i,kij->kj", C, Gamma)
+
+        # Ma trận dự đoán vận tốc CoM
+        self.V_x = Phi[:, 1, :].clone()
+        self.V_u = Gamma[:, 1, :].clone()
