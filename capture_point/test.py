@@ -1,150 +1,268 @@
-"""Kiểm thử zmp_shift() và hiển thị quỹ đạo ZMP, không lưu dữ liệu/ảnh.
+"""Kiem thu ham ZMPGenerator.zmp_walk() va hien thi ZMP reference.
 
-Chạy tại thư mục capture_point:
-    python test_zmp_generator_shift.py
+Dat file nay cung thu muc voi:
+    zmp_generator.py
+    contact_scheduler.py
+    footstep_planner.py
 
-Yêu cầu: torch, numpy, matplotlib.
+Chay:
+    python test_zmp_generator_walk.py
+
+Khong ghi CSV, khong luu anh. Chi in PASS/FAIL va mo do thi Matplotlib.
 """
-
-from pathlib import Path
-import sys
 
 import torch
 import matplotlib.pyplot as plt
 
-# Cho phép chạy file từ bất kỳ working directory nào.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from zmp_generator import ZMPGenerator
+from contact_scheduler import ContactScheduler
+from footstep_planner import FootstepPlanner
+
 
 DT = 0.02
-SHIFT_DURATION = 0.4
-TOL = 1e-6
+PERIOD = 0.4
+SHIFT = 0.4
+DS_RATIO = 0.1
+DS_DURATION = PERIOD * DS_RATIO  # 0.04 s
+HORIZON = 80
 
 
-def make_feet(dtype=torch.float32):
-    """Hai môi trường có vị trí đặt chân khác nhau, đơn vị mét.
+def make_footsteps(j_base=0, num_envs=1):
+    """Tao du lieu chan mau theo thu tu p_-1, p0, ..., p12 (B,14,3).
 
-    Môi trường 1: hai chân đối xứng theo Y, cùng tọa độ X.
-    Môi trường 2: hai chân lệch nhau cả X và Y.
-    Trục 1: [chân trái, chân phải].
+    p0 la chan tru cua j_base; moi lan doi chan, x tang 0.04 m.
     """
-    return torch.tensor(
-        [
-            [[0.00, 0.09, 0.00], [0.00, -0.09, 0.00]],
-            [[0.04, 0.08, 0.00], [-0.02, -0.10, 0.00]],
-        ],
-        dtype=dtype,
-    )
+    pts = torch.zeros(num_envs, 14, 3, dtype=torch.float32)
+    for k in range(14):
+        relative_step = k - 1  # chi so 0 trong mang la p_-1
+        step_index = j_base + relative_step
+        pts[:, k, 0] = 0.04 * max(relative_step, 0)
+        pts[:, k, 1] = 0.09 if step_index % 2 == 0 else -0.09
+    return pts
 
 
-def reference_points(generator, feet0):
-    n = feet0.shape[0]
-    left = torch.zeros(n, dtype=torch.long, device=feet0.device)
-    right = torch.ones(n, dtype=torch.long, device=feet0.device)
-    z_left = generator.zmp_point(feet0[:, 0], left)
-    z_right = generator.zmp_point(feet0[:, 1], right)
-    return (z_left + z_right) / 2.0, z_left, z_right
+def check_close(actual, expected, name, atol=2e-6):
+    expected = torch.as_tensor(expected, dtype=actual.dtype, device=actual.device)
+    torch.testing.assert_close(actual, expected, atol=atol, rtol=0, msg=name)
 
 
-def check(label, condition, detail=None):
-    if not condition:
-        raise AssertionError(f"{label} FAILED" + (f": {detail}" if detail else ""))
-    print(f"[PASS] {label}")
+def test_j0_no_double_support():
+    """Tai j=0, ZMP nam o chan trai ngay ca khi local < T_DS."""
+    gen = ZMPGenerator()
+    pts = make_footsteps(j_base=0)
+    j = torch.zeros(1, 5, dtype=torch.long)
+    local = torch.tensor([[0.0, 0.01, 0.02, 0.03, 0.08]])
+    out = gen.zmp_walk(pts, torch.tensor([0]), j, local, DS_DURATION)
+    assert out.shape == (1, 5, 2)
+    expected = torch.tensor([[0.005, 0.097]]).expand(5, 2)
+    check_close(out[0], expected, "Buoc j=0 phai giu ZMP tai chan trai")
 
 
-def run_tests():
-    generator = ZMPGenerator()  # Offset mặc định theo tác giả
-    feet0 = make_feet()
-    times = torch.arange(21, dtype=torch.float32) * DT  # 0, 0.02, ..., 0.40
-    local_future = times.unsqueeze(0).expand(feet0.shape[0], -1).clone()
-
-    feet_before = feet0.clone()
-    times_before = local_future.clone()
-    zmp = generator.zmp_shift(feet0, local_future, SHIFT_DURATION)
-    z_mid, z_left, z_right = reference_points(generator, feet0)
-
-    check("1. Kích thước (B, N, 2) và dtype", zmp.shape == (2, 21, 2) and zmp.dtype == feet0.dtype)
-    check("2. Tại t=0: ZMP ở trung điểm", torch.allclose(zmp[:, 0], z_mid, atol=TOL))
-    check("3. Tại t=T/2: ZMP ở giữa trung điểm và chân trái",
-          torch.allclose(zmp[:, 10], (z_mid + z_left) / 2, atol=TOL))
-    check("4. Tại t=T: ZMP tới chân trái", torch.allclose(zmp[:, -1], z_left, atol=TOL))
-
-    s = (local_future / SHIFT_DURATION).clamp(0, 1)
-    sigma = 3 * s**2 - 2 * s**3
-    manual = (1 - sigma[..., None]) * z_mid[:, None, :] + sigma[..., None] * z_left[:, None, :]
-    check("5. Cả quỹ đạo khớp công thức smoothstep", torch.allclose(zmp, manual, atol=TOL))
-
-    extra_times = torch.tensor([[-0.10, 0.00, 0.40, 0.50]]).expand(feet0.shape[0], -1)
-    z_extra = generator.zmp_shift(feet0, extra_times, SHIFT_DURATION)
-    check("6. Clamp ngoài khoảng Shift",
-          torch.allclose(z_extra[:, 0], z_mid, atol=TOL)
-          and torch.allclose(z_extra[:, -1], z_left, atol=TOL))
-
-    custom_generator = ZMPGenerator(zmp_offset_x=0.012, zmp_offset_y_out=0.004)
-    z_custom = custom_generator.zmp_shift(feet0, local_future, SHIFT_DURATION)
-    custom_mid, custom_left, _ = reference_points(custom_generator, feet0)
-    check("7. Thay đổi hai offset ZMP",
-          torch.allclose(z_custom[:, 0], custom_mid, atol=TOL)
-          and torch.allclose(z_custom[:, -1], custom_left, atol=TOL))
-
-    check("8. Không sửa tensor đầu vào",
-          torch.equal(feet0, feet_before) and torch.equal(local_future, times_before))
-
-    horizon_time = torch.arange(1, 81, dtype=torch.float32)[None, :] * DT
-    z_horizon = generator.zmp_shift(feet0[:1], horizon_time, SHIFT_DURATION)
-    check("9. Chấp nhận horizon N=80", z_horizon.shape == (1, 80, 2)
-          and torch.allclose(z_horizon[0, -1], z_left[0], atol=TOL))
-
-    # Tính liên tục, đơn điệu của phép nội suy tại các mẫu theo thời gian.
-    delta = (zmp - z_mid[:, None, :])
-    move_vec = z_left - z_mid
-    progress = (delta * move_vec[:, None, :]).sum(-1) / move_vec.square().sum(-1)[:, None]
-    check("10. Nội suy tiến một chiều từ trung điểm đến chân trái",
-          torch.all(torch.diff(progress, dim=1) >= -TOL).item()
-          and torch.allclose(progress[:, 0], torch.zeros(2), atol=TOL)
-          and torch.allclose(progress[:, -1], torch.ones(2), atol=TOL))
-
-    # Kiểm tra đạo hàm bằng autograd: vận tốc ZMP về 0 tại đầu và cuối Shift.
-    time_grad = torch.tensor([[0.0, SHIFT_DURATION]], dtype=torch.float64, requires_grad=True)
-    z_grad = generator.zmp_shift(feet0[:1].to(torch.float64), time_grad, SHIFT_DURATION)
-    derivatives = torch.autograd.grad(z_grad[..., 1].sum(), time_grad)[0]
-    check("11. Đạo hàm đầu và cuối Shift xấp xỉ 0",
-          torch.allclose(derivatives, torch.zeros_like(derivatives), atol=1e-9))
-
-    print("\nKẾT QUẢ: 11/11 TEST PASS")
-    return times.numpy(), feet0.numpy(), zmp.detach().numpy(), z_mid.numpy(), z_left.numpy(), z_right.numpy()
+def test_j1_ds_then_ss():
+    """Tai j=1: DS tu trai sang phai; SS giu tai phai."""
+    gen = ZMPGenerator()
+    pts = make_footsteps(j_base=0)
+    j = torch.ones(1, 5, dtype=torch.long)
+    local = torch.tensor([[0.0, 0.01, 0.02, 0.04, 0.12]])
+    out = gen.zmp_walk(pts, torch.tensor([0]), j, local, DS_DURATION)[0]
+    left = torch.tensor([0.005, 0.097])   # p0
+    right = torch.tensor([0.045, -0.097])  # p1
+    check_close(out[0], left, "DS j=1, bat dau o chan trai")
+    s_quarter = 3 * .25**2 - 2 * .25**3
+    check_close(out[1], (1 - s_quarter) * left + s_quarter * right, "DS j=1, 25%")
+    check_close(out[2], 0.5 * (left + right), "DS j=1, giua pha")
+    check_close(out[3], right, "DS j=1 ket thuc")
+    check_close(out[4], right, "SS j=1")
 
 
-def plot_results(times, feet0, zmp, z_mid, z_left, z_right):
-    titles = ["Môi trường 1: hai chân đối xứng", "Môi trường 2: hai chân lệch X/Y"]
+def test_j2_change_foot_direction():
+    """Tai j=2: DS tu chan phai sang chan trai, ke ca dich chuyen X."""
+    gen = ZMPGenerator()
+    pts = make_footsteps(j_base=0)
+    j = torch.full((1, 3), 2, dtype=torch.long)
+    local = torch.tensor([[0.0, 0.02, 0.10]])
+    out = gen.zmp_walk(pts, torch.tensor([0]), j, local, DS_DURATION)[0]
+    old = torch.tensor([0.045, -0.097])
+    new = torch.tensor([0.085, 0.097])
+    check_close(out[0], old, "DS j=2 bat dau o chan phai")
+    check_close(out[1], (old + new) / 2, "DS j=2 giua pha")
+    check_close(out[2], new, "SS j=2 o chan trai")
+
+
+def test_nonzero_j_base():
+    """Khong duoc nham j_future tuyet doi voi vi tri tuong doi trong footsteps."""
+    gen = ZMPGenerator()
+    base = 5  # buoc j=5: chan phai la stance
+    pts = make_footsteps(j_base=base)
+    j = torch.tensor([[5, 6, 6, 7]], dtype=torch.long)
+    local = torch.tensor([[0.10, 0.0, 0.10, 0.10]])
+    out = gen.zmp_walk(pts, torch.tensor([base]), j, local, DS_DURATION)[0]
+    check_close(out[0], [0.005, -0.097], "j_base=5, j=5 phai")
+    check_close(out[1], [0.005, -0.097], "j_base=5, j=6 DS bat dau o phai")
+    check_close(out[2], [0.045, 0.097], "j_base=5, j=6 SS o trai")
+    check_close(out[3], [0.085, -0.097], "j_base=5, j=7 SS o phai")
+
+
+def test_custom_and_zero_offsets():
+    pts = make_footsteps()
+    j = torch.tensor([[0, 1, 2]], dtype=torch.long)
+    local = torch.full((1, 3), .1)
+    base = torch.tensor([0])
+    zero = ZMPGenerator(zmp_offset_x=0.0, zmp_offset_y_out=0.0)
+    out0 = zero.zmp_walk(pts, base, j, local, DS_DURATION)[0]
+    check_close(out0, [[0.0, 0.09], [0.04, -0.09], [0.08, 0.09]], "offset=0")
+    custom = ZMPGenerator(zmp_offset_x=.01, zmp_offset_y_out=.02)
+    out = custom.zmp_walk(pts, base, j, local, DS_DURATION)[0]
+    check_close(out, [[.01, .11], [.05, -.11], [.09, .11]], "offset tuy chinh")
+
+
+def test_multiple_environments():
+    gen = ZMPGenerator()
+    pts = torch.cat([make_footsteps(0), make_footsteps(3)], dim=0)
+    j_base = torch.tensor([0, 3])
+    j = torch.tensor([[0, 1, 2], [3, 4, 5]])
+    local = torch.tensor([[.1, .02, .1], [.1, .02, .1]])
+    out = gen.zmp_walk(pts, j_base, j, local, DS_DURATION)
+    assert out.shape == (2, 3, 2)
+    check_close(out[0, 0], [.005, .097], "env0")
+    check_close(out[1, 0], [.005, -.097], "env1")
+    check_close(out[1, 1], [.025, 0.0], "env1 j=4 DS giua pha")
+
+
+def test_no_input_mutation():
+    gen = ZMPGenerator()
+    pts = make_footsteps()
+    jb = torch.tensor([0])
+    jf = torch.tensor([[0, 1, 2]])
+    local = torch.tensor([[.1, .02, .1]])
+    originals = [x.clone() for x in (pts, jb, jf, local)]
+    _ = gen.zmp_walk(pts, jb, jf, local, DS_DURATION)
+    for name, now, old in zip(("footsteps", "j_base", "j_future", "local_future"),
+                              (pts, jb, jf, local), originals):
+        assert torch.equal(now, old), f"Ham da thay doi input {name}"
+
+
+def build_horizon_example():
+    """Dung scheduler + footstep planner that de lap horizon cho zmp_walk()."""
+    scheduler = ContactScheduler(dt=DT, period_phase=PERIOD,
+                                 shift=SHIFT, double_support=DS_RATIO)
+    planner = FootstepPlanner(num_envs=1, period_phase=PERIOD, num_footsteps=14)
+    generator = ZMPGenerator()
+
+    feet0 = torch.tensor([[[0.0, 0.09, 0.0],
+                           [0.0, -0.09, 0.0]]], dtype=torch.float32)
+    planner.reset(torch.tensor([0]), feet0)
+    cmd = torch.tensor([[0.20, 0.0]], dtype=torch.float32)
+
+    # Khong co CP correction, khong reanchor trong bai test ZMP WALK.
+    t_now = torch.tensor([SHIFT], dtype=torch.float32)
+    j_now = scheduler.step_index(t_now)
+    assert j_now.item() == 0
+    stance = scheduler.stance_feet(j_now)
+    new_step = scheduler.new_step_event(j_now, torch.tensor([-1], dtype=torch.long))
+    planner.update_new_step(j_now, new_step, stance, cmd)
+    footsteps, j_base = planner.footstep_sequence(j_now, cmd)
+
+    # MPC du doan tu t+dt den t+N*dt, khong bao gom t hien tai.
+    times = t_now[:, None] + DT * torch.arange(1, HORIZON + 1)[None, :]
+    j_future = scheduler.step_index(times)
+    local_future = scheduler.local_time_phase(times, j_future)
+    zmp = generator.zmp_walk(footsteps, j_base, j_future, local_future, DS_DURATION)
+    assert zmp.shape == (1, HORIZON, 2)
+    assert torch.isfinite(zmp).all()
+    assert j_future.max().item() == 8
+
+    # Gia tri du kien tai 3 mau DS cua buoc j=1: t = 0.60, 0.62, 0.64.
+    for t_check, expected in [(0.60, [0.005, 0.097]),
+                              (0.62, [0.025, 0.0]),
+                              (0.64, [0.045, -0.097])]:
+        ix = torch.argmin((times[0] - t_check).abs()).item()
+        assert abs(times[0, ix].item() - t_check) < 1e-5
+        check_close(zmp[0, ix], expected, f"Horizon t={t_check}", atol=1e-5)
+
+    return times[0].numpy(), zmp[0].numpy(), j_future[0].numpy(), footsteps[0].numpy()
+
+
+def test_real_scheduler_and_planner():
+    build_horizon_example()
+
+
+def test_horizon_end_clamping():
+    """Gioi han chi so ngan vuot mang, khong co nghia du doan du buoc."""
+    gen = ZMPGenerator()
+    pts = make_footsteps()
+    j = torch.tensor([[11, 12, 14, 20]], dtype=torch.long)
+    local = torch.full((1, 4), .1)
+    out = gen.zmp_walk(pts, torch.tensor([0]), j, local, DS_DURATION)
+    assert out.shape == (1, 4, 2) and torch.isfinite(out).all()
+
+
+def plot_walk_reference():
+    times, zmp, j, footsteps = build_horizon_example()
     fig, axes = plt.subplots(2, 2, figsize=(13, 8), constrained_layout=True)
-    for b in range(2):
-        ax_time = axes[b, 0]
-        ax_xy = axes[b, 1]
+    ax_x, ax_y, ax_xy, ax_zoom = axes.flat
 
-        ax_time.plot(times, zmp[b, :, 0], "-o", markersize=3, label="ZMP X")
-        ax_time.plot(times, zmp[b, :, 1], "-o", markersize=3, label="ZMP Y")
-        ax_time.axvline(SHIFT_DURATION, linestyle="--", linewidth=1, label="Kết thúc Shift")
-        ax_time.set(title=f"{titles[b]} — ZMP theo thời gian", xlabel="Thời gian (s)", ylabel="ZMP (m)")
-        ax_time.grid(True, alpha=0.3)
-        ax_time.legend()
+    ax_x.plot(times, zmp[:, 0], color="tab:blue", linewidth=2, label="ZMP X")
+    ax_y.plot(times, zmp[:, 1], color="tab:orange", linewidth=2, label="ZMP Y")
+    for ax in (ax_x, ax_y):
+        ax.set_xlabel("Thoi gian (s)")
+        ax.set_ylabel("ZMP (m)")
+        ax.grid(True, alpha=.3)
+        ax.legend()
+        for k in range(1, 9):
+            start = SHIFT + k * (PERIOD / 2)
+            end = start + DS_DURATION
+            if start <= times[-1]:
+                ax.axvspan(start, min(end, times[-1]), color="gray", alpha=.13)
+    ax_x.set_title("ZMP X theo thoi gian | v_x = 0.20 m/s")
+    ax_y.set_title("ZMP Y theo thoi gian | DS to mau xam")
 
-        ax_xy.plot(zmp[b, :, 0], zmp[b, :, 1], "-o", markersize=4, label="Quỹ đạo ZMP")
-        ax_xy.scatter(*z_mid[b], marker="s", s=70, label="Trung điểm ban đầu", zorder=3)
-        ax_xy.scatter(*z_left[b], marker="^", s=90, label="ZMP chân trái", zorder=3)
-        ax_xy.scatter(*z_right[b], marker="v", s=90, label="ZMP chân phải", zorder=3)
-        ax_xy.scatter(*feet0[b, 0, :2], marker="x", s=80, label="Foot site trái", zorder=3)
-        ax_xy.scatter(*feet0[b, 1, :2], marker="x", s=80, label="Foot site phải", zorder=3)
-        ax_xy.set(title=f"{titles[b]} — quỹ đạo X–Y", xlabel="X (m)", ylabel="Y (m)")
-        ax_xy.axis("equal")
-        ax_xy.grid(True, alpha=0.3)
-        ax_xy.legend(fontsize=8, loc="best")
+    ax_xy.plot(zmp[:, 0], zmp[:, 1], ".-", markersize=3, linewidth=1.6,
+               color="tab:green", label="Quy dao ZMP tham chieu")
+    ax_xy.scatter(footsteps[1::2, 0] + .005, footsteps[1::2, 1] + .007,
+                  c="tab:blue", marker="x", s=45, label="ZMP stance trai")
+    ax_xy.scatter(footsteps[2::2, 0] + .005, footsteps[2::2, 1] - .007,
+                  c="tab:orange", marker="x", s=45, label="ZMP stance phai")
+    ax_xy.set_xlabel("X (m)")
+    ax_xy.set_ylabel("Y (m)")
+    ax_xy.set_title("Quy dao ZMP tren mat phang X-Y")
+    ax_xy.axis("equal")
+    ax_xy.grid(True, alpha=.3)
+    ax_xy.legend(fontsize=8)
 
-    fig.suptitle("Kiểm thử ZMPGenerator.zmp_shift() — Shift 0.4 s, dt = 0.02 s", fontsize=13)
-    # Chỉ hiển thị trên màn hình; KHÔNG lưu CSV hay ảnh.
-    plt.show()
+    mask = (times >= .58 - 1e-5) & (times <= .68 + 1e-5)
+    ax_zoom.plot(times[mask], zmp[mask, 0], "o-", label="ZMP X")
+    ax_zoom.plot(times[mask], zmp[mask, 1], "s-", label="ZMP Y")
+    ax_zoom.axvspan(.60, .64, color="gray", alpha=.16, label="DS j=1")
+    ax_zoom.set_xlabel("Thoi gian (s)")
+    ax_zoom.set_ylabel("ZMP (m)")
+    ax_zoom.set_title("Phong to chuyen ZMP: trai → phai (j=1)")
+    ax_zoom.grid(True, alpha=.3)
+    ax_zoom.legend(fontsize=8)
+
+    fig.suptitle("TEST ZMPGenerator.zmp_walk() | N=80, dt=0.02 s, T_DS=0.04 s", fontsize=13)
+    plt.show()  # Chi hien thi, KHONG luu file
+
+
+def main():
+    tests = [
+        test_j0_no_double_support,
+        test_j1_ds_then_ss,
+        test_j2_change_foot_direction,
+        test_nonzero_j_base,
+        test_custom_and_zero_offsets,
+        test_multiple_environments,
+        test_no_input_mutation,
+        test_real_scheduler_and_planner,
+        test_horizon_end_clamping,
+    ]
+    for test in tests:
+        test()
+        print(f"[PASS] {test.__name__}")
+    print(f"\n{len(tests)}/{len(tests)} TESTS PASS")
+    print("Dang mo do thi ZMP theo thoi gian va trong mat phang X-Y...")
+    plot_walk_reference()
 
 
 if __name__ == "__main__":
-    values = run_tests()
-    plot_results(*values)
+    main()

@@ -78,3 +78,16 @@ class ZMPGenerator:
         zmp_walk = torch.where((local_future < ds_duration)[..., None], zmp_ds, zmp_stance)
 
         return zmp_walk
+
+    # Kết hợp chuỗi ZMP tham chiếu giữa Shift và Walking
+    def zmp_reference(self, footsteps, feet0, j_base, j_future, local_future, shift_duration, ds_duration):
+        # ZMP tham chiếu trong giai đoạn Shift ban đầu
+        zmp_shift = self.zmp_shift(feet0, local_future, shift_duration)
+
+        # ZMP tham chiếu trong giai đoạn Walking (DS và SS)
+        zmp_walk = self.zmp_walk(footsteps, j_base, j_future, local_future, ds_duration)
+
+        # Chọn ZMP tham chiếu theo chỉ số bước
+        zmp_ref = torch.where((j_future < 0)[..., None], zmp_shift, zmp_walk)
+
+        return zmp_ref
