@@ -51,3 +51,31 @@ class LIPMMPC:
             -h / g
         ], dtype=torch.float32, device=self.device)
 
+
+    # Xây dựng các ma trận dự đoán trạng thái CoM trong horizon MPC
+    def build_state_prediction(self):
+        # Số bước dự đoán
+        N = self.horizon
+
+        # Ma trận trạng thái và vector đầu vào
+        A = self.A
+        B = self.B
+
+        # Tính trước các lũy thừa A^0, A^1, ..., A^N
+        powers = [torch.eye(3, dtype=A.dtype, device=self.device)]
+
+        for _ in range(N):
+            powers.append(A @ powers[-1])
+
+        # Ma trận dự đoán từ trạng thái ban đầu
+        # Phi[i] = A^(i+1)
+        self.Phi = torch.stack(powers[1:], dim=0)
+
+        # Ma trận dự đoán từ chuỗi jerk
+        self.Gamma = torch.zeros(N, 3, N, dtype=A.dtype, device=self.device)
+
+        # Gamma[i, :, j] = A^(i-j) @ B khi j <= i
+        for i in range(N):
+            for j in range(i + 1):
+                self.Gamma[i, :, j] = powers[i - j] @ B
+
