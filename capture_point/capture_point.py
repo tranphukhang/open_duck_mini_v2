@@ -45,3 +45,19 @@ class CapturePoint:
 
         return dcm_meas, dcm_plan, dcm_error
 
+
+    # Tính độ hiệu chỉnh vị trí đặt chân từ sai số DCM
+    def compute_correction(self, dcm_error):
+        # dcm_error: (B, 2) - Sai số DCM theo hai trục X/Y
+
+        # Tính độ hiệu chỉnh dựa trên gain Capture Point
+        correction_raw = self.step_gain * dcm_error
+
+        # Giới hạn độ hiệu chỉnh theo từng trục X/Y
+        correction = torch.clamp(correction_raw, min=-self.step_limit, max=self.step_limit)
+
+        return correction
+
+    
+
+
