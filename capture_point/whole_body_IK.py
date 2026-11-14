@@ -319,3 +319,58 @@ class WholeBodyIK:
         return delta_qg
 
 
+    def update_configuration(self, base_pos, base_rot, q, delta_qg):
+        """
+        Cập nhật cấu hình robot từ gia số WDLS.
+
+        Args:
+            base_pos: (B, 3)
+                Vị trí base hiện tại trong hệ {P}.
+
+            base_rot: (B, 3, 3)
+                Hướng base hiện tại trong hệ {P}.
+
+            q: (B, 10)
+                Góc 10 khớp hiện tại, đơn vị rad.
+
+            delta_qg: (B, 16)
+                Gia số cấu hình từ solve_dls().
+
+        Returns:
+            base_pos_new: (B, 3)
+                Vị trí base sau cập nhật.
+
+            base_rot_new: (B, 3, 3)
+                Hướng base sau cập nhật.
+
+            q_new: (B, 10)
+                Góc khớp sau cập nhật và giới hạn.
+        """
+
+        # --------------------------------------------------
+        # 1. Tách gia số cấu hình
+        # --------------------------------------------------
+        delta_base_pos = delta_qg[:, 0:3]
+        delta_base_rot = delta_qg[:, 3:6]
+        delta_q = delta_qg[:, 6:16]
+
+        # --------------------------------------------------
+        # 2. Cập nhật vị trí base
+        # --------------------------------------------------
+        base_pos_new = base_pos + delta_base_pos
+
+        # --------------------------------------------------
+        # 3. Cập nhật hướng base
+        # --------------------------------------------------
+        R_delta = self.rotation_vector_to_matrix(delta_base_rot)
+
+        base_rot_new = R_delta @ base_rot
+
+        # --------------------------------------------------
+        # 4. Cập nhật 10 góc khớp và áp dụng giới hạn
+        # --------------------------------------------------
+        q_new = torch.clamp(q + delta_q, min=self.kin.qmin, max=self.kin.qmax)
+
+        return base_pos_new, base_rot_new, q_new
+
+
