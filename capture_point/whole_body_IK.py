@@ -90,10 +90,12 @@ class WholeBodyIK:
         return e_rot
 
 
+    
     @staticmethod
     def rotation_vector_to_matrix(rotvec):
         """
         Chuyển vector quay thành ma trận quay bằng Rodrigues.
+        Xử lý ổn định cả forward và backward tại góc quay bằng 0.
 
         Args:
             rotvec: (..., 3)
@@ -104,25 +106,23 @@ class WholeBodyIK:
                 Ma trận quay tương ứng.
         """
 
-        # 1. Tính bình phương góc quay
+        # 1. Bình phương góc quay
         theta2 = (rotvec * rotvec).sum(dim=-1, keepdim=True)
-        theta = torch.sqrt(theta2)
 
-        # 2. Tính hệ số Rodrigues
-        # Khai triển Taylor khi góc quay rất nhỏ
         small = theta2 < 1e-6
 
-        theta_safe = torch.where(small, torch.ones_like(theta), theta)
-
+        # 2. Tránh đạo hàm không xác định của sqrt tại 0
         theta2_safe = torch.where(small, torch.ones_like(theta2), theta2)
 
-        A = torch.where(small, 1.0 - theta2 / 6.0 + theta2 * theta2 / 120.0, torch.sin(theta) / theta_safe)
+        theta = torch.sqrt(theta2_safe)
+
+        # 3. Hệ số Rodrigues
+        A = torch.where(small, 1.0 - theta2 / 6.0 + theta2 * theta2 / 120.0, torch.sin(theta) / theta)
 
         B = torch.where(small, 0.5 - theta2 / 24.0 + theta2 * theta2 / 720.0, (1.0 - torch.cos(theta)) / theta2_safe)
 
-        # 3. Xây dựng ma trận skew
+        # 4. Ma trận skew
         x, y, z = rotvec.unbind(dim=-1)
-
         zero = torch.zeros_like(x)
 
         K = torch.stack([
@@ -131,12 +131,13 @@ class WholeBodyIK:
             -y,    x,     zero
         ], dim=-1).reshape(*rotvec.shape[:-1], 3, 3)
 
-        # 4. Tính ma trận quay
+        # 5. Công thức Rodrigues
         I = torch.eye(3, dtype=rotvec.dtype, device=rotvec.device)
 
-        R = (I + A[..., None] * K + B[..., None] * (K @ K))
+        R = I + A[..., None] * K + B[..., None] * (K @ K)
 
         return R
+
 
     
     def build_tasks(self, ks, base_pos, base_rot, q, com_des, feet_des, feet_rot_des, q_home):
