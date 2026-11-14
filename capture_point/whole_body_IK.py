@@ -373,4 +373,92 @@ class WholeBodyIK:
 
         return base_pos_new, base_rot_new, q_new
 
+    
+    def solve(self, base_pos, base_rot, q, com_des, feet_des, feet_rot_des, q_home, iterations=None, ks0=None):
+        """
+        Giải Whole-Body IK bằng Weighted Damped Least Squares.
+
+        Args:
+            base_pos: (B, 3)
+                Vị trí base khởi tạo trong hệ {P}.
+
+            base_rot: (B, 3, 3)
+                Hướng base khởi tạo trong hệ {P}.
+
+            q: (B, 10)
+                Góc 10 khớp khởi tạo, đơn vị rad.
+
+            com_des: (B, 3)
+                Vị trí CoM mong muốn.
+
+            feet_des: (B, 2, 3)
+                Vị trí hai bàn chân mong muốn.
+
+            feet_rot_des: (B, 2, 3, 3)
+                Hướng hai bàn chân mong muốn.
+
+            q_home: (B, 10)
+                Cấu hình khớp chuẩn.
+
+            iterations: int hoặc None
+                Số vòng lặp WDLS.
+                Nếu None, dùng self.weights.iterations.
+
+            ks0: KinState hoặc None
+                Kết quả FK đã tính từ cấu hình khởi tạo.
+                Chỉ sử dụng ở vòng lặp đầu tiên.
+
+        Returns:
+            base_pos: (B, 3)
+                Vị trí base sau khi giải IK.
+
+            base_rot: (B, 3, 3)
+                Hướng base sau khi giải IK.
+
+            q: (B, 10)
+                Góc 10 khớp sau khi giải IK.
+
+            ks: KinState
+                Trạng thái động học tại cấu hình cuối cùng.
+        """
+
+        # --------------------------------------------------
+        # 1. Xác định số vòng lặp
+        # --------------------------------------------------
+        if iterations is None:
+            iterations = self.weights.iterations
+
+        if not isinstance(iterations, int) or iterations < 1:
+            raise ValueError("iterations must be a positive integer")
+
+        # --------------------------------------------------
+        # 2. Vòng lặp Weighted Damped Least Squares
+        # --------------------------------------------------
+        for i in range(iterations):
+            # 2.1. Tính trạng thái động học hiện tại
+            if i == 0 and ks0 is not None:
+                ks = ks0
+            else:
+                ks = self.kin.forward_kinematics(base_pos, base_rot, q)
+
+            # 2.2. Xây dựng Jacobian và vector sai số
+            J, e = self.build_tasks(ks, base_pos, base_rot, q, com_des, feet_des, feet_rot_des, q_home)
+
+            # 2.3. Giải WDLS để tìm gia số cấu hình
+            delta_qg = self.solve_dls(J, e)
+
+            # 2.4. Cập nhật cấu hình robot
+            base_pos, base_rot, q = (self.update_configuration(base_pos, base_rot, q, delta_qg))
+
+        # --------------------------------------------------
+        # 3. Tính FK tại cấu hình cuối cùng
+        # --------------------------------------------------
+        ks = self.kin.forward_kinematics(base_pos, base_rot, q)
+
+        # --------------------------------------------------
+        # 4. Trả về nghiệm WholeBodyIK
+        # --------------------------------------------------
+        return base_pos, base_rot, q, ks
+
+
 
