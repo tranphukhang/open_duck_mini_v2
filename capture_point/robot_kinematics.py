@@ -191,3 +191,89 @@ class RobotKinematics:
         joint_order = [j for level in self.levels for j in level["joint"].tolist()]
 
         self.joint_from_level = torch.tensor([joint_order.index(j) for j in range(n_joints)], dtype=torch.long, device=self.device)
+
+    
+    def compute_body_kinematics(self, base_pos, base_rot, q):
+        """
+        Tính động học các khâu và khớp của robot.
+
+        Args:
+            base_pos: (B, 3)       Vị trí base trong {P}
+            base_rot: (B, 3, 3)    Hướng base trong {P}
+            q:        (B, 10)      Góc 10 khớp (rad)
+
+        Returns:
+            body_pos: (B, 11, 3)      Vị trí các khâu
+            body_rot: (B, 11, 3, 3)   Hướng các khâu
+            axis:     (B, 10, 3)      Trục khớp trong {P}
+            anchor:   (B, 10, 3)      Gốc khớp trong {P}
+        """
+
+        # --------------------------------------------------
+        # 1. Khởi tạo trạng thái base
+        # --------------------------------------------------
+        body_pos_levels = [base_pos.unsqueeze(1)]
+        body_rot_levels = [base_rot.unsqueeze(1)]
+
+        axis_levels = []
+        anchor_levels = []
+
+        I = torch.eye(3, dtype=base_rot.dtype, device=base_rot.device)
+
+        # --------------------------------------------------
+        # 2. Tính FK theo từng độ sâu
+        # --------------------------------------------------
+        for level in self.levels:
+
+            # Khâu cha thuộc mức trước
+            parent = level["parent"]
+
+            p_parent = body_pos_levels[-1][:, parent]
+            R_parent = body_rot_levels[-1][:, parent]
+
+            # Góc khớp tại mức đang xét
+            q_level = q[:, level["joint"]]
+
+            # Vị trí gốc khâu
+            p_body = p_parent + (R_parent @ level["pos0"].unsqueeze(-1)).squeeze(-1)
+
+            # Hướng cố định trước phép quay khớp
+            R_fixed = R_parent @ level["rot0"]
+
+            # Ma trận quay khớp theo Rodrigues
+            angle = q_level[..., None, None]
+
+            R_joint = (I + torch.sin(angle) * level["k"] + (1.0 - torch.cos(angle)) * level["k2"])
+
+            # Hướng khâu sau khi quay khớp
+            R_body = R_fixed @ R_joint
+
+            # Trục quay khớp trong hệ {P}
+            axis = (R_fixed @ level["axis"].unsqueeze(-1)).squeeze(-1)
+
+            # Gốc khớp trùng gốc khâu (MJCF v5)
+            anchor = p_body
+
+            # Lưu kết quả của mức hiện tại
+            body_pos_levels.append(p_body)
+            body_rot_levels.append(R_body)
+
+            axis_levels.append(axis)
+            anchor_levels.append(anchor)
+
+        # --------------------------------------------------
+        # 3. Ghép kết quả và khôi phục thứ tự khâu
+        # --------------------------------------------------
+        body_pos = torch.cat(body_pos_levels, dim=1)[:, self.body_from_level]
+
+        body_rot = torch.cat(body_rot_levels, dim=1)[:, self.body_from_level]
+
+        # --------------------------------------------------
+        # 4. Khôi phục thứ tự 10 khớp
+        # --------------------------------------------------
+        axis = torch.cat(axis_levels, dim=1)[:, self.joint_from_level]
+
+        anchor = torch.cat(anchor_levels, dim=1)[:, self.joint_from_level]
+
+        return body_pos, body_rot, axis, anchor
+
