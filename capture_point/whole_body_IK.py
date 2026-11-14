@@ -137,3 +137,122 @@ class WholeBodyIK:
         R = (I + A[..., None] * K + B[..., None] * (K @ K))
 
         return R
+
+    
+    def build_tasks(self, ks, base_pos, base_rot, q, com_des, feet_des, feet_rot_des, q_home):
+        """
+        Xây dựng Jacobian và vector sai số cho WholeBodyIK.
+
+        Args:
+            ks: KinState
+                Trạng thái động học hiện tại.
+
+            base_pos: (B, 3)
+                Vị trí base hiện tại.
+
+            base_rot: (B, 3, 3)
+                Hướng base hiện tại.
+
+            q: (B, 10)
+                Góc khớp hiện tại.
+
+            com_des: (B, 3)
+                Vị trí CoM mong muốn.
+
+            feet_des: (B, 2, 3)
+                Vị trí hai bàn chân mong muốn.
+
+            feet_rot_des: (B, 2, 3, 3)
+                Hướng hai bàn chân mong muốn.
+
+            q_home: (B, 10)
+                Cấu hình khớp chuẩn.
+
+        Returns:
+            J: (B, 28, 16)
+                Jacobian tổng hợp.
+
+            e: (B, 28)
+                Vector sai số tổng hợp.
+        """
+
+        B = q.shape[0]
+
+        J_list = []
+        e_list = []
+
+        # --------------------------------------------------
+        # 1. Task vị trí CoM
+        # --------------------------------------------------
+        J_com = self.kin.compute_com_jacobian(ks, base_pos)
+
+        e_com = com_des - ks.com
+
+        J_list.append(J_com)
+        e_list.append(e_com)
+
+        # --------------------------------------------------
+        # 2. Task vị trí và hướng hai bàn chân
+        # --------------------------------------------------
+        for i in range(2):
+
+            # Mặt nạ các khớp của chân đang xét
+            desc = self.kin.site_desc[i]
+
+            # Task vị trí bàn chân
+            J_foot_pos = self.kin.compute_point_jacobian(ks, ks.site_pos[:, i], desc, base_pos)
+
+            e_foot_pos = (feet_des[:, i] - ks.site_pos[:, i])
+
+            J_list.append(J_foot_pos)
+            e_list.append(e_foot_pos)
+
+            # Task hướng bàn chân
+            J_foot_rot = self.kin.compute_rotation_jacobian(ks, desc)
+
+            e_foot_rot = self.compute_rotation_error(feet_rot_des[:, i], ks.site_rot[:, i])
+
+            J_list.append(J_foot_rot)
+            e_list.append(e_foot_rot)
+
+        # --------------------------------------------------
+        # 3. Task hướng base
+        # --------------------------------------------------
+        R_base_des = torch.eye(3, dtype=base_rot.dtype, device=base_rot.device).unsqueeze(0).expand(B, -1, -1)
+
+        J_base_rot = self.kin.compute_rotation_jacobian(ks, None)
+
+        e_base_rot = self.compute_rotation_error(R_base_des, base_rot)
+
+        J_list.append(J_base_rot)
+        e_list.append(e_base_rot)
+
+        # --------------------------------------------------
+        # 4. Task posture
+        # --------------------------------------------------
+        J_posture = torch.cat([
+            torch.zeros(
+                B, 10, 6,
+                dtype=q.dtype,
+                device=q.device
+            ),
+            torch.eye(
+                10,
+                dtype=q.dtype,
+                device=q.device
+            ).unsqueeze(0).expand(B, -1, -1)
+        ], dim=-1)
+
+        e_posture = q_home - q
+
+        J_list.append(J_posture)
+        e_list.append(e_posture)
+
+        # --------------------------------------------------
+        # 5. Ghép các task
+        # --------------------------------------------------
+        J = torch.cat(J_list, dim=1)
+        e = torch.cat(e_list, dim=1)
+
+        return J, e
+
