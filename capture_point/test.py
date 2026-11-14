@@ -1,35 +1,32 @@
-"""
-Kiem thu RobotKinematics.compute_com_jacobian() - Open Duck Mini V2 (MJCF v5).
+"""Integration tests for RobotKinematics.compute_rotation_jacobian() (MJCF v5).
 
-Dat file nay tai capture_point/ (cung cap voi robot_kinematics.py).
-Chay tu thu muc goc repo:
+Place this file next to capture_point/robot_kinematics.py and run from the
+repository root:
 
-    python capture_point/test_robot_kinematics_com_jacobian.py --verbose
-    python capture_point/test_robot_kinematics_com_jacobian.py --samples 20 --verbose
-    python capture_point/test_robot_kinematics_com_jacobian.py --model-only
-    python capture_point/test_robot_kinematics_com_jacobian.py --device cuda
+    python capture_point/test_robot_kinematics_rotation_jacobian.py --verbose
+    python capture_point/test_robot_kinematics_rotation_jacobian.py --samples 20 --verbose
+    python capture_point/test_robot_kinematics_rotation_jacobian.py --model-only
+    python capture_point/test_robot_kinematics_rotation_jacobian.py --device cuda
 
-Yeu cau: pip install mujoco numpy torch
-Mo hinh: xmls/open_duck_mini_v5.xml, xmls/scene_flat_terrian_v5.xml
-         va thu muc mesh xmls/assets_v3/.
+Requires numpy, torch, mujoco and xmls/assets_v3/*.STL.
 
-QUY UOC 16 COT:
-  0:3   = Tinh tien base trong he world/{P}
-  3:6   = Quay base gia so nho trong he world/{P} (left perturbation)
-  6:16  = 10 khop quay theo thu tu JOINT_NAMES.
+Column convention of the (B,3,16) angular Jacobian:
+    0:3    base translation, world frame (zero)
+    3:6    base infinitesimal rotation, world frame (identity)
+    6:16   ten actuated hinges, world-frame angular axes
 
-Quan trong: 3 cot quay base KHONG so sanh truc tiep voi qvel free joint
-MuJoCo vi co the khac quy uoc he truc. Chung duoc kiem tra bang
-sai phan huu han theo quaternion quay ben trai trong he world/{P}.
-Cac cot khop duoc so sanh voi mujoco.mj_jacSubtreeCom().
+IMPORTANT: For the base orientation, the finite-difference perturbation is
+R_new = Exp([dtheta_world]x) @ R. We deliberately do not compare the base
+columns directly to MuJoCo's free-joint qvel columns without converting
+its rotational-velocity convention.
 """
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
 import unittest
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -37,176 +34,158 @@ import torch
 try:
     import mujoco
 except ImportError as exc:
-    raise SystemExit("Thieu mujoco. Cai bang: pip install mujoco") from exc
+    raise SystemExit("Missing mujoco; install with: pip install mujoco") from exc
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-from robot_kinematics import RobotKinematics
+ROOT_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT_HERE))
+from robot_kinematics import KinState, RobotKinematics  # noqa: E402
 
 JOINT_NAMES = (
     "L_hip_yaw", "L_hip_roll", "L_hip_pitch", "L_knee", "L_ankle",
     "R_hip_yaw", "R_hip_roll", "R_hip_pitch", "R_knee", "R_ankle",
 )
-
-ATOL_MJ = 5e-5
-ATOL_FD = 8e-5
-ATOL_GRAD = 6e-5
-FD_EPS = 1e-6
+SITE_NAMES = ("L6_IK", "R6_IK")
 SEED = 20261114
+TOL_MUJOCO = 5e-5
+TOL_FD = 8e-5
+TOL_TORCH_FD = 2e-4
+EPS = 1e-6
 
 
-def find_xml_dir() -> Path:
-    for folder in (HERE, *HERE.parents):
-        candidate = folder / "xmls" / "open_duck_mini_v5.xml"
-        if candidate.is_file():
+def locate_xmls() -> Path:
+    for parent in (ROOT_HERE, *ROOT_HERE.parents):
+        candidate = parent / "xmls" / "open_duck_mini_v5.xml"
+        if candidate.exists():
             return candidate.parent
     raise FileNotFoundError(
-        "Khong tim thay xmls/open_duck_mini_v5.xml. "
-        "Hay dat file test trong <repo>/capture_point/."
+        "Cannot find xmls/open_duck_mini_v5.xml. Put this test in "
+        "<repository>/capture_point/."
     )
 
 
-def as_np(value):
-    if torch.is_tensor(value):
-        return value.detach().cpu().numpy()
-    return np.asarray(value)
+def as_numpy(x):
+    return x.detach().cpu().numpy() if torch.is_tensor(x) else np.asarray(x)
 
 
-def assert_close(actual, expected, label, atol=ATOL_MJ):
-    a = as_np(actual)
-    b = as_np(expected)
+def check_close(got, expected, label, tol=TOL_MUJOCO):
+    a, b = as_numpy(got), as_numpy(expected)
     if a.shape != b.shape:
+        raise AssertionError(f"{label}: shape {a.shape} != {b.shape}")
+    if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
+        raise AssertionError(f"{label}: non-finite values")
+    error = float(np.max(np.abs(a - b)))
+    if error > tol:
         raise AssertionError(
-            f"{label}: sai kich thuoc actual={a.shape}, expected={b.shape}"
+            f"{label}: max error {error:.6e} > {tol:.2e}; "
+            f"got={a!r}, expected={b!r}"
         )
-    if not np.isfinite(a).all() or not np.isfinite(b).all():
-        raise AssertionError(f"{label}: chua NaN/Inf")
-    try:
-        np.testing.assert_allclose(a, b, rtol=0.0, atol=atol)
-    except AssertionError as exc:
-        error = float(np.max(np.abs(a - b)))
-        raise AssertionError(
-            f"{label}: max_error={error:.6e} (tol={atol:.2e})\n{exc}"
-        ) from exc
 
 
-def quat_to_mat(quat):
-    out = np.empty(9, dtype=np.float64)
-    mujoco.mju_quat2Mat(out, np.asarray(quat, dtype=np.float64))
-    return out.reshape(3, 3)
+def rotation_matrix_from_quat(quat):
+    flat = np.empty(9, dtype=np.float64)
+    mujoco.mju_quat2Mat(flat, np.asarray(quat, dtype=np.float64))
+    return flat.reshape(3, 3)
 
 
-def quat_mul(a, b):
-    """Hamilton product quaternion wxyz."""
-    w1, w2 = float(a[0]), float(b[0])
-    v1 = np.asarray(a[1:4], dtype=np.float64)
-    v2 = np.asarray(b[1:4], dtype=np.float64)
+def quat_multiply(q1, q2):
+    """Hamilton quaternion product; both quaternions use (w,x,y,z)."""
+    w1, w2 = float(q1[0]), float(q2[0])
+    v1 = np.asarray(q1[1:], dtype=np.float64)
+    v2 = np.asarray(q2[1:], dtype=np.float64)
     return np.concatenate((
-        [w1 * w2 - float(np.dot(v1, v2))],
+        [w1 * w2 - np.dot(v1, v2)],
         w1 * v2 + w2 * v1 + np.cross(v1, v2),
     ))
 
 
-def perturb_quat_world(quat, axis, delta):
-    """R_new = Exp(delta*[axis]_x) @ R; quaternion left multiplication."""
+def perturb_quat_world(q, axis, angle):
+    """Left-multiply by a small rotation in the planning/world frame."""
     v = np.zeros(3, dtype=np.float64)
-    v[axis] = np.sin(delta / 2.0)
-    dq = np.concatenate(([np.cos(delta / 2.0)], v))
-    result = quat_mul(dq, np.asarray(quat, dtype=np.float64))
-    return result / np.linalg.norm(result)
+    v[axis] = np.sin(angle / 2.0)
+    dq = np.concatenate(([np.cos(angle / 2.0)], v))
+    out = quat_multiply(dq, q)
+    return out / np.linalg.norm(out)
 
 
-def make_cases(model, samples):
-    joint_ids = [model.joint(n).id for n in JOINT_NAMES]
-    ranges = np.asarray(model.jnt_range[joint_ids], dtype=np.float64)
-    home_q = np.deg2rad(
-        [0, -10, 20, -40, 20, 0, 10, -20, 40, -20]
-    )
-    home_pos = np.array([0.0, 0.0, 0.275], dtype=np.float64)
-    home_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-    free_adr = int(model.jnt_qposadr[model.joint("floating_base").id])
-    for key_id in range(model.nkey):
-        if model.key(key_id).name == "home":
-            key_qpos = np.asarray(model.key_qpos[key_id], dtype=np.float64)
-            home_pos = key_qpos[free_adr:free_adr + 3].copy()
-            home_quat = key_qpos[free_adr + 3:free_adr + 7].copy()
-            home_q = np.asarray([
-                key_qpos[int(model.jnt_qposadr[j])]
-                for j in joint_ids
+def rotational_velocity(R_plus, R_minus, R_center, step):
+    """omega_world = vee(skew((dR/dt) @ R.T))."""
+    R_dot = (R_plus - R_minus) / (2.0 * step)
+    W = R_dot @ R_center.T
+    W = 0.5 * (W - W.T)
+    return np.array([W[2, 1], W[0, 2], W[1, 0]], dtype=np.float64)
+
+
+def build_cases(model, n_random):
+    joint_ids = [model.joint(name).id for name in JOINT_NAMES]
+    limits = np.asarray(model.jnt_range[joint_ids], dtype=np.float64)
+    base_pos = np.array([0.0, 0.0, 0.275], dtype=np.float64)
+    base_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    q_home = np.deg2rad(np.array([
+        0.0, -10.0, 20.0, -40.0, 20.0,
+        0.0, 10.0, -20.0, 40.0, -20.0,
+    ], dtype=np.float64))
+    free_qpos_adr = int(model.jnt_qposadr[model.joint("floating_base").id])
+    for key_index in range(model.nkey):
+        if model.key(key_index).name == "home":
+            qpos_key = np.asarray(model.key_qpos[key_index], dtype=np.float64)
+            base_pos = qpos_key[free_qpos_adr:free_qpos_adr + 3].copy()
+            base_quat = qpos_key[free_qpos_adr + 3:free_qpos_adr + 7].copy()
+            q_home = np.array([
+                qpos_key[int(model.jnt_qposadr[jid])] for jid in joint_ids
             ], dtype=np.float64)
             break
 
     cases = [
-        ("home", home_pos, home_quat, home_q),
-        ("zero", np.array([0.04, -0.03, 0.30], dtype=np.float64),
-         np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
-         np.zeros(10, dtype=np.float64)),
+        ("home", base_pos, base_quat, q_home),
+        ("zero", np.array([0.02, -0.04, 0.32]),
+         np.array([1.0, 0.0, 0.0, 0.0]), np.zeros(10)),
     ]
-
     rng = np.random.default_rng(SEED)
-    for i in range(samples):
-        quat = rng.normal(size=4)
-        quat = quat / np.linalg.norm(quat)
-        q = ranges[:, 0] + (ranges[:, 1] - ranges[:, 0]) * rng.uniform(
-            0.15, 0.85, size=10
+    for i in range(n_random):
+        q = limits[:, 0] + (limits[:, 1] - limits[:, 0]) * rng.uniform(
+            0.1, 0.9, size=10
         )
-        pos = rng.uniform([-0.24, -0.22, 0.22], [0.24, 0.22, 0.42])
-        cases.append((f"random_{i:02d}", pos, quat, q))
+        p = rng.uniform([-0.25, -0.20, 0.20], [0.25, 0.20, 0.40])
+        quat = rng.normal(size=4)
+        quat /= np.linalg.norm(quat)
+        cases.append((f"random_{i:02d}", p, quat, q))
     return cases
 
 
-def tensor_inputs(cases, device):
-    p = torch.tensor(
-        np.stack([c[1] for c in cases]),
-        device=device, dtype=torch.float32,
-    )
-    r = torch.tensor(
-        np.stack([quat_to_mat(c[2]) for c in cases]),
-        device=device, dtype=torch.float32,
-    )
-    q = torch.tensor(
-        np.stack([c[3] for c in cases]),
-        device=device, dtype=torch.float32,
-    )
-    return p, r, q
+def load_inputs(cases, device):
+    p = torch.tensor(np.stack([c[1] for c in cases]),
+                     dtype=torch.float32, device=device)
+    R = torch.tensor(np.stack([rotation_matrix_from_quat(c[2]) for c in cases]),
+                     dtype=torch.float32, device=device)
+    q = torch.tensor(np.stack([c[3] for c in cases]),
+                     dtype=torch.float32, device=device)
+    return p, R, q
 
 
-def make_mj_data(model, case):
-    """Set qpos -> run independent MuJoCo forward kinematics."""
-    _, base_pos, base_quat, q = case
+def mujoco_data_for_case(model, case):
+    _name, base_pos, base_quat, q = case
     data = mujoco.MjData(model)
     data.qpos[:] = model.qpos0
     free_adr = int(model.jnt_qposadr[model.joint("floating_base").id])
     data.qpos[free_adr:free_adr + 3] = base_pos
     data.qpos[free_adr + 3:free_adr + 7] = base_quat
-    for j, name in enumerate(JOINT_NAMES):
-        jid = model.joint(name).id
+    for j, joint_name in enumerate(JOINT_NAMES):
+        jid = model.joint(joint_name).id
         data.qpos[int(model.jnt_qposadr[jid])] = q[j]
     mujoco.mj_forward(model, data)
     return data
 
 
-def subtree_jacobian(model, data):
-    jac = np.zeros((3, model.nv), dtype=np.float64)
-    base_id = model.body("base_link").id
-    mujoco.mj_jacSubtreeCom(model, data, jac, base_id)
-    return jac
+def mujoco_site_orientation(model, case, site_name):
+    data = mujoco_data_for_case(model, case)
+    sid = model.site(site_name).id
+    return np.asarray(data.site_xmat[sid], dtype=np.float64).reshape(3, 3).copy()
 
 
-def subtree_com(model, case):
-    data = make_mj_data(model, case)
-    return np.asarray(
-        data.subtree_com[model.body("base_link").id], dtype=np.float64
-    ).copy()
-
-
-def finite_difference_column(model, case, col, eps=FD_EPS):
-    """
-    Central FD of MuJoCo subtree COM.
-    d(base_quat) = quat_exp_world(dtheta) * base_quat for cols 3..5.
-    """
-    label, pos, quat, q = case
-    pp, pm = pos.copy(), pos.copy()
+def finite_difference_orientation(model, case, site_name, col, eps=EPS):
+    """Independent MuJoCo FD for columns 0..15, world-frame convention."""
+    label, p, quat, q = case
+    pp, pm = p.copy(), p.copy()
     qp, qm = q.copy(), q.copy()
     rp, rm = quat.copy(), quat.copy()
 
@@ -214,327 +193,264 @@ def finite_difference_column(model, case, col, eps=FD_EPS):
         pp[col] += eps
         pm[col] -= eps
     elif col < 6:
-        rp = perturb_quat_world(quat, col - 3, +eps)
+        rp = perturb_quat_world(quat, col - 3, eps)
         rm = perturb_quat_world(quat, col - 3, -eps)
     else:
         qp[col - 6] += eps
         qm[col - 6] -= eps
 
-    plus = (label + "/plus", pp, rp, qp)
-    minus = (label + "/minus", pm, rm, qm)
-    return (subtree_com(model, plus) - subtree_com(model, minus)) / (2 * eps)
+    R0 = mujoco_site_orientation(model, case, site_name)
+    R_plus = mujoco_site_orientation(
+        model, (label + "+", pp, rp, qp), site_name
+    )
+    R_minus = mujoco_site_orientation(
+        model, (label + "-", pm, rm, qm), site_name
+    )
+    return rotational_velocity(R_plus, R_minus, R0, eps)
 
 
-def skew_from_vec(v):
-    """Numpy skew matrix for independent analytic check."""
-    x, y, z = np.asarray(v, dtype=np.float64)
-    return np.array([
-        [0.0, -z, y],
-        [z, 0.0, -x],
-        [-y, x, 0.0],
-    ], dtype=np.float64)
-
-
-class TestComJacobian(unittest.TestCase):
+class RotationJacobianTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        opt = cls.options
-        cls.device = torch.device(opt.device)
-        names = ["open_duck_mini_v5.xml"]
-        if not opt.model_only:
-            names.append("scene_flat_terrian_v5.xml")
-
-        cls.records = []
-        xmls = find_xml_dir()
-        for name in names:
-            path = xmls / name
-            model = mujoco.MjModel.from_xml_path(str(path))
-            kin = RobotKinematics(model, device=opt.device)
-            cases = make_cases(model, opt.samples)
-            p, r, q = tensor_inputs(cases, cls.device)
-            ks = kin.forward_kinematics(p, r, q)
-            J = kin.compute_com_jacobian(ks, p)
-            cls.records.append({
-                "name": name, "model": model, "kin": kin,
-                "cases": cases, "pos": p, "rot": r, "q": q,
-                "ks": ks, "J": J,
+        options = cls.options
+        cls.device = torch.device(options.device)
+        xml_dir = locate_xmls()
+        model_files = ["open_duck_mini_v5.xml"]
+        if not options.model_only:
+            model_files.append("scene_flat_terrian_v5.xml")
+        cls.datasets = []
+        for filename in model_files:
+            model = mujoco.MjModel.from_xml_path(str(xml_dir / filename))
+            kin = RobotKinematics(model, device=options.device)
+            cases = build_cases(model, options.samples)
+            p, R, q = load_inputs(cases, cls.device)
+            ks = kin.forward_kinematics(p, R, q)
+            J_L = kin.compute_rotation_jacobian(ks, kin.site_desc[0])
+            J_R = kin.compute_rotation_jacobian(ks, kin.site_desc[1])
+            J_B = kin.compute_rotation_jacobian(ks, None)
+            cls.datasets.append({
+                "name": filename, "model": model, "kin": kin,
+                "cases": cases, "p": p, "R": R, "q": q,
+                "ks": ks, "jac": (J_L, J_R, J_B),
             })
 
-    def test_01_shape_dtype_device_and_finite(self):
-        for s in self.records:
-            with self.subTest(xml=s["name"]):
-                J = s["J"]
-                self.assertEqual(J.shape, (len(s["cases"]), 3, 16))
-                self.assertEqual(J.dtype, torch.float32)
-                self.assertEqual(J.device, self.device)
-                self.assertTrue(torch.isfinite(J).all().item())
-                self.assertEqual(s["ks"].com.shape, (len(s["cases"]), 3))
+    def test_01_output_shapes_types_and_finite(self):
+        for d in self.datasets:
+            for name, J in zip(("left", "right", "base"), d["jac"]):
+                with self.subTest(model=d["name"], target=name):
+                    self.assertEqual(J.shape, (len(d["cases"]), 3, 16))
+                    self.assertEqual(J.dtype, torch.float32)
+                    self.assertEqual(J.device, self.device)
+                    self.assertTrue(torch.isfinite(J).all().item())
 
-    def test_02_com_position_matches_mujoco(self):
-        """Prerequisite: FK COM and MuJoCo are aligned in the same frame."""
-        for s in self.records:
-            for i, case in enumerate(s["cases"]):
-                expected = subtree_com(s["model"], case)
-                assert_close(
-                    s["ks"].com[i], expected,
-                    f'{s["name"]}:{case[0]}:CoM', atol=ATOL_MJ,
-                )
+    def test_02_base_translation_zeros_and_base_rotation_identity(self):
+        for d in self.datasets:
+            count = len(d["cases"])
+            eye = torch.eye(3, dtype=torch.float32, device=self.device)
+            for name, J in zip(("left", "right", "base"), d["jac"]):
+                check_close(J[:, :, 0:3], torch.zeros(count, 3, 3),
+                            f'{d["name"]}/{name}/translation_zero', 1e-7)
+                check_close(J[:, :, 3:6], eye.expand(count, 3, 3),
+                            f'{d["name"]}/{name}/rotation_identity', 1e-7)
 
-    def test_03_three_base_translation_columns_identity(self):
-        for s in self.records:
-            J = s["J"]
-            I = torch.eye(3, device=self.device).unsqueeze(0).expand(
-                len(s["cases"]), 3, 3
-            )
-            assert_close(
-                J[:, :, :3], I,
-                f'{s["name"]}:translation identity', atol=1e-7,
-            )
+    def test_03_base_desc_none_has_zero_joint_columns(self):
+        for d in self.datasets:
+            check_close(d["jac"][2][:, :, 6:16],
+                        np.zeros((len(d["cases"]), 3, 10)),
+                        d["name"] + "/base_no_hinges", 1e-7)
 
-    def test_04_base_rotation_skew_formula(self):
-        """3 world-frame infinitesimal rotation columns = -skew(com-base)."""
-        for s in self.records:
-            for i, case in enumerate(s["cases"]):
-                r = as_np(s["ks"].com[i] - s["pos"][i])
-                expected = -skew_from_vec(r)
-                assert_close(
-                    s["J"][i, :, 3:6], expected,
-                    f'{s["name"]}:{case[0]}:rotation skew', atol=1e-7,
-                )
+    def test_04_feet_mask_and_opposite_leg_zero(self):
+        for d in self.datasets:
+            kin = d["kin"]
+            check_close(kin.site_desc[0], np.array([1] * 5 + [0] * 5),
+                        d["name"] + "/left_desc", 0)
+            check_close(kin.site_desc[1], np.array([0] * 5 + [1] * 5),
+                        d["name"] + "/right_desc", 0)
+            check_close(d["jac"][0][:, :, 11:16],
+                        np.zeros((len(d["cases"]), 3, 5)),
+                        d["name"] + "/left_no_right_hinges", 0)
+            check_close(d["jac"][1][:, :, 6:11],
+                        np.zeros((len(d["cases"]), 3, 5)),
+                        d["name"] + "/right_no_left_hinges", 0)
 
-    def test_05_hinge_columns_vs_mujoco_subtree_com_jacobian(self):
-        """Compare the 10 joint columns using MuJoCo DOF IDs."""
-        for s in self.records:
-            model = s["model"]
-            hinge_dofs = [
-                int(model.jnt_dofadr[model.joint(n).id]) for n in JOINT_NAMES
+    def test_05_foot_site_rotation_matches_mujoco(self):
+        """Check prerequisite that our FK and MuJoCo sites agree."""
+        for d in self.datasets:
+            for idx, case in enumerate(d["cases"]):
+                for foot, site_name in enumerate(SITE_NAMES):
+                    expected = mujoco_site_orientation(d["model"], case, site_name)
+                    check_close(d["ks"].site_rot[idx, foot], expected,
+                                f'{d["name"]}/{case[0]}/{site_name}/R',
+                                TOL_MUJOCO)
+
+    def test_06_hinge_columns_match_mujoco_jac_site(self):
+        """MuJoCo angular Jacobian is the independent oracle for hinge DOFs."""
+        for d in self.datasets:
+            model = d["model"]
+            dof_ids = [
+                int(model.jnt_dofadr[model.joint(name).id])
+                for name in JOINT_NAMES
             ]
-            for i, case in enumerate(s["cases"]):
-                data = make_mj_data(model, case)
-                oracle = subtree_jacobian(model, data)
-                assert_close(
-                    s["J"][i, :, 6:16], oracle[:, hinge_dofs],
-                    f'{s["name"]}:{case[0]}:MuJoCo hinge columns',
-                    atol=ATOL_MJ,
-                )
-
-    def test_06_mass_weighted_body_jacobians_vs_subtree_jacobian(self):
-        """Independent MuJoCo oracle: sum of body COM Jacobians by mass."""
-        for s in self.records:
-            model, kin = s["model"], s["kin"]
-            for case in s["cases"][:min(3, len(s["cases"]))]:
-                data = make_mj_data(model, case)
-                result = np.zeros((3, model.nv), dtype=np.float64)
-                masses = np.asarray(model.body_mass[kin.bodies], dtype=np.float64)
-                for body_id, mass in zip(kin.bodies, masses):
+            for idx, case in enumerate(d["cases"]):
+                data = mujoco_data_for_case(model, case)
+                for foot, site_name in enumerate(SITE_NAMES):
+                    sid = model.site(site_name).id
                     jp = np.zeros((3, model.nv), dtype=np.float64)
                     jr = np.zeros((3, model.nv), dtype=np.float64)
-                    mujoco.mj_jacBodyCom(model, data, jp, jr, body_id)
-                    result += mass * jp
-                result /= masses.sum()
-                oracle = subtree_jacobian(model, data)
-                assert_close(
-                    result, oracle,
-                    f'{s["name"]}:{case[0]}:MuJoCo weighted body Jacobian',
-                    atol=1e-9,
-                )
+                    mujoco.mj_jacSite(model, data, jp, jr, sid)
+                    check_close(
+                        d["jac"][foot][idx, :, 6:16], jr[:, dof_ids],
+                        f'{d["name"]}/{case[0]}/{site_name}/mj_jacSite',
+                        TOL_MUJOCO,
+                    )
 
-    def test_07_all_16_columns_vs_mujoco_finite_difference(self):
-        """World-frame base rotations via left quaternion perturbation."""
-        for s in self.records:
-            model = s["model"]
-            # Home + zero + first two random configurations (if supplied).
-            for i in range(min(len(s["cases"]), 4)):
-                case = s["cases"][i]
-                fd = np.stack([
-                    finite_difference_column(model, case, col)
-                    for col in range(16)
-                ], axis=1)
-                assert_close(
-                    s["J"][i], fd,
-                    f'{s["name"]}:{case[0]}:FD 16 columns',
-                    atol=ATOL_FD,
-                )
+    def test_07_all_16_columns_finite_difference_mujoco(self):
+        """For world-oriented base rotation, use quaternion LEFT perturbation."""
+        for d in self.datasets:
+            # home, zero, up to two rotated random configurations
+            for idx, case in enumerate(d["cases"][:4]):
+                for foot, site_name in enumerate(SITE_NAMES):
+                    finite_J = np.stack([
+                        finite_difference_orientation(
+                            d["model"], case, site_name, col
+                        ) for col in range(16)
+                    ], axis=1)
+                    check_close(
+                        d["jac"][foot][idx], finite_J,
+                        f'{d["name"]}/{case[0]}/{site_name}/FD_all_columns',
+                        TOL_FD,
+                    )
 
-    def test_08_torch_autograd_joint_and_base_translation(self):
-        """Autograd of CoM FK is independent of analytic Jacobian routine."""
-        for s in self.records:
-            pos = s["pos"][:2].detach().clone().requires_grad_(True)
-            rot = s["rot"][:2].detach().clone()
-            q = s["q"][:2].detach().clone().requires_grad_(True)
-            pos_before = pos.detach().clone()
-            q_before = q.detach().clone()
+    def test_08_batched_equals_individual(self):
+        for d in self.datasets:
+            for idx, case in enumerate(d["cases"]):
+                p = d["p"][idx:idx + 1]
+                R = d["R"][idx:idx + 1]
+                q = d["q"][idx:idx + 1]
+                ks = d["kin"].forward_kinematics(p, R, q)
+                for target in range(3):
+                    desc = None if target == 2 else d["kin"].site_desc[target]
+                    j_one = d["kin"].compute_rotation_jacobian(ks, desc)
+                    check_close(
+                        j_one[0], d["jac"][target][idx],
+                        f'{d["name"]}/{case[0]}/batch_{target}',
+                        1e-7,
+                    )
 
-            kin = s["kin"]
-            ks = kin.forward_kinematics(pos, rot, q)
-            J = kin.compute_com_jacobian(ks, pos)
-            for row in range(3):
-                grad_p, grad_q = torch.autograd.grad(
-                    ks.com[:, row].sum(), (pos, q),
-                    retain_graph=True,
-                )
-                assert_close(
-                    grad_p, J[:, row, :3],
-                    f'{s["name"]}:autograd base translation row={row}',
-                    atol=ATOL_GRAD,
-                )
-                assert_close(
-                    grad_q, J[:, row, 6:16],
-                    f'{s["name"]}:autograd joints row={row}',
-                    atol=ATOL_GRAD,
-                )
-            assert_close(pos, pos_before, "base_pos mutated", atol=0)
-            assert_close(q, q_before, "q mutated", atol=0)
+    def test_09_rotation_of_planning_frame_covariance(self):
+        """Under P->P', joint axes rotate, while base orientation block stays I."""
+        angle = 0.43
+        c, s = np.cos(angle), np.sin(angle)
+        U = torch.tensor([
+            [c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0],
+        ], dtype=torch.float32, device=self.device).reshape(3, 3)
+        offset = torch.tensor([0.15, -0.12, 0.03],
+                              dtype=torch.float32, device=self.device)
+        for d in self.datasets:
+            new_p = (U @ d["p"].T).T + offset
+            new_R = U.unsqueeze(0) @ d["R"]
+            new_ks = d["kin"].forward_kinematics(new_p, new_R, d["q"])
+            for target in range(3):
+                desc = None if target == 2 else d["kin"].site_desc[target]
+                J_new = d["kin"].compute_rotation_jacobian(new_ks, desc)
+                J_old = d["jac"][target]
+                check_close(J_new[:, :, 6:16], U @ J_old[:, :, 6:16],
+                            f'{d["name"]}/rotated_axes_{target}', TOL_MUJOCO)
+                check_close(J_new[:, :, 3:6],
+                            np.broadcast_to(np.eye(3), (len(d["cases"]), 3, 3)),
+                            f'{d["name"]}/base_eye_{target}', 1e-7)
+                check_close(J_new[:, :, :3],
+                            np.zeros((len(d["cases"]), 3, 3)),
+                            f'{d["name"]}/base_zeros_{target}', 1e-7)
 
-    def test_09_torch_autograd_world_base_rotation(self):
-        """Differentiate left-multiplied SO(3) rotations at zero angle."""
-        generators = torch.tensor([
-            [[0., 0., 0.], [0., 0., -1.], [0., 1., 0.]],  # X
-            [[0., 0., 1.], [0., 0., 0.], [-1., 0., 0.]],  # Y
-            [[0., -1., 0.], [1., 0., 0.], [0., 0., 0.]],  # Z
-        ], dtype=torch.float32, device=self.device)
-        # Generator above: X has [0,0,0; 0,0,-1; 0,1,0].
-        for s in self.records:
-            theta = torch.zeros(
-                3, device=self.device, dtype=torch.float32, requires_grad=True
-            )
-            R_delta = torch.eye(3, device=self.device, dtype=torch.float32)
-            I = torch.eye(3, device=self.device, dtype=torch.float32)
-            for a in range(3):
-                K = generators[a]
-                R_axis = I + torch.sin(theta[a]) * K + (
-                    1.0 - torch.cos(theta[a])
-                ) * (K @ K)
-                R_delta = R_axis @ R_delta
+    def test_10_torch_finite_difference_joint_rotations(self):
+        """FD on our own FK ensures consistency with differentiable rotation."""
+        for d in self.datasets:
+            for idx in range(min(3, len(d["cases"]))):
+                p = d["p"][idx:idx + 1]
+                rot = d["R"][idx:idx + 1]
+                q = d["q"][idx:idx + 1]
+                for foot in range(2):
+                    R0 = as_numpy(d["ks"].site_rot[idx, foot]).astype(np.float64)
+                    for col in range(10):
+                        dq = torch.zeros_like(q)
+                        dq[:, col] = 0.002  # stable for float32 FK
+                        kp = d["kin"].forward_kinematics(p, rot, q + dq)
+                        km = d["kin"].forward_kinematics(p, rot, q - dq)
+                        r_plus = as_numpy(kp.site_rot[0, foot]).astype(np.float64)
+                        r_minus = as_numpy(km.site_rot[0, foot]).astype(np.float64)
+                        numeric = rotational_velocity(r_plus, r_minus, R0, 0.002)
+                        expected = d["jac"][foot][idx, :, 6 + col]
+                        check_close(numeric, expected,
+                                    f'{d["name"]}/torch_FD_{idx}_{foot}_{col}',
+                                    TOL_TORCH_FD)
 
-            rotated_base = R_delta.unsqueeze(0) @ s["rot"][:1]
-            state = s["kin"].forward_kinematics(
-                s["pos"][:1], rotated_base, s["q"][:1]
-            )
-            J = s["kin"].compute_com_jacobian(state, s["pos"][:1])
-            for xyz in range(3):
-                grad = torch.autograd.grad(
-                    state.com[0, xyz], theta, retain_graph=True
-                )[0]
-                assert_close(
-                    grad, J[0, xyz, 3:6],
-                    f'{s["name"]}:autograd world base rotation xyz={xyz}',
-                    atol=ATOL_GRAD,
-                )
+    def test_11_gradient_through_fk_rotation(self):
+        """Autograd jvp -> spatial angular velocity at a sample configuration."""
+        for d in self.datasets:
+            p = d["p"][:1].detach()
+            R_base = d["R"][:1].detach()
+            q = d["q"][:1].detach().clone().requires_grad_(True)
+            for foot in range(2):
+                def site_rot_from_q(qq):
+                    return d["kin"].forward_kinematics(p, R_base, qq).site_rot[0, foot]
 
-    def test_10_batched_vs_individual_environments(self):
-        for s in self.records:
-            kin = s["kin"]
-            for i in range(len(s["cases"])):
-                p = s["pos"][i:i + 1]
-                rot = s["rot"][i:i + 1]
-                q = s["q"][i:i + 1]
-                one = kin.forward_kinematics(p, rot, q)
-                J_one = kin.compute_com_jacobian(one, p)
-                assert_close(
-                    J_one[0], s["J"][i],
-                    f'{s["name"]}:{s["cases"][i][0]}:single vs batch',
-                    atol=1e-7,
-                )
+                R_current = site_rot_from_q(q).detach()
+                for joint in range(10):
+                    direction = torch.zeros_like(q)
+                    direction[0, joint] = 1.0
+                    _R_val, dR = torch.autograd.functional.jvp(
+                        site_rot_from_q, (q,), (direction,), create_graph=False
+                    )
+                    W = dR @ R_current.T
+                    W = (W - W.T) * 0.5
+                    omega = torch.stack([W[2, 1], W[0, 2], W[1, 0]])
+                    check_close(
+                        omega, d["jac"][foot][0, :, 6 + joint],
+                        f'{d["name"]}/autograd_foot{foot}_joint{joint}',
+                        4e-5,
+                    )
 
-    def test_11_world_frame_translation_and_rotation_covariance(self):
-        """J_rot' = U J_rot U^T; J_joint' = U J_joint."""
-        angle = 0.48
-        c, sn = np.cos(angle), np.sin(angle)
-        U_np = np.array([
-            [c, -sn, 0.0], [sn, c, 0.0], [0.0, 0.0, 1.0]
-        ], dtype=np.float64)
-        U = torch.tensor(U_np, device=self.device, dtype=torch.float32)
-        t = torch.tensor(
-            [0.11, -0.09, 0.04], device=self.device, dtype=torch.float32
-        )
-        for s in self.records:
-            kin = s["kin"]
-            p2 = (U @ s["pos"].T).T + t
-            r2 = U.unsqueeze(0) @ s["rot"]
-            state = kin.forward_kinematics(p2, r2, s["q"])
-            J2 = kin.compute_com_jacobian(state, p2)
-            expected_com = (U @ s["ks"].com.T).T + t
-            assert_close(
-                state.com, expected_com,
-                f'{s["name"]}:CoM under SE3 transform',
-                atol=ATOL_MJ,
-            )
-            expected_rot = U @ s["J"][:, :, 3:6] @ U.T
-            expected_joint = U @ s["J"][:, :, 6:16]
-            assert_close(
-                J2[:, :, 3:6], expected_rot,
-                f'{s["name"]}:rotation covariance',
-                atol=ATOL_MJ,
-            )
-            assert_close(
-                J2[:, :, 6:16], expected_joint,
-                f'{s["name"]}:joint covariance',
-                atol=ATOL_MJ,
-            )
-            I = torch.eye(3, device=self.device).expand(len(s["cases"]), 3, 3)
-            assert_close(
-                J2[:, :, :3], I,
-                f'{s["name"]}:translation Jacobian unchanged',
-                atol=1e-7,
-            )
-
-    def test_12_reconstruction_from_all_body_point_jacobians(self):
-        """CoM J equals mass-weighted point Jacobians of body COMs."""
-        for s in self.records:
-            kin = s["kin"]
-            weighted = torch.zeros_like(s["J"])
-            for body_index in range(len(kin.bodies)):
-                J_body = kin.compute_point_jacobian(
-                    s["ks"], s["ks"].com_body[:, body_index],
-                    kin.desc[:, body_index], s["pos"],
-                )
-                weighted = weighted + kin.mass[body_index] * J_body
-            weighted = weighted / kin.total_mass
-            assert_close(
-                s["J"], weighted,
-                f'{s["name"]}:weighted 11 point Jacobians',
-                atol=2e-6,
-            )
+    def test_12_custom_mask_and_does_not_modify_input(self):
+        """A custom 10-element mask must multiply exactly the axis columns."""
+        for d in self.datasets:
+            ks = d["ks"]
+            before = ks.axis.detach().clone()
+            mask = torch.tensor([1.0, 0.0, 0.25, 0.0, 0.0,
+                                 0.0, 0.0, 0.0, 0.0, 0.8],
+                                device=self.device)
+            mask_before = mask.clone()
+            J = d["kin"].compute_rotation_jacobian(ks, mask)
+            expected = (ks.axis * mask[None, :, None]).transpose(1, 2)
+            check_close(J[:, :, 6:16], expected,
+                        d["name"] + "/custom_mask", 1e-7)
+            check_close(ks.axis, before,
+                        d["name"] + "/input_axis_unchanged", 0)
+            check_close(mask, mask_before,
+                        d["name"] + "/input_mask_unchanged", 0)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--device", choices=("cpu", "cuda"), default="cpu",
-        help="PyTorch execution device (default: cpu)",
-    )
-    parser.add_argument(
-        "--samples", type=int, default=6,
-        help="Number of deterministic random configurations per model (default: 6)",
-    )
-    parser.add_argument(
-        "--model-only", action="store_true",
-        help="Only test open_duck_mini_v5.xml (skip scene_flat_terrian_v5.xml)",
-    )
+    parser.add_argument("--samples", type=int, default=6,
+                        help="Number of seeded random configurations (default: 6)")
+    parser.add_argument("--model-only", action="store_true",
+                        help="Test only the standalone v5 MJCF, not the scene")
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--verbose", action="store_true")
-    options = parser.parse_args()
-    if options.samples < 1:
+    args = parser.parse_args()
+    if args.samples < 1:
         parser.error("--samples must be >= 1")
-    if options.device == "cuda" and not torch.cuda.is_available():
-        parser.error("CUDA is not available")
-
-    TestComJacobian.options = options
-    tests = unittest.defaultTestLoader.loadTestsFromTestCase(TestComJacobian)
-    result = unittest.TextTestRunner(
-        verbosity=2 if options.verbose else 1
-    ).run(tests)
-
+    if args.device == "cuda" and not torch.cuda.is_available():
+        parser.error("CUDA not available")
+    RotationJacobianTests.options = args
+    tests = unittest.defaultTestLoader.loadTestsFromTestCase(RotationJacobianTests)
+    result = unittest.TextTestRunner(verbosity=2 if args.verbose else 1).run(tests)
     if result.wasSuccessful():
         print(
-            "\n[PASS] compute_com_jacobian(): 12 test groups; "
-            f"{1 if options.model_only else 2} model(s); "
-            f"{options.samples + 2} configurations/model; "
-            f"device={options.device}."
-        )
-        print(
-            "Checked: MuJoCo mj_jacSubtreeCom, mass-weighted body Jacobians, "
-            "16-column finite differences, PyTorch autograd, batch, SE(3)."
+            "\n[PASS] compute_rotation_jacobian(): 12 test groups; "
+            f"{1 if args.model_only else 2} model(s), "
+            f"{args.samples + 2} configurations/model, device={args.device}."
         )
     raise SystemExit(0 if result.wasSuccessful() else 1)
 
