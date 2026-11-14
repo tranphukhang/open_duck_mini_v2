@@ -277,3 +277,25 @@ class RobotKinematics:
 
         return body_pos, body_rot, axis, anchor
 
+
+    def compute_center_of_mass(self, body_pos, body_rot):
+        """
+        Tính vị trí CoM từng khâu và CoM toàn robot.
+
+        Args:
+            body_pos: (B, 11, 3)     Vị trí các khâu trong {P}
+            body_rot: (B, 11, 3, 3)  Hướng các khâu trong {P}
+
+        Returns:
+            com_body: (B, 11, 3)     CoM từng khâu trong {P}
+            com:      (B, 3)         CoM toàn robot trong {P}
+        """
+
+        # 1. Chuyển CoM cục bộ từng khâu sang hệ {P}
+        com_body = body_pos + (body_rot @ self.ipos[None, :, :, None]).squeeze(-1)
+
+        # 2. Tính CoM toàn robot theo trọng số khối lượng
+        com = (com_body * self.mass[None, :, None]).sum(dim=1) / self.total_mass
+
+        return com_body, com
+

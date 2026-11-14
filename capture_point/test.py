@@ -1,15 +1,19 @@
-"""Kiểm thử RobotKinematics.__init__() với mô hình Open Duck Mini V2 v5.
+"""Test RobotKinematics.compute_body_kinematics() against MuJoCo FK (v5).
 
-Đặt file này ở capture_point/test_robot_kinematics_init.py rồi chạy từ bất kỳ thư mục nào:
-    python capture_point/test_robot_kinematics_init.py
-    python capture_point/test_robot_kinematics_init.py --model-only
-    python capture_point/test_robot_kinematics_init.py --verbose
+Place this file in capture_point/, next to robot_kinematics.py.
 
-Yêu cầu: pip install mujoco numpy torch
-Cần giữ nguyên xmls/assets_v3/*.STL của repository.
+Usage from repository root:
+    python capture_point/test_robot_kinematics_body.py
+    python capture_point/test_robot_kinematics_body.py --verbose
+    python capture_point/test_robot_kinematics_body.py --samples 20
+    python capture_point/test_robot_kinematics_body.py --model-only
+    python capture_point/test_robot_kinematics_body.py --device cuda
 
-Chỉ kiểm tra __init__; chưa kiểm tra FK, Jacobian số học hay WBIK.
+Requirements: mujoco, numpy, torch; original xmls/assets_v3/*.STL.
+The test uses only the v5 MJCF files, and does not test CoM/site FK,
+Jacobian, DLS, warm-start, or load compensation.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -24,20 +28,18 @@ try:
     import mujoco
 except ImportError as exc:
     raise SystemExit(
-        "Không tìm thấy 'mujoco'. Cài bằng: pip install mujoco\n"
-        "Cần cài cả numpy và torch để chạy bài test."
+        "Missing 'mujoco'. Install: pip install mujoco numpy torch"
     ) from exc
 
-# Nhập robot_kinematics.py ở cùng thư mục với file test.
 TEST_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TEST_DIR))
 try:
     from robot_kinematics import RobotKinematics
 except ImportError as exc:
     raise SystemExit(
-        "Không tìm thấy robot_kinematics.py. "
-        "Hãy đặt test_robot_kinematics_init.py trong cùng thư mục capture_point/."
+        "Could not import robot_kinematics.py. Put this file in capture_point/."
     ) from exc
+
 
 JOINT_NAMES = (
     "L_hip_yaw", "L_hip_roll", "L_hip_pitch", "L_knee", "L_ankle",
@@ -48,273 +50,375 @@ BODY_NAMES = (
     "L1_hip_yaw", "L2_hip_roll", "L3_hip_pitch", "L4_knee", "L5_ankle",
     "R1_hip_yaw", "R2_hip_roll", "R3_hip_pitch", "R4_knee", "R5_ankle",
 )
-FOOT_SITES = ("L6_IK", "R6_IK")
-JOINT_RANGE_DEGREES = np.array([
-    [-30, 30], [-25, 25], [-30, 70], [-90, 90], [-90, 90],
-    [-30, 30], [-25, 25], [-70, 30], [-90, 90], [-90, 90],
-], dtype=np.float64)
+ATOL_POS = 3e-5
+ATOL_ROT = 5e-5
+ATOL_AXIS = 5e-5
 
 
-def locate_xml_dir() -> Path:
-    # Tìm repository root, kể cả khi script được gọi từ thư mục khác.
-    for directory in (TEST_DIR, *TEST_DIR.parents):
-        candidate = directory / "xmls" / "open_duck_mini_v5.xml"
-        if candidate.is_file():
-            return candidate.parent
+def find_v5_dir() -> Path:
+    for folder in (TEST_DIR, *TEST_DIR.parents):
+        path = folder / "xmls" / "open_duck_mini_v5.xml"
+        if path.is_file():
+            return path.parent
     raise FileNotFoundError(
-        "Không tìm thấy xmls/open_duck_mini_v5.xml. "
-        "Hãy giữ đúng cấu trúc repository: xmls/ và capture_point/."
+        "Could not find xmls/open_duck_mini_v5.xml. "
+        "Preserve capture_point/ and xmls/ at repository root."
     )
 
 
-def to_numpy(value: torch.Tensor) -> np.ndarray:
-    return value.detach().cpu().numpy()
+def np_result(tensor: torch.Tensor) -> np.ndarray:
+    return tensor.detach().cpu().numpy()
 
 
-def tensor_close(actual: torch.Tensor, expected, atol=1e-6):
-    np.testing.assert_allclose(to_numpy(actual), np.asarray(expected), atol=atol, rtol=1e-6)
+def check_close(actual, reference, name: str, *, atol: float) -> float:
+    a = np_result(actual) if isinstance(actual, torch.Tensor) else np.asarray(actual)
+    r = np.asarray(reference)
+    if a.shape != r.shape:
+        raise AssertionError(f"{name}: shape {a.shape} != {r.shape}")
+    err = float(np.max(np.abs(a - r))) if a.size else 0.0
+    try:
+        np.testing.assert_allclose(a, r, rtol=0.0, atol=atol)
+    except AssertionError as exc:
+        raise AssertionError(f"{name}: max_abs_error={err:.3e}\n{exc}") from exc
+    return err
 
 
-def ancestor_of(model: mujoco.MjModel, ancestor: int, body: int) -> bool:
-    """Kiểm tra quan hệ hậu duệ trực tiếp từ body_parentid của MuJoCo."""
-    b = int(body)
-    while b > 0:
-        if b == ancestor:
-            return True
-        b = int(model.body_parentid[b])
-    return False
+def quat_to_matrix(quat_wxyz: np.ndarray) -> np.ndarray:
+    mat = np.zeros(9, dtype=np.float64)
+    mujoco.mju_quat2Mat(mat, quat_wxyz)
+    return mat.reshape(3, 3)
 
 
-def depth_for_local_body(kin: RobotKinematics, i: int) -> int:
-    d, k = 0, i
-    while kin.parent[k] != -1:
-        k = kin.parent[k]
-        d += 1
-    return d
+def random_quaternion(rng: np.random.Generator) -> np.ndarray:
+    q = rng.normal(size=4)
+    q /= np.linalg.norm(q)
+    return q
 
 
-class TestRobotKinematicsInit(unittest.TestCase):
+def build_cases(model: mujoco.MjModel, count: int) -> list[dict]:
+    rng = np.random.default_rng(20261114)
+    joint_ids = [model.joint(n).id for n in JOINT_NAMES]
+    bounds = np.asarray(model.jnt_range[joint_ids], dtype=np.float64)
+
+    # Reproduce the scene v5 "home" keyframe when present.
+    home_base = np.array([0.0, 0.0, 0.275], dtype=np.float64)
+    home_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    home_joints = np.deg2rad(
+        [0., -10., 20., -40., 20.,
+         0., 10., -20., 40., -20.]
+    )
+    for key_id in range(model.nkey):
+        if model.key(key_id).name == "home":
+            key_qpos = np.asarray(model.key_qpos[key_id], dtype=np.float64)
+            free_addr = int(model.jnt_qposadr[model.joint("floating_base").id])
+            home_base = key_qpos[free_addr:free_addr + 3].copy()
+            home_quat = key_qpos[free_addr + 3:free_addr + 7].copy()
+            home_joints = np.array(
+                [key_qpos[int(model.jnt_qposadr[j])] for j in joint_ids]
+            )
+            break
+
+    cases = [
+        {"name": "home", "pos": home_base, "quat": home_quat, "q": home_joints},
+        {"name": "zero", "pos": np.array([0.03, -0.02, 0.31]),
+         "quat": np.array([1., 0., 0., 0.]), "q": np.zeros(10)},
+    ]
+    for i in range(count):
+        # Stay within joint limits; deliberately vary translation and orientation.
+        lo, hi = bounds[:, 0], bounds[:, 1]
+        q = lo + (hi - lo) * rng.uniform(0.12, 0.88, size=10)
+        cases.append({
+            "name": f"random_{i:02d}",
+            "pos": np.array([0.0, 0.0, 0.28]) +
+                   rng.uniform([-0.3, -0.2, -0.06], [0.3, 0.2, 0.08]),
+            "quat": random_quaternion(rng),
+            "q": q,
+        })
+    return cases
+
+
+def mujoco_reference(model: mujoco.MjModel, kin: RobotKinematics, case: dict):
+    """Independent oracle: MuJoCo forward kinematics, not copied PyTorch formulas."""
+    data = mujoco.MjData(model)
+    data.qpos[:] = model.qpos0
+
+    floating_id = model.joint("floating_base").id
+    free_addr = int(model.jnt_qposadr[floating_id])
+    data.qpos[free_addr:free_addr + 3] = case["pos"]
+    data.qpos[free_addr + 3:free_addr + 7] = case["quat"]
+
+    joint_ids = [model.joint(name).id for name in JOINT_NAMES]
+    for j, jid in enumerate(joint_ids):
+        data.qpos[int(model.jnt_qposadr[jid])] = case["q"][j]
+
+    mujoco.mj_forward(model, data)
+
+    # data.xmat is flattened or (3,3), depending on binding/version.
+    body_pos = np.asarray(data.xpos[kin.bodies], dtype=np.float64).copy()
+    body_rot = np.asarray(data.xmat[kin.bodies], dtype=np.float64).reshape(11, 3, 3).copy()
+
+    # xaxis / xanchor are MuJoCo's WORLD-frame joint quantities.
+    axis = np.asarray(data.xaxis[joint_ids], dtype=np.float64).copy()
+    anchor = np.asarray(data.xanchor[joint_ids], dtype=np.float64).copy()
+
+    return body_pos, body_rot, axis, anchor
+
+
+def get_batched_inputs(cases: list[dict], device: torch.device):
+    base_pos = torch.tensor(
+        np.stack([c["pos"] for c in cases]), device=device, dtype=torch.float32
+    )
+    base_rot = torch.tensor(
+        np.stack([quat_to_matrix(c["quat"]) for c in cases]),
+        device=device, dtype=torch.float32,
+    )
+    q = torch.tensor(
+        np.stack([c["q"] for c in cases]), device=device, dtype=torch.float32
+    )
+    return base_pos, base_rot, q
+
+
+class TestComputeBodyKinematics(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        xml_dir = locate_xml_dir()
+        opts = getattr(
+            cls, "options",
+            argparse.Namespace(device="cpu", samples=8, model_only=False),
+        )
+        cls.device = torch.device(opts.device)
+        cls.models = []
+        xml_dir = find_v5_dir()
         filenames = ["open_duck_mini_v5.xml"]
-        if not getattr(cls, "model_only", False):
+        if not opts.model_only:
             filenames.append("scene_flat_terrian_v5.xml")
 
-        cls.models = []
-        for name in filenames:
-            path = xml_dir / name
+        for filename in filenames:
+            path = xml_dir / filename
             if not path.is_file():
-                raise FileNotFoundError(f"Không tìm thấy file v5: {path}")
+                raise FileNotFoundError(f"Missing v5 model: {path}")
             try:
                 model = mujoco.MjModel.from_xml_path(str(path))
+                kin = RobotKinematics(model, device=opts.device)
             except Exception as exc:
                 raise RuntimeError(
-                    f"Không thể biên dịch {path}. Kiểm tra thư mục xmls/assets_v3/ "
-                    "có đầy đủ các STL của mô hình v5."
+                    f"Could not load/initialize {path}. "
+                    "Check MJCF and xmls/assets_v3/*.STL."
                 ) from exc
-            kin = RobotKinematics(model, device="cpu")
-            cls.models.append((name, model, kin))
+            cases = build_cases(model, opts.samples)
+            cls.models.append((filename, model, kin, cases))
 
-    def test_01_tree_structure(self):
-        """Chỉ đọc 11 khâu robot, không lấy world/floor từ scene."""
-        for name, model, kin in self.models:
+    def test_01_batch_shapes_finite_and_dtype(self):
+        """Batched shapes and finite results for all four outputs."""
+        for name, model, kin, cases in self.models:
             with self.subTest(xml=name):
-                self.assertEqual(len(kin.bodies), 11)
-                self.assertEqual([model.body(b).name for b in kin.bodies], list(BODY_NAMES))
-                self.assertEqual(len(kin.parent), 11)
-                self.assertEqual(kin.parent[0], -1)
-                self.assertEqual(kin.parent[1:6], [0, 1, 2, 3, 4])
-                self.assertEqual(kin.parent[6:], [0, 6, 7, 8, 9])
-                self.assertEqual(len(set(kin.bodies)), 11)
-                if name.startswith("scene"):
-                    self.assertGreater(model.nbody, 12)  # world + robot + floor
-
-    def test_02_joint_order_and_model_anchors(self):
-        for name, model, kin in self.models:
-            with self.subTest(xml=name):
-                self.assertEqual(len(kin.joint_of_body), 11)
-                self.assertEqual(len(kin.joint_body), 10)
-                self.assertEqual(kin.joint_of_body[0], -1)
-                self.assertEqual(sorted(kin.joint_body), list(range(1, 11)))
-                for j, joint_name in enumerate(JOINT_NAMES):
-                    body_local = kin.joint_body[j]
-                    body_global = kin.bodies[body_local]
-                    joint_id = model.joint(joint_name).id
-                    self.assertEqual(model.jnt_bodyid[joint_id], body_global)
-                    self.assertEqual(kin.joint_of_body[body_local], j)
-                    self.assertEqual(model.jnt_type[joint_id], mujoco.mjtJoint.mjJNT_HINGE)
-                    self.assertAlmostEqual(float(np.linalg.norm(model.jnt_pos[joint_id])), 0., places=8)
-
-    def test_03_geometry_axes_and_mass(self):
-        for name, model, kin in self.models:
-            with self.subTest(xml=name):
-                self.assertEqual(tuple(kin.body_pos0.shape), (11, 3))
-                self.assertEqual(tuple(kin.body_rot0.shape), (11, 3, 3))
-                self.assertEqual(tuple(kin.joint_axis.shape), (10, 3))
-                self.assertEqual(tuple(kin.mass.shape), (11,))
-                self.assertEqual(tuple(kin.ipos.shape), (11, 3))
-
-                tensor_close(kin.body_pos0, model.body_pos[kin.bodies])
-                tensor_close(kin.mass, model.body_mass[kin.bodies])
-                tensor_close(kin.ipos, model.body_ipos[kin.bodies])
-                self.assertAlmostEqual(kin.total_mass, float(model.body_mass[kin.bodies].sum()), places=5)
-                self.assertTrue(np.isfinite(kin.total_mass))
-                self.assertGreater(kin.total_mass, 0.)
-                self.assertTrue(np.all(to_numpy(kin.mass) > 0))
-
-                for j, joint_name in enumerate(JOINT_NAMES):
-                    tensor_close(kin.joint_axis[j], model.jnt_axis[model.joint(joint_name).id])
-                for i, body_id in enumerate(kin.bodies):
-                    # Kiểm tra phép quay từ quaternion của body trong MjModel.
-                    rm = np.zeros(9)
-                    mujoco.mju_quat2Mat(rm, model.body_quat[body_id])
-                    tensor_close(kin.body_rot0[i], rm.reshape(3, 3))
-                    rm_kin = to_numpy(kin.body_rot0[i])
-                    np.testing.assert_allclose(rm_kin.T @ rm_kin, np.eye(3), atol=1e-5)
-                    self.assertAlmostEqual(np.linalg.det(rm_kin), 1., places=5)
-
-    def test_04_foot_site_definition(self):
-        for name, model, kin in self.models:
-            with self.subTest(xml=name):
-                self.assertEqual(tuple(kin.site_pos0.shape), (2, 3))
-                self.assertEqual(tuple(kin.site_rot0.shape), (2, 3, 3))
-                self.assertEqual(len(kin.site_body), 2)
-                self.assertEqual(kin.site_body, [5, 10])  # L5_ankle / R5_ankle
-                for i, site_name in enumerate(FOOT_SITES):
-                    site_id = model.site(site_name).id
-                    self.assertEqual(kin.bodies[kin.site_body[i]], model.site_bodyid[site_id])
-                    tensor_close(kin.site_pos0[i], model.site_pos[site_id])
-                    rm = np.zeros(9)
-                    mujoco.mju_quat2Mat(rm, model.site_quat[site_id])
-                    tensor_close(kin.site_rot0[i], rm.reshape(3, 3))
-                # Trong v5 hai site có hướng cục bộ khác nhau.
-                self.assertFalse(np.allclose(to_numpy(kin.site_rot0[0]), to_numpy(kin.site_rot0[1])))
-
-    def test_05_joint_limits_in_radians(self):
-        for name, model, kin in self.models:
-            with self.subTest(xml=name):
-                self.assertEqual(tuple(kin.qmin.shape), (10,))
-                self.assertEqual(tuple(kin.qmax.shape), (10,))
-                tensor_close(kin.qmin, np.deg2rad(JOINT_RANGE_DEGREES[:, 0]))
-                tensor_close(kin.qmax, np.deg2rad(JOINT_RANGE_DEGREES[:, 1]))
-                self.assertTrue(bool(torch.all(kin.qmin < kin.qmax)))
-                for j, joint_name in enumerate(JOINT_NAMES):
-                    jid = model.joint(joint_name).id
-                    tensor_close(kin.qmin[j], model.jnt_range[jid, 0])
-                    tensor_close(kin.qmax[j], model.jnt_range[jid, 1])
-
-    def test_06_desc_independent_ancestry(self):
-        """Đối chiếu ma trận desc bằng cây parent của MuJoCo, không dùng desc để tự xác nhận."""
-        for name, model, kin in self.models:
-            with self.subTest(xml=name):
-                self.assertEqual(tuple(kin.desc.shape), (10, 11))
-                expected = np.zeros((10, 11), dtype=np.float32)
-                for ji, joint_name in enumerate(JOINT_NAMES):
-                    joint_body = int(model.jnt_bodyid[model.joint(joint_name).id])
-                    for bi, body_id in enumerate(kin.bodies):
-                        expected[ji, bi] = float(ancestor_of(model, joint_body, body_id))
-                tensor_close(kin.desc, expected, atol=0)
-                np.testing.assert_array_equal(to_numpy(kin.desc[:, 0]), np.zeros(10))
-                np.testing.assert_array_equal(expected.sum(axis=1),
-                                              np.array([5, 4, 3, 2, 1, 5, 4, 3, 2, 1]))
-
-    def test_07_site_desc_left_right(self):
-        for name, _model, kin in self.models:
-            with self.subTest(xml=name):
-                self.assertEqual(tuple(kin.site_desc.shape), (2, 10))
-                expected = np.array([[1] * 5 + [0] * 5, [0] * 5 + [1] * 5], dtype=np.float32)
-                tensor_close(kin.site_desc, expected, atol=0)
-                tensor_close(kin.site_desc, to_numpy(kin.desc[:, kin.site_body].T), atol=0)
-                tensor_close(kin.legs[0], np.arange(5), atol=0)
-                tensor_close(kin.legs[1], np.arange(5, 10), atol=0)
-
-    def test_08_levels_data_and_parent_mapping(self):
-        """Đối chiếu từng level với cây robot và kiểm tra skew/k2."""
-        for name, _model, kin in self.models:
-            with self.subTest(xml=name):
-                self.assertEqual(len(kin.levels), 5)
-                depth = [depth_for_local_body(kin, i) for i in range(11)]
-                self.assertEqual(depth, [0, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5])
-                for d, lv in enumerate(kin.levels, start=1):
-                    ids = [i for i in range(11) if depth[i] == d]
-                    prev = [i for i in range(11) if depth[i] == d - 1]
-                    self.assertEqual(len(ids), 2)
-                    tensor_close(lv["joint"], [kin.joint_of_body[i] for i in ids], atol=0)
-                    tensor_close(lv["parent"], [prev.index(kin.parent[i]) for i in ids], atol=0)
-                    tensor_close(lv["pos0"], to_numpy(kin.body_pos0[ids]))
-                    tensor_close(lv["rot0"], to_numpy(kin.body_rot0[ids]))
-                    tensor_close(lv["axis"], to_numpy(kin.joint_axis[lv["joint"]]))
-                    self.assertEqual(tuple(lv["k"].shape), (2, 3, 3))
-                    tensor_close(lv["k2"], to_numpy(lv["k"] @ lv["k"]))
-                    for k, axis in zip(to_numpy(lv["k"]), to_numpy(lv["axis"])):
-                        ax, ay, az = axis
-                        expected_skew = np.array([[0, -az, ay], [az, 0, -ax], [-ay, ax, 0]])
-                        np.testing.assert_allclose(k, expected_skew, atol=1e-7)
-
-    def test_09_level_permutation_roundtrip(self):
-        """Kiểm tra hoán vị level -> thứ tự khâu/khớp ban đầu."""
-        for name, _model, kin in self.models:
-            with self.subTest(xml=name):
-                body_order = [0]
-                joint_order = []
-                depth = [depth_for_local_body(kin, i) for i in range(11)]
-                for d, level in enumerate(kin.levels, start=1):
-                    body_order.extend(i for i in range(11) if depth[i] == d)
-                    joint_order.extend(level["joint"].tolist())
-                self.assertEqual(sorted(body_order), list(range(11)))
-                self.assertEqual(sorted(joint_order), list(range(10)))
-                tensor_close(kin.body_from_level, [body_order.index(i) for i in range(11)], atol=0)
-                tensor_close(kin.joint_from_level, [joint_order.index(j) for j in range(10)], atol=0)
-                self.assertEqual(to_numpy(kin.body_from_level).dtype.kind, "i")
-                self.assertEqual(to_numpy(kin.joint_from_level).dtype.kind, "i")
-
-    def test_10_device_dtype_and_finite(self):
-        for name, _model, kin in self.models:
-            with self.subTest(xml=name):
-                self.assertEqual(kin.device.type, "cpu")
-                tensor_fields = (
-                    "body_pos0", "body_rot0", "joint_axis", "mass", "ipos",
-                    "site_pos0", "site_rot0", "qmin", "qmax", "desc", "site_desc",
+                pos, rot, q = get_batched_inputs(cases, self.device)
+                out = kin.compute_body_kinematics(pos, rot, q)
+                self.assertEqual(len(out), 4)
+                expected_shapes = (
+                    (len(cases), 11, 3),
+                    (len(cases), 11, 3, 3),
+                    (len(cases), 10, 3),
+                    (len(cases), 10, 3),
                 )
-                for field in tensor_fields:
-                    v = getattr(kin, field)
-                    self.assertEqual(v.device.type, "cpu", field)
-                    self.assertEqual(v.dtype, torch.float32, field)
-                    self.assertTrue(bool(torch.isfinite(v).all()), field)
-                for field in ("body_from_level", "joint_from_level"):
-                    v = getattr(kin, field)
-                    self.assertEqual(v.dtype, torch.long, field)
-                for level in kin.levels:
-                    for key in ("parent", "joint"):
-                        self.assertEqual(level[key].dtype, torch.long)
-                    for key in ("pos0", "rot0", "axis", "k", "k2"):
-                        self.assertEqual(level[key].dtype, torch.float32)
-                        self.assertTrue(bool(torch.isfinite(level[key]).all()))
+                for value, shape in zip(out, expected_shapes):
+                    self.assertEqual(tuple(value.shape), shape)
+                    self.assertEqual(value.dtype, torch.float32)
+                    self.assertEqual(value.device, self.device)
+                    self.assertTrue(torch.isfinite(value).all().item())
 
-    @unittest.skipUnless(torch.cuda.is_available(), "Không có CUDA; chỉ chạy CPU")
-    def test_11_optional_cuda(self):
-        model = self.models[0][1]
-        kin = RobotKinematics(model, device="cuda")
-        self.assertEqual(kin.joint_axis.device.type, "cuda")
-        self.assertEqual(kin.site_desc.device.type, "cuda")
-        self.assertEqual(kin.levels[0]["k"].device.type, "cuda")
-        tensor_close(kin.site_desc, np.array([[1] * 5 + [0] * 5, [0] * 5 + [1] * 5]))
+    def test_02_all_cases_match_mujoco_forward(self):
+        """The main test: positions, rotations, joint axes and anchors."""
+        for name, model, kin, cases in self.models:
+            with self.subTest(xml=name):
+                pos, rot, q = get_batched_inputs(cases, self.device)
+                actual = kin.compute_body_kinematics(pos, rot, q)
+                reference = [
+                    np.stack([mujoco_reference(model, kin, c)[j] for c in cases])
+                    for j in range(4)
+                ]
+                for key, got, want, tol in zip(
+                    ("body_pos", "body_rot", "axis", "anchor"),
+                    actual, reference,
+                    (ATOL_POS, ATOL_ROT, ATOL_AXIS, ATOL_POS),
+                ):
+                    check_close(got, want, f"{name}: {key}", atol=tol)
+
+    def test_03_base_pose_is_preserved(self):
+        """Output for base_link equals given base pose (frame P=W in oracle)."""
+        for name, model, kin, cases in self.models:
+            with self.subTest(xml=name):
+                pos, rot, q = get_batched_inputs(cases, self.device)
+                bp, br, axis, anchor = kin.compute_body_kinematics(pos, rot, q)
+                check_close(bp[:, 0], pos, "base position", atol=1e-7)
+                check_close(br[:, 0], rot, "base rotation", atol=1e-7)
+
+    def test_04_joint_anchor_equals_joint_body_origin_in_v5(self):
+        """The current v5 declares hinge joint positions at body origin."""
+        for name, model, kin, cases in self.models:
+            with self.subTest(xml=name):
+                pos, rot, q = get_batched_inputs(cases, self.device)
+                bp, br, axis, anchor = kin.compute_body_kinematics(pos, rot, q)
+                joint_origins = bp[:, kin.joint_body]
+                check_close(anchor, joint_origins, "joint origin = anchor", atol=1e-7)
+                check_close(
+                    torch.linalg.vector_norm(axis, dim=-1),
+                    torch.ones_like(axis[..., 0]),
+                    "joint axes unit length", atol=1e-5,
+                )
+
+    def test_05_every_rotation_is_orthonormal(self):
+        for name, model, kin, cases in self.models:
+            with self.subTest(xml=name):
+                pos, rot, q = get_batched_inputs(cases, self.device)
+                _, body_rot, _, _ = kin.compute_body_kinematics(pos, rot, q)
+                identity = torch.eye(3, dtype=body_rot.dtype, device=self.device)
+                check_close(
+                    body_rot.transpose(-1, -2) @ body_rot,
+                    identity.expand_as(body_rot),
+                    "R^T R == I", atol=ATOL_ROT,
+                )
+                check_close(
+                    torch.linalg.det(body_rot),
+                    torch.ones_like(body_rot[..., 0, 0]),
+                    "det(R) == 1", atol=ATOL_ROT,
+                )
+
+    def test_06_batch_is_equivalent_to_individual_execution(self):
+        """Catch incorrect broadcasting, batch-to-batch mixing, and reordering."""
+        for name, model, kin, cases in self.models:
+            with self.subTest(xml=name):
+                pos, rot, q = get_batched_inputs(cases, self.device)
+                batched = kin.compute_body_kinematics(pos, rot, q)
+                for i in range(len(cases)):
+                    single = kin.compute_body_kinematics(
+                        pos[i:i + 1], rot[i:i + 1], q[i:i + 1]
+                    )
+                    for j, key in enumerate(("body_pos", "body_rot", "axis", "anchor")):
+                        check_close(
+                            batched[j][i:i + 1], single[j],
+                            f"{key} batch vs single ({i})", atol=2e-6,
+                        )
+
+    def test_07_translation_equivariance(self):
+        """Translating the base translates positions/anchors, not orientations/axes."""
+        for name, model, kin, cases in self.models:
+            with self.subTest(xml=name):
+                pos, rot, q = get_batched_inputs(cases, self.device)
+                shift = torch.tensor([0.12, -0.08, 0.04], device=self.device)
+                p1, r1, a1, o1 = kin.compute_body_kinematics(pos, rot, q)
+                p2, r2, a2, o2 = kin.compute_body_kinematics(pos + shift, rot, q)
+                check_close(p2, p1 + shift, "shifted body positions", atol=2e-6)
+                check_close(o2, o1 + shift, "shifted anchors", atol=2e-6)
+                check_close(r2, r1, "unchanged body rotations", atol=2e-6)
+                check_close(a2, a1, "unchanged joint axes", atol=2e-6)
+
+    def test_08_world_rotation_equivariance(self):
+        """A common frame rotation must rotate all positions, rotations, and axes."""
+        for name, model, kin, cases in self.models:
+            with self.subTest(xml=name):
+                pos, rot, q = get_batched_inputs(cases, self.device)
+                phi = 0.53
+                c, s = np.cos(phi), np.sin(phi)
+                G = torch.tensor(
+                    [[c, -s, 0.], [s, c, 0.], [0., 0., 1.]],
+                    device=self.device, dtype=torch.float32,
+                )
+                old = kin.compute_body_kinematics(pos, rot, q)
+                rot_pos = torch.einsum("ij,bj->bi", G, pos)
+                rot_rot = torch.einsum("ij,bjk->bik", G, rot)
+                new = kin.compute_body_kinematics(rot_pos, rot_rot, q)
+                check_close(
+                    new[0], torch.einsum("ij,bnj->bni", G, old[0]),
+                    "rotated positions", atol=ATOL_POS,
+                )
+                check_close(
+                    new[1], torch.einsum("ij,bnjk->bnik", G, old[1]),
+                    "rotated body matrices", atol=ATOL_ROT,
+                )
+                check_close(
+                    new[2], torch.einsum("ij,bnj->bni", G, old[2]),
+                    "rotated axes", atol=ATOL_AXIS,
+                )
+                check_close(
+                    new[3], torch.einsum("ij,bnj->bni", G, old[3]),
+                    "rotated anchors", atol=ATOL_POS,
+                )
+
+    def test_09_left_joint_changes_do_not_move_right_leg(self):
+        """With identical base pose, left-leg q cannot alter right-leg bodies."""
+        for name, model, kin, cases in self.models:
+            with self.subTest(xml=name):
+                pos = torch.tensor([[0., 0., 0.275]], device=self.device).repeat(2, 1)
+                rot = torch.eye(3, device=self.device)[None].repeat(2, 1, 1)
+                q = torch.zeros(2, 10, device=self.device)
+                q[1, 2] = 0.45
+                q[1, 3] = -0.50
+                bp, br, axis, anchor = kin.compute_body_kinematics(pos, rot, q)
+                check_close(bp[0, 6:], bp[1, 6:], "right leg positions", atol=1e-7)
+                check_close(br[0, 6:], br[1, 6:], "right leg rotations", atol=1e-7)
+                check_close(axis[0, 5:], axis[1, 5:], "right leg axes", atol=1e-7)
+                check_close(anchor[0, 5:], anchor[1, 5:], "right leg anchors", atol=1e-7)
+                self.assertGreater(
+                    float(torch.max(torch.abs(bp[0, 4:6] - bp[1, 4:6]))), 1e-3,
+                    "Changing left hip/knee must affect left ankle geometry.",
+                )
+
+    def test_10_inputs_unchanged_and_gradients_finite(self):
+        """FK remains a differentiable PyTorch operation without input mutation."""
+        for name, model, kin, cases in self.models:
+            with self.subTest(xml=name):
+                pos, rot, q = get_batched_inputs(cases[:2], self.device)
+                pos.requires_grad_(True)
+                q.requires_grad_(True)
+                orig_pos = pos.detach().clone()
+                orig_q = q.detach().clone()
+                bp, br, axis, anchor = kin.compute_body_kinematics(pos, rot, q)
+                check_close(pos, orig_pos, "base_pos unchanged", atol=0.0)
+                check_close(q, orig_q, "q unchanged", atol=0.0)
+                loss = bp[:, 5, :].square().sum() + bp[:, 10, :].square().sum()
+                loss = loss + 0.01 * br[:, 5].square().sum()
+                loss.backward()
+                self.assertIsNotNone(pos.grad)
+                self.assertIsNotNone(q.grad)
+                self.assertTrue(torch.isfinite(pos.grad).all().item())
+                self.assertTrue(torch.isfinite(q.grad).all().item())
+                self.assertGreater(float(q.grad.abs().max()), 1e-8)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test RobotKinematics.__init__() - v5")
-    parser.add_argument("--model-only", action="store_true", help="Chỉ kiểm tra open_duck_mini_v5.xml")
-    parser.add_argument("--verbose", action="store_true", help="Hiển thị chi tiết từng bài test")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
+    parser.add_argument("--samples", type=int, default=8,
+                        help="Number of random configurations per MJCF (default: 8)")
+    parser.add_argument("--model-only", action="store_true",
+                        help="Test bare open_duck_mini_v5.xml only, skip scene")
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    TestRobotKinematicsInit.model_only = args.model_only
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestRobotKinematicsInit)
-    result = unittest.TextTestRunner(verbosity=2 if args.verbose else 1).run(suite)
+    if args.samples < 1:
+        parser.error("--samples must be >= 1")
+    if args.device == "cuda" and not torch.cuda.is_available():
+        parser.error("CUDA is unavailable; use --device cpu")
+
+    TestComputeBodyKinematics.options = args
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+        TestComputeBodyKinematics
+    )
+    result = unittest.TextTestRunner(
+        verbosity=2 if args.verbose else 1
+    ).run(suite)
     if result.wasSuccessful():
-        model_count = 1 if args.model_only else 2
-        print(f"\nPASS: __init__() v5 trên {model_count} mô hình (robot-only / scene).")
-        print("Chưa kiểm tra FK/Jacobian số học; sẽ kiểm tra ở các hàm tiếp theo.")
-    sys.exit(0 if result.wasSuccessful() else 1)
+        checked = 1 if args.model_only else 2
+        print(
+            f"\n[PASS] compute_body_kinematics: 10 test groups; "
+            f"{checked} v5 MJCF file(s); "
+            f"{args.samples + 2} configurations per file; "
+            f"device={args.device}"
+        )
+        print(
+            "MuJoCo oracle: body_xpos/xmat + joint_xaxis/xanchor; "
+            "also batch, equivariance, orthogonality, gradients."
+        )
+    raise SystemExit(0 if result.wasSuccessful() else 1)
 
 
 if __name__ == "__main__":
