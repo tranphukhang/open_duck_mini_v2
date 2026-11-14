@@ -299,3 +299,33 @@ class RobotKinematics:
 
         return com_body, com
 
+
+    def compute_foot_kinematics(self, body_pos, body_rot):
+        """
+        Tính vị trí và hướng hai bàn chân trong hệ {P}.
+
+        Args:
+            body_pos: (B, 11, 3)     Vị trí các khâu trong {P}
+            body_rot: (B, 11, 3, 3)  Hướng các khâu trong {P}
+
+        Returns:
+            site_pos: (B, 2, 3)      Vị trí hai bàn chân
+            site_rot: (B, 2, 3, 3)   Hướng hai bàn chân
+
+        Thứ tự site:
+            0: L6_IK
+            1: R6_IK
+        """
+
+        # 1. Lấy vị trí và hướng của các khâu chứa site IK
+        foot_body_pos = body_pos[:, self.site_body]
+        foot_body_rot = body_rot[:, self.site_body]
+
+        # 2. Tính vị trí hai site trong hệ {P}
+        site_pos = foot_body_pos + (foot_body_rot @ self.site_pos0[None, :, :, None]).squeeze(-1)
+
+        # 3. Tính hướng hai site trong hệ {P}
+        site_rot = foot_body_rot @ self.site_rot0[None, :, :, :]
+
+        return site_pos, site_rot
+
