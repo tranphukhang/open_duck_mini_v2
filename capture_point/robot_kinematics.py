@@ -511,5 +511,58 @@ class RobotKinematics:
 
         return J
 
+    
+    def compute_rotation_jacobian(self, ks, desc):
+        """
+        Tính Jacobian hướng của bàn chân hoặc base trong hệ {P}.
+
+        Args:
+            ks: KinState
+                Trạng thái động học từ forward_kinematics().
+
+            desc: (10,) hoặc None
+                Mặt nạ các khớp ảnh hưởng đến hướng:
+                    self.site_desc[0]: Bàn chân trái
+                    self.site_desc[1]: Bàn chân phải
+                    None: Hướng base
+
+        Returns:
+            J: (B, 3, 16)
+                Jacobian vận tốc góc.
+        """
+
+        B = ks.axis.shape[0]
+
+        # --------------------------------------------------
+        # 1. Jacobian đối với vị trí base
+        # --------------------------------------------------
+        J_pos = torch.zeros(B, 3, 3, dtype=ks.axis.dtype, device=ks.axis.device)
+
+        # --------------------------------------------------
+        # 2. Jacobian đối với hướng base
+        # --------------------------------------------------
+        J_rot = torch.eye(3, dtype=ks.axis.dtype, device=ks.axis.device).unsqueeze(0).expand(B, -1, -1)
+
+        # --------------------------------------------------
+        # 3. Jacobian đối với 10 khớp
+        # --------------------------------------------------
+        if desc is None:
+            # Hướng base không phụ thuộc các góc khớp chân
+            J_joint = torch.zeros(B, 3, 10, dtype=ks.axis.dtype, device=ks.axis.device)
+        else:
+            # Chỉ giữ các trục khớp ảnh hưởng đến hướng
+            J_joint = ks.axis * desc[None, :, None]
+
+            # (B, 10, 3) -> (B, 3, 10)
+            J_joint = J_joint.transpose(1, 2)
+
+        # --------------------------------------------------
+        # 4. Ghép Jacobian hoàn chỉnh
+        # --------------------------------------------------
+        J = torch.cat([J_pos, J_rot, J_joint],dim=-1)
+
+        return J
+
+
 
 
