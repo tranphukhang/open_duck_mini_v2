@@ -388,3 +388,59 @@ class RobotKinematics:
         )
 
 
+    def compute_point_jacobian(self, ks, point, desc, base_pos):
+        """
+        Tính Jacobian vận tốc tịnh tiến của một điểm trên robot.
+
+        Args:
+            ks: KinState
+                Trạng thái động học từ forward_kinematics().
+
+            point: (B, 3)
+                Vị trí điểm đang xét trong hệ {P}.
+
+            desc: (10,)
+                Mặt nạ xác định các khớp ảnh hưởng đến điểm.
+
+            base_pos: (B, 3)
+                Vị trí base trong hệ {P}.
+
+        Returns:
+            J: (B, 3, 16)
+                Jacobian vị trí của điểm.
+        """
+
+        B = point.shape[0]
+
+        # 1. Jacobian đối với vị trí base
+        J_pos = torch.eye(3, dtype=point.dtype, device=point.device).unsqueeze(0).expand(B, -1, -1)
+
+        # 2. Jacobian đối với hướng base
+        r = point - base_pos
+
+        rx, ry, rz = r.unbind(dim=-1)
+        zero = torch.zeros_like(rx)
+
+        J_rot = torch.stack([
+            zero,  rz, -ry,
+            -rz, zero,  rx,
+             ry,  -rx, zero
+        ], dim=-1).reshape(B, 3, 3)
+
+        # 3. Jacobian đối với 10 khớp
+        r_joint = point[:, None, :] - ks.anchor
+
+        J_joint = torch.cross(ks.axis, r_joint, dim=-1)
+
+        # Chỉ giữ các khớp ảnh hưởng đến điểm
+        J_joint = J_joint * desc[None, :, None]
+
+        # Chuyển từ (B, 10, 3) sang (B, 3, 10)
+        J_joint = J_joint.transpose(1, 2)
+
+        # 4. Ghép Jacobian tổng thể
+        J = torch.cat([J_pos, J_rot, J_joint], dim=-1)
+
+        return J
+
+
