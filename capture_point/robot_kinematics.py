@@ -443,4 +443,73 @@ class RobotKinematics:
 
         return J
 
+    
+    def compute_com_jacobian(self, ks, base_pos):
+        """
+        Tính Jacobian vị trí CoM toàn robot trong hệ {P}.
+
+        Args:
+            ks: KinState
+                Trạng thái động học từ forward_kinematics().
+
+            base_pos: (B, 3)
+                Vị trí base trong hệ {P}.
+
+        Returns:
+            J: (B, 3, 16)
+                Jacobian vị trí CoM toàn robot.
+        """
+
+        B = base_pos.shape[0]
+
+        # --------------------------------------------------
+        # 1. Jacobian đối với vị trí base
+        # --------------------------------------------------
+        J_pos = torch.eye(3, dtype=base_pos.dtype, device=base_pos.device).unsqueeze(0).expand(B, -1, -1)
+
+        # --------------------------------------------------
+        # 2. Jacobian đối với hướng base
+        # --------------------------------------------------
+        r = ks.com - base_pos
+
+        rx, ry, rz = r.unbind(dim=-1)
+        zero = torch.zeros_like(rx)
+
+        J_rot = torch.stack([
+            zero,  rz, -ry,
+            -rz, zero,  rx,
+             ry,  -rx, zero
+        ], dim=-1).reshape(B, 3, 3)
+
+        # --------------------------------------------------
+        # 3. Jacobian CoM đối với 10 khớp
+        # --------------------------------------------------
+
+        # Vector từ gốc mỗi khớp đến CoM của từng khâu
+        # (B, 10, 11, 3)
+        r_joint = (ks.com_body[:, None, :, :] - ks.anchor[:, :, None, :])
+
+        # Tích có hướng của trục khớp và vector r_joint
+        # (B, 10, 11, 3)
+        J_body = torch.cross(ks.axis[:, :, None, :], r_joint, dim=-1)
+
+        # Trọng số khối lượng và quan hệ khớp - khâu
+        # (10, 11)
+        weights = self.desc * self.mass[None, :]
+
+        # Tổng hợp Jacobian của 11 khâu
+        # (B, 10, 3)
+        J_joint = (J_body * weights[None, :, :, None]).sum(dim=2) / self.total_mass
+
+        # Chuyển thành (B, 3, 10)
+        J_joint = J_joint.transpose(1, 2)
+
+        # --------------------------------------------------
+        # 4. Ghép Jacobian CoM hoàn chỉnh
+        # --------------------------------------------------
+        J = torch.cat([J_pos, J_rot, J_joint],dim=-1)
+
+        return J
+
+
 
