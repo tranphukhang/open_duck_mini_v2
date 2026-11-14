@@ -58,3 +58,35 @@ class WholeBodyIK:
             dtype=kin.mass.dtype,
             device=self.device
         )
+
+
+    @staticmethod
+    def compute_rotation_error(R_des, R_cur):
+        """
+        Tính vector sai số hướng trong hệ {P}.
+
+        Args:
+            R_des: (..., 3, 3)
+                Ma trận quay mong muốn.
+
+            R_cur: (..., 3, 3)
+                Ma trận quay hiện tại.
+
+        Returns:
+            e_rot: (..., 3)
+                Vector sai số hướng trong hệ {P}.
+        """
+
+        # 1. Tính ma trận quay sai lệch
+        R_err = R_des @ R_cur.transpose(-1, -2)
+
+        # 2. Trích xuất vector sai số hướng
+        e_rot = 0.5 * torch.stack([
+            R_err[..., 2, 1] - R_err[..., 1, 2],
+            R_err[..., 0, 2] - R_err[..., 2, 0],
+            R_err[..., 1, 0] - R_err[..., 0, 1]
+        ], dim=-1)
+
+        return e_rot
+
+    
