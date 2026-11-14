@@ -1,7 +1,24 @@
-
+from dataclasses import dataclass
 import mujoco
 import numpy as np
 import torch
+
+
+@dataclass
+class KinState:
+    """Trạng thái động học của robot trong hệ {P}."""
+
+    body_pos: torch.Tensor   # (B, 11, 3)
+    body_rot: torch.Tensor   # (B, 11, 3, 3)
+
+    com_body: torch.Tensor   # (B, 11, 3)
+    com: torch.Tensor        # (B, 3)
+
+    site_pos: torch.Tensor   # (B, 2, 3)
+    site_rot: torch.Tensor   # (B, 2, 3, 3)
+
+    axis: torch.Tensor       # (B, 10, 3)
+    anchor: torch.Tensor     # (B, 10, 3)
 
 
 class RobotKinematics:
@@ -328,4 +345,46 @@ class RobotKinematics:
         site_rot = foot_body_rot @ self.site_rot0[None, :, :, :]
 
         return site_pos, site_rot
+
+    
+    def forward_kinematics(self, base_pos, base_rot, q):
+        """
+        Tính động học thuận toàn robot.
+
+        Args:
+            base_pos: (B, 3)
+                Vị trí base trong {P}.
+
+            base_rot: (B, 3, 3)
+                Hướng base trong {P}.
+
+            q: (B, 10)
+                Góc 10 khớp chân (rad).
+
+        Returns:
+            KinState:
+                Chứa trạng thái động học toàn robot.
+        """
+
+        # 1. Tính vị trí, hướng các khâu và thông số khớp
+        body_pos, body_rot, axis, anchor = (self.compute_body_kinematics(base_pos, base_rot, q))
+
+        # 2. Tính CoM từng khâu và CoM toàn robot
+        com_body, com = self.compute_center_of_mass(body_pos, body_rot)
+
+        # 3. Tính vị trí và hướng hai bàn chân
+        site_pos, site_rot = self.compute_foot_kinematics(body_pos, body_rot)
+
+        # 4. Đóng gói trạng thái động học
+        return KinState(
+            body_pos=body_pos,
+            body_rot=body_rot,
+            com_body=com_body,
+            com=com,
+            site_pos=site_pos,
+            site_rot=site_rot,
+            axis=axis,
+            anchor=anchor,
+        )
+
 
