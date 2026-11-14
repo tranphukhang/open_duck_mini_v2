@@ -256,3 +256,66 @@ class WholeBodyIK:
 
         return J, e
 
+    
+    def solve_dls(self, J, e):
+        """
+        Giải bài toán Weighted Damped Least Squares.
+
+        Args:
+            J: (B, 28, 16)
+                Jacobian tổng hợp từ build_tasks().
+
+            e: (B, 28)
+                Vector sai số tổng hợp từ build_tasks().
+
+        Returns:
+            delta_qg: (B, 16)
+                Gia số cấu hình tổng quát:
+                    [:, 0:3]   Gia số vị trí base
+                    [:, 3:6]   Gia số quay base
+                    [:, 6:16]  Gia số 10 khớp chân
+        """
+
+        # --------------------------------------------------
+        # 1. Áp dụng trọng số WDLS
+        # --------------------------------------------------
+        w = self.weight_vector.to(dtype=J.dtype, device=J.device)
+
+        JT = J.transpose(1, 2)
+
+        # J^T W: (B, 16, 28)
+        JTW = JT * w[None, None, :]
+
+        # --------------------------------------------------
+        # 2. Xây dựng hệ phương trình tuyến tính
+        # --------------------------------------------------
+        damping = self.weights.damping
+
+        I = torch.eye(16, dtype=J.dtype, device=J.device)
+
+        # H = J^T W J + lambda I
+        # (B, 16, 16)
+        H = JTW @ J + damping * I
+
+        # b = J^T W e
+        # (B, 16, 1)
+        b = JTW @ e.unsqueeze(-1)
+
+        # --------------------------------------------------
+        # 3. Giải hệ WDLS
+        # --------------------------------------------------
+        result = torch.linalg.solve_ex(H, b, check_errors=False)
+
+        delta_qg = result.result.squeeze(-1)
+
+        # --------------------------------------------------
+        # 4. Kiểm tra nghiệm
+        # --------------------------------------------------
+        valid = ((result.info == 0) & torch.isfinite(delta_qg).all(dim=1))
+
+        # Nếu nghiệm không hợp lệ, giữ nguyên cấu hình
+        delta_qg = torch.where(valid[:, None], delta_qg, torch.zeros_like(delta_qg))
+
+        return delta_qg
+
+
