@@ -59,5 +59,35 @@ class CapturePoint:
         return correction
 
     
+    # Hiệu chỉnh vị trí tiếp đất và giới hạn bề rộng bước chân
+    def correct_landing(self, nominal_landing, correction, stance, stance_y):
+        # nominal_landing: (B, 3) - Vị trí tiếp đất danh định
+        # correction:      (B, 2) - Độ hiệu chỉnh CP theo X/Y
+        # stance:          (B,)   - Chân stance (0: trái, 1: phải)
+        # stance_y:        (B,)   - Tọa độ Y của chân stance
+
+        # Tạo bản sao để không thay đổi nominal_landing
+        corrected_landing = nominal_landing.clone()
+
+        # Cộng độ hiệu chỉnh CP theo X/Y
+        corrected_landing[:, :2] += correction
+
+        # Giới hạn bề rộng bước chân theo từng chân stance
+        landing_y = torch.where(stance == 0,
+            torch.minimum(
+                corrected_landing[:, 1],
+                stance_y - self.min_step_width
+            ),
+            torch.maximum(
+                corrected_landing[:, 1],
+                stance_y + self.min_step_width
+            )
+        )
+
+        # Cập nhật tọa độ Y sau khi giới hạn
+        corrected_landing[:, 1] = landing_y
+
+        return corrected_landing
+
 
 
