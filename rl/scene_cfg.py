@@ -30,15 +30,8 @@ def get_contact_switch_cfg() -> ContactSensorCfg:
 def get_contact_wrench_cfg() -> ContactSensorCfg:
     return ContactSensorCfg(
         name="feet_wrench",
-        primary=ContactMatch(
-            mode="geom",
-            pattern=FOOT_GEOM_NAMES,
-            entity="robot",
-        ),
-        secondary=ContactMatch(
-            mode="body",
-            pattern="terrain",
-        ),
+        primary=ContactMatch(mode="geom", pattern=FOOT_GEOM_NAMES, entity="robot",),
+        secondary=ContactMatch(mode="body", pattern="terrain",),
         fields=("found", "force", "torque", "pos"),
         reduce="netforce",
         num_slots=1,
