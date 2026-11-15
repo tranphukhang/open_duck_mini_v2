@@ -1,0 +1,120 @@
+from mjlab.sim import MujocoCfg, SimulationCfg
+from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
+from mjlab.envs import mdp as env_mdp
+from mjlab.tasks.velocity import mdp as velocity_mdp
+from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
+
+# Physics simulation
+PHYSICS_DT = 0.0005
+
+# Policy control
+DECIMATION = 40
+POLICY_DT = PHYSICS_DT * DECIMATION
+
+# Episode
+EPISODE_LENGTH_S = 10.0
+IS_FINITE_HORIZON = False
+SCALE_REWARDS_BY_DT = True
+
+def get_sim_cfg() -> SimulationCfg:
+    """Return the Open Duck Mini V2 simulation configuration."""
+
+    return SimulationCfg(
+        mujoco=MujocoCfg(
+            timestep=PHYSICS_DT,
+            integrator="implicitfast",
+            solver="newton",
+            cone="elliptic",
+            tolerance=1e-10,
+            disableflags=(),
+        ),
+    )
+
+def get_command_cfg() -> UniformVelocityCommandCfg:
+    """Return the velocity command configuration."""
+
+    return UniformVelocityCommandCfg(
+        entity_name="robot",
+        resampling_time_range=(10.0, 10.0),
+        rel_standing_envs=0.2,
+        rel_heading_envs=0.0,
+        rel_forward_envs=0.0,
+        rel_world_envs=0.0,
+        heading_command=False,
+        init_velocity_prob=0.0,
+        debug_vis=True,
+        ranges=UniformVelocityCommandCfg.Ranges(
+            lin_vel_x=(0.0, 0.1),
+            lin_vel_y=(0.0, 0.0),
+            ang_vel_z=(0.0, 0.0),
+        ),
+    )
+
+def get_observation_cfg() -> dict[str, ObservationGroupCfg]:
+    """Return actor and critic observation configurations."""
+
+    actor_terms = {
+        "base_lin_vel": ObservationTermCfg(
+            func=env_mdp.builtin_sensor,
+            params={"sensor_name": "robot/imu_lin_vel"},
+        ),
+
+        "base_ang_vel": ObservationTermCfg(
+            func=env_mdp.builtin_sensor,
+            params={"sensor_name": "robot/imu_ang_vel"},
+        ),
+
+        "projected_gravity": ObservationTermCfg(
+            func=env_mdp.projected_gravity,
+        ),
+
+        "joint_pos": ObservationTermCfg(
+            func=env_mdp.joint_pos_rel,
+            params={"biased": True},
+        ),
+
+        "joint_vel": ObservationTermCfg(
+            func=env_mdp.joint_vel_rel,
+        ),
+
+        "actions": ObservationTermCfg(
+            func=env_mdp.last_action,
+        ),
+
+        "command": ObservationTermCfg(
+            func=env_mdp.generated_commands,
+            params={"command_name": "twist"},
+        ),
+    }
+
+    critic_terms = {
+        **actor_terms,
+
+        "joint_pos": ObservationTermCfg(
+            func=env_mdp.joint_pos_rel,
+        ),
+
+        "foot_contact": ObservationTermCfg(
+            func=velocity_mdp.foot_contact,
+            params={"sensor_name": "feet_contact"},
+        ),
+
+        "foot_air_time": ObservationTermCfg(
+            func=velocity_mdp.foot_air_time,
+            params={"sensor_name": "feet_contact"},
+        ),
+    }
+
+    return {
+        "actor": ObservationGroupCfg(
+            terms=actor_terms,
+            concatenate_terms=True,
+            enable_corruption=False,
+        ),
+
+        "critic": ObservationGroupCfg(
+            terms=critic_terms,
+            concatenate_terms=True,
+            enable_corruption=False,
+        ),
+    }
