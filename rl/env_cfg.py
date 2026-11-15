@@ -5,6 +5,8 @@ from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from rl.robot_cfg import JOINT_NAMES
+from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 # Physics simulation
 PHYSICS_DT = 0.0005
@@ -132,3 +134,51 @@ def get_action_cfg() -> JointPositionActionCfg:
         scale=ACTION_SCALE,
         use_default_offset=True,
     )
+
+def get_reward_cfg() -> dict[str, RewardTermCfg]:
+    """Return the Open Duck Mini V2 reward configuration."""
+    return {
+        "track_linear_velocity": RewardTermCfg(
+            func=velocity_mdp.track_linear_velocity,
+            weight=3.0,
+            params={
+                "command_name": "twist",
+                "std": 0.1,
+            },
+        ),
+
+        "track_angular_velocity": RewardTermCfg(
+            func=velocity_mdp.track_angular_velocity,
+            weight=0.5,
+            params={
+                "command_name": "twist",
+                "std": 0.5,
+            },
+        ),
+
+
+        "action_rate_l2": RewardTermCfg(
+            func=env_mdp.action_rate_l2,
+            weight=-0.01,
+        ),
+
+
+        "joint_torques_l2": RewardTermCfg(
+            func=env_mdp.joint_torques_l2,
+            weight=-0.0005,
+        ),
+
+        "posture": RewardTermCfg(
+            func=env_mdp.posture,
+            weight=0.05,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=JOINT_NAMES,
+                ),
+                "std": {
+                    r".*": 0.35,
+                },
+            },
+        ),
+    }
