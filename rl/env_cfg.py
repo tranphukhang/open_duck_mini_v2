@@ -3,7 +3,7 @@ from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.envs import mdp as env_mdp
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
-from rl.gait_observation import gait_observation
+from rl.gait_observation import gait_observation, gait_reference_contact
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from rl.robot_cfg import JOINT_NAMES
 from mjlab.managers.reward_manager import RewardTermCfg
@@ -102,6 +102,11 @@ def get_observation_cfg() -> dict[str, ObservationGroupCfg]:
 
         "joint_pos": ObservationTermCfg(
             func=env_mdp.joint_pos_rel,
+        ),
+
+        "gait_contact_ref": ObservationTermCfg(
+            func=gait_reference_contact,
+            params={"command_name": "twist"},
         ),
 
         "foot_contact": ObservationTermCfg(
