@@ -6,8 +6,10 @@ Assumptions agreed for the current flat-ground MJLab environment:
     contact wrench is sign-reversed to obtain terrain-on-foot GRF.
   * Each effective support patch is a 67 x 6 mm rectangle.
   * Contact frame {F_i}: origin at rectangle centre, +z world up,
-    +x the horizontal projection of the foot COLLISION geom's local +x,
+    +x the horizontal projection of the foot IK SITE's local +x,
     +y = +z cross +x. Hence roll/pitch tilt is removed, yaw retained.
+    IMPORTANT: collision geom local +x is NOT the foot longitudinal axis
+    in this robot's MJCF; the L6_IK/R6_IK sites encode the intended axis.
   * Both offsets are in these levelled axes relative to L6_IK/R6_IK:
     +11.5 mm along x, +7 mm y (left), -7 mm y (right).
   * Evaluate a foot only if its net normal GRF is > 5 N.
@@ -51,6 +53,9 @@ class CWCValues:
     friction_penalty: torch.Tensor
     cop_penalty: torch.Tensor
     yaw_penalty: torch.Tensor
+    cop_x: torch.Tensor       # (B,2) m, CoP x in {F_i}
+    cop_y: torch.Tensor       # (B,2) m, CoP y in {F_i}
+    normal_force: torch.Tensor  # (B,2) N, terrain-on-foot normal force
 
 
 @dataclass(frozen=True)
@@ -59,7 +64,6 @@ class _Ids:
     sensor_name: str
     foot_indices: tuple[int, int]
     site_ids: tuple[int, int]
-    geom_ids: tuple[int, int]
 
 
 def _resolve_ids(env: ManagerBasedRlEnv, sensor_name: str) -> _Ids:
@@ -75,7 +79,6 @@ def _resolve_ids(env: ManagerBasedRlEnv, sensor_name: str) -> _Ids:
     names = sensor.primary_names
     foot_indices = []
     site_ids = []
-    geom_ids = []
     for geom_name, site_name in zip(FOOT_GEOM_NAMES, FOOT_SITE_NAMES, strict=True):
         matches = [
             idx for idx, name in enumerate(names)
@@ -87,18 +90,15 @@ def _resolve_ids(env: ManagerBasedRlEnv, sensor_name: str) -> _Ids:
             )
         foot_indices.append(matches[0])
         sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"robot/{site_name}")
-        gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f"robot/{geom_name}")
-        if sid < 0 or gid < 0:
-            raise RuntimeError(f"Missing robot site or collision geom: {site_name}, {geom_name}")
+        if sid < 0:
+            raise RuntimeError(f"Missing robot IK site: {site_name}")
         site_ids.append(sid)
-        geom_ids.append(gid)
 
     result = _Ids(
         model_id=id(model),
         sensor_name=sensor_name,
         foot_indices=(foot_indices[0], foot_indices[1]),
         site_ids=(site_ids[0], site_ids[1]),
-        geom_ids=(geom_ids[0], geom_ids[1]),
     )
     setattr(env, "_open_duck_cwc_ids", result)
     return result
@@ -109,18 +109,19 @@ def net_wrench_to_contact_frame(
     sensor_torque_w: torch.Tensor,
     sensor_pos_w: torch.Tensor,
     ik_site_pos_w: torch.Tensor,
-    foot_geom_xmat_w: torch.Tensor,
+    ik_site_xmat_w: torch.Tensor,
     *,
     ground_height: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert MJLab netforce to GRF wrench at rectangle centre in frame {F}.
 
-    Each input except foot_geom_xmat_w is (B,2,3), and the geom orientation
-    is (B,2,3,3) (or (B,2,9)), world from geom. Outputs are (B,2,3).
+    Each input except ik_site_xmat_w is (B,2,3), and the site orientation
+    is (B,2,3,3) (or (B,2,9)), world from site. Outputs are (B,2,3).
 
-    Use collision geom x-axis rather than IK site orientation: in the current
-    MJCF, L6_IK/R6_IK sites have calibration Euler rotations. The collision
-    geoms use the foot-link axes, with +x along the longitudinal direction.
+    In the robot MJCF, L6_IK/R6_IK carry rotations mapping local site +x
+    to the foot longitudinal axis. The collision geom's local +x does not
+    correspond to the foot longitudinal axis, so do NOT use geom_xmat here.
+    Project site +x onto the horizontal plane to remove roll/pitch.
     """
     if sensor_force_w.ndim != 3 or sensor_force_w.shape[-2:] != (2, 3):
         raise ValueError("sensor_force_w must be (B,2,3)")
@@ -132,10 +133,12 @@ def net_wrench_to_contact_frame(
         if x.shape != sensor_force_w.shape:
             raise ValueError(f"{name} must match sensor_force_w shape")
     b = sensor_force_w.shape[0]
-    rot = foot_geom_xmat_w.reshape(b, 2, 3, 3)
+    if ik_site_xmat_w.shape not in ((b, 2, 3, 3), (b, 2, 9)):
+        raise ValueError("ik_site_xmat_w must be (B,2,3,3) or (B,2,9)")
+    rot = ik_site_xmat_w.reshape(b, 2, 3, 3)
 
     # Rotate away the foot's roll and pitch while retaining its heading.
-    # R[:, :, :, 0] = local +x in world coordinates.
+    # R[:, :, :, 0] = IK SITE local +x in world coordinates.
     foot_x = rot[..., :, 0]
     horizontal = torch.stack(
         (foot_x[..., 0], foot_x[..., 1], torch.zeros_like(foot_x[..., 0])), dim=-1
@@ -214,6 +217,8 @@ def compute_cwc_values(
     margin_friction = 1.0 - torch.maximum(fx.abs(), fy.abs()) / (mu * fz_safe)
 
     # Foot CoP inside [-lx,lx] x [-ly,ly] at the *contact* origin.
+    cop_x = -my / fz_safe
+    cop_y = mx / fz_safe
     margin_cop_x = 1.0 - my.abs() / (HALF_LENGTH_X * fz_safe)
     margin_cop_y = 1.0 - mx.abs() / (HALF_WIDTH_Y * fz_safe)
     margin_cop = torch.minimum(margin_cop_x, margin_cop_y)
@@ -251,6 +256,9 @@ def compute_cwc_values(
         friction_penalty=torch.where(active, pen_f, torch.zeros_like(pen_f)),
         cop_penalty=torch.where(active, pen_c, torch.zeros_like(pen_c)),
         yaw_penalty=torch.where(active, pen_y, torch.zeros_like(pen_y)),
+        cop_x=torch.where(active, cop_x, torch.zeros_like(cop_x)),
+        cop_y=torch.where(active, cop_y, torch.zeros_like(cop_y)),
+        normal_force=torch.where(active, fz, torch.zeros_like(fz)),
     )
 
 
@@ -282,9 +290,9 @@ def cwc_diagnostics(
 
     # Batched MJLab world-frame position/rotation arrays (GPU compatible).
     site_pos_w = env.sim.data.site_xpos[:, list(ids.site_ids), :]
-    foot_rot_w = env.sim.data.geom_xmat[:, list(ids.geom_ids)]
+    site_rot_w = env.sim.data.site_xmat[:, list(ids.site_ids)]
     force_f, moment_f = net_wrench_to_contact_frame(
-        force_sensor_w, torque_sensor_w, pos_sensor_w, site_pos_w, foot_rot_w
+        force_sensor_w, torque_sensor_w, pos_sensor_w, site_pos_w, site_rot_w
     )
     return compute_cwc_values(
         force_f, moment_f, found,

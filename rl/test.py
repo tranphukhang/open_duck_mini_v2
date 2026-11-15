@@ -81,7 +81,10 @@ def main() -> None:
                   f" | total P_CWC={v.penalty[0].item():.6f}")
             for i, name in enumerate(("L", "R")):
                 print(
-                    f"  {name}: friction={v.friction_margin[0, i].item():+.4f},"
+                    f"  {name}: fz={v.normal_force[0, i].item():.3f} N, "
+                    f"CoP=({v.cop_x[0, i].item()*1000:+.2f}, "
+                    f"{v.cop_y[0, i].item()*1000:+.2f}) mm | "
+                    f"friction={v.friction_margin[0, i].item():+.4f},"
                     f" CoP={v.cop_margin[0, i].item():+.4f},"
                     f" yaw={v.yaw_margin[0, i].item():+.4f}"
                     f" | P=(f:{v.friction_penalty[0, i].item():.5f},"
