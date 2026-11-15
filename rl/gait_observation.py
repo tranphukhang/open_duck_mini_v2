@@ -21,22 +21,14 @@ MOVING_THRESHOLD = 0.01
 
 
 # ============================================================
-# Gait Observation
+# Gait State
 # ============================================================
 
-def gait_observation(
+def _gait_state(
     env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-) -> torch.Tensor:
-    """
-    Return gait phase and reference foot contacts.
-
-    Output:
-        [sin(phase), cos(phase), left_contact, right_contact]
-
-    Shape:
-        (num_envs, 4)
-    """
+    command_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute gait phase and reference foot contacts."""
 
     # --------------------------------------------------------
     # 1. Get velocity command
@@ -45,10 +37,12 @@ def gait_observation(
     command = env.command_manager.get_command(command_name)
 
     if command is None:
-        raise ValueError(f"Command '{command_name}' not found")
+        raise ValueError(
+            f"Command '{command_name}' not found"
+        )
 
     # --------------------------------------------------------
-    # 2. Convert gait durations to policy steps
+    # 2. Convert durations to policy ticks
     # --------------------------------------------------------
 
     dt = env.step_dt
@@ -57,41 +51,33 @@ def gait_observation(
     step_ticks = round(STEP_S / dt)
     ds_ticks = round(DOUBLE_SUPPORT_S / dt)
 
+    assert cycle_ticks == 2 * step_ticks
+    assert 0 < ds_ticks < step_ticks
+
     # --------------------------------------------------------
-    # 3. Determine current gait step
+    # 3. Get current time within gait cycle
     # --------------------------------------------------------
 
     tick = env.episode_length_buf
 
-    tick_in_cycle = torch.remainder(tick, cycle_ticks)
-
-    step_index = torch.div(
-        tick_in_cycle,
-        step_ticks,
-        rounding_mode="floor",
-    )
-
-    local_tick = torch.remainder(
-        tick_in_cycle,
-        step_ticks,
+    tick_in_cycle = torch.remainder(
+        tick,
+        cycle_ticks,
     )
 
     # --------------------------------------------------------
-    # 4. Determine contact phase
+    # 4. Calculate gait phase
     # --------------------------------------------------------
 
-    is_ds = local_tick < ds_ticks
-
-    # Even step: left stance, right swing
-    # Odd step: right stance, left swing
-
-    is_left_stance = torch.remainder(step_index, 2) == 0
-
-    left_contact = is_ds | is_left_stance
-    right_contact = is_ds | (~is_left_stance)
+    phase = (
+        2.0
+        * math.pi
+        * tick_in_cycle.float()
+        / cycle_ticks
+    )
 
     # --------------------------------------------------------
-    # 5. Determine whether robot should walk
+    # 5. Check walking command
     # --------------------------------------------------------
 
     command_speed = torch.linalg.vector_norm(
@@ -102,15 +88,8 @@ def gait_observation(
     moving = command_speed > MOVING_THRESHOLD
 
     # --------------------------------------------------------
-    # 6. Calculate gait phase
+    # 6. Phase observation
     # --------------------------------------------------------
-
-    phase = (
-        2.0
-        * math.pi
-        * tick_in_cycle.float()
-        / cycle_ticks
-    )
 
     sin_phase = torch.where(
         moving,
@@ -124,25 +103,99 @@ def gait_observation(
         torch.ones_like(phase),
     )
 
-    # --------------------------------------------------------
-    # 7. Standing command: both feet in contact
-    # --------------------------------------------------------
-
-    left_contact = left_contact | (~moving)
-    right_contact = right_contact | (~moving)
-
-    # --------------------------------------------------------
-    # 8. Assemble observation
-    # --------------------------------------------------------
-
-    observation = torch.stack(
-        (
-            sin_phase,
-            cos_phase,
-            left_contact.float(),
-            right_contact.float(),
-        ),
+    phase_obs = torch.stack(
+        (sin_phase, cos_phase),
         dim=-1,
     )
 
-    return observation
+    # --------------------------------------------------------
+    # 7. Reference contact schedule
+    # --------------------------------------------------------
+
+    step_index = torch.div(
+        tick_in_cycle,
+        step_ticks,
+        rounding_mode="floor",
+    )
+
+    local_tick = torch.remainder(
+        tick_in_cycle,
+        step_ticks,
+    )
+
+    is_ds = local_tick < ds_ticks
+
+    # Even step: left stance, right swing
+    # Odd step: right stance, left swing
+
+    is_left_stance = step_index == 0
+
+    left_contact = (
+        is_ds | is_left_stance | (~moving)
+    )
+
+    right_contact = (
+        is_ds | (~is_left_stance) | (~moving)
+    )
+
+    contact_ref = torch.stack(
+        (
+            left_contact,
+            right_contact,
+        ),
+        dim=-1,
+    ).float()
+
+    return phase_obs, contact_ref
+
+
+# ============================================================
+# Actor: Gait Phase Observation
+# ============================================================
+
+def gait_observation(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """
+    Return gait phase observation.
+
+    Output:
+        [sin(phase), cos(phase)]
+
+    Shape:
+        (num_envs, 2)
+    """
+
+    phase_obs, _ = _gait_state(
+        env,
+        command_name,
+    )
+
+    return phase_obs
+
+
+# ============================================================
+# Critic: Reference Contact Observation
+# ============================================================
+
+def gait_reference_contact(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """
+    Return reference contact states.
+
+    Output:
+        [left_contact, right_contact]
+
+    Shape:
+        (num_envs, 2)
+    """
+
+    _, contact_ref = _gait_state(
+        env,
+        command_name,
+    )
+
+    return contact_ref
