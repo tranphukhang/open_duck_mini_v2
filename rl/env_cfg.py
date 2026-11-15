@@ -8,6 +8,7 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from rl.robot_cfg import JOINT_NAMES
 from mjlab.managers.reward_manager import RewardTermCfg
 from rl.gait_reward import gait_contact_matching
+from rl.cwc_reward import cwc_penalty
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 # Physics simulation
@@ -200,6 +201,20 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
             params={
                 "command_name": "twist",
                 "sensor_name": "feet_contact",
+            },
+        ),
+
+        "cwc_penalty": RewardTermCfg(
+            func=cwc_penalty,
+            weight=-0.1,
+            params={
+                "sensor_name": "feet_wrench",
+                "mu": 0.8,
+                "min_normal_force": 5.0,
+                "safe_margin": 0.2,
+                "weight_friction": 1.0,
+                "weight_cop": 1.0,
+                "weight_yaw": 1.0,
             },
         ),
     }
