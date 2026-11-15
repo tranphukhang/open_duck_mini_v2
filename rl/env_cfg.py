@@ -14,6 +14,8 @@ import math
 from mjlab.envs import mdp as env_mdp
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from mjlab.envs import ManagerBasedRlEnvCfg
+from rl.scene_cfg import get_scene_cfg
 
 # Physics simulation
 PHYSICS_DT = 0.0005
@@ -265,3 +267,21 @@ def get_curriculum_cfg() -> dict[str, CurriculumTermCfg]:
             },
         ),
     }
+
+def get_env_cfg(num_envs: int = 2,env_spacing: float = 2.0,) -> ManagerBasedRlEnvCfg:
+
+    return ManagerBasedRlEnvCfg(
+        scene=get_scene_cfg(num_envs=num_envs, env_spacing=env_spacing,),
+        sim=get_sim_cfg(),
+        decimation=DECIMATION,
+        episode_length_s=EPISODE_LENGTH_S,
+        is_finite_horizon=IS_FINITE_HORIZON,
+        scale_rewards_by_dt=SCALE_REWARDS_BY_DT,
+        observations=get_observation_cfg(),
+        actions={"joint_position": get_action_cfg(),},
+        commands={"twist": get_command_cfg(),},
+        rewards=get_reward_cfg(),
+        terminations=get_termination_cfg(),
+        curriculum=get_curriculum_cfg(),
+        auto_reset=True,
+    )
