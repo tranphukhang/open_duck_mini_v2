@@ -7,6 +7,7 @@ from rl.gait_observation import gait_observation, gait_reference_contact
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from rl.robot_cfg import JOINT_NAMES
 from mjlab.managers.reward_manager import RewardTermCfg
+from rl.gait_reward import gait_contact_matching
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 # Physics simulation
@@ -190,6 +191,15 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
                 "std": {
                     r".*": 0.35,
                 },
+            },
+        ),
+
+        "gait_contact_matching": RewardTermCfg(
+            func=gait_contact_matching,
+            weight=0.1,
+            params={
+                "command_name": "twist",
+                "sensor_name": "feet_contact",
             },
         ),
     }
