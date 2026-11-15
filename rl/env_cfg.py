@@ -10,6 +10,9 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from rl.gait_reward import gait_contact_matching
 from rl.cwc_reward import cwc_penalty
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+import math
+from mjlab.envs import mdp as env_mdp
+from mjlab.managers.termination_manager import TerminationTermCfg
 
 # Physics simulation
 PHYSICS_DT = 0.0005
@@ -217,4 +220,16 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
                 "weight_yaw": 1.0,
             },
         ),
+    }
+
+def get_termination_cfg() -> dict[str, TerminationTermCfg]:
+    return {
+        "bad_orientation": TerminationTermCfg(
+            func=env_mdp.bad_orientation,
+            params={"limit_angle": math.radians(60.0),},
+        ),
+
+        "nan_detection": TerminationTermCfg(func=env_mdp.nan_detection,),
+
+        "time_out": TerminationTermCfg(func=env_mdp.time_out,time_out=True,),
     }
