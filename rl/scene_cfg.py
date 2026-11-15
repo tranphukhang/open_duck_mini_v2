@@ -11,7 +11,7 @@ def get_terrain_cfg() -> TerrainEntityCfg:
 
     return TerrainEntityCfg(
         terrain_type="plane",
-        geoms=(GeomCfg(geom_names_expr=(r"^terrain$",), contype=1, conaffinity=1, condim=3, friction=(0.8, 0.005, 0.0001),),),
+        geoms=(GeomCfg(geom_names_expr=(r"^terrain$",), contype=1, conaffinity=1, condim=3, priority=1, friction=(0.8, 0.005, 0.0001),),),
     )
 
 def get_contact_switch_cfg() -> ContactSensorCfg:
@@ -27,6 +27,23 @@ def get_contact_switch_cfg() -> ContactSensorCfg:
         track_air_time=True,
     )
 
+def get_contact_wrench_cfg() -> ContactSensorCfg:
+    return ContactSensorCfg(
+        name="feet_wrench",
+        primary=ContactMatch(
+            mode="geom",
+            pattern=FOOT_GEOM_NAMES,
+            entity="robot",
+        ),
+        secondary=ContactMatch(
+            mode="body",
+            pattern="terrain",
+        ),
+        fields=("found", "force", "torque", "pos"),
+        reduce="netforce",
+        num_slots=1,
+    )
+
 def get_scene_cfg(num_envs: int = 1, env_spacing: float = 2.0,) -> SceneCfg:
     """Return the Open Duck Mini V2 scene configuration."""
 
@@ -35,5 +52,5 @@ def get_scene_cfg(num_envs: int = 1, env_spacing: float = 2.0,) -> SceneCfg:
         env_spacing=env_spacing,
         terrain=get_terrain_cfg(),
         entities={"robot": get_robot_cfg(),},
-        sensors=(get_contact_switch_cfg(),),
+        sensors=(get_contact_switch_cfg(), get_contact_wrench_cfg(),),
     )
