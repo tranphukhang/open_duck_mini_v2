@@ -13,6 +13,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 import math
 from mjlab.envs import mdp as env_mdp
 from mjlab.managers.termination_manager import TerminationTermCfg
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 
 # Physics simulation
 PHYSICS_DT = 0.0005
@@ -175,13 +176,13 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
 
         "action_rate_l2": RewardTermCfg(
             func=env_mdp.action_rate_l2,
-            weight=-0.01,
+            weight=-0.002,
         ),
 
 
         "joint_torques_l2": RewardTermCfg(
             func=env_mdp.joint_torques_l2,
-            weight=-0.0005,
+            weight=-0.00005,
         ),
 
         "posture": RewardTermCfg(
@@ -232,4 +233,35 @@ def get_termination_cfg() -> dict[str, TerminationTermCfg]:
         "nan_detection": TerminationTermCfg(func=env_mdp.nan_detection,),
 
         "time_out": TerminationTermCfg(func=env_mdp.time_out,time_out=True,),
+    }
+
+def get_curriculum_cfg() -> dict[str, CurriculumTermCfg]:
+    return {
+        "action_rate_curriculum": CurriculumTermCfg(
+            func=env_mdp.reward_curriculum,
+            params={
+                "reward_name": "action_rate_l2",
+                "stages": [
+                    {"step": 0,    "weight": -0.002},
+                    {"step": 600,  "weight": -0.004},
+                    {"step": 1200, "weight": -0.006},
+                    {"step": 1800, "weight": -0.008},
+                    {"step": 2400, "weight": -0.010},
+                ],
+            },
+        ),
+
+        "joint_torque_curriculum": CurriculumTermCfg(
+            func=env_mdp.reward_curriculum,
+            params={
+                "reward_name": "joint_torques_l2",
+                "stages": [
+                    {"step": 0,    "weight": -0.00005},
+                    {"step": 600,  "weight": -0.00010},
+                    {"step": 1200, "weight": -0.00020},
+                    {"step": 1800, "weight": -0.00035},
+                    {"step": 2400, "weight": -0.00050},
+                ],
+            },
+        ),
     }
