@@ -3,6 +3,8 @@ from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.envs import mdp as env_mdp
 from mjlab.tasks.velocity import mdp as velocity_mdp
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
+from mjlab.envs.mdp.actions import JointPositionActionCfg
+from rl.robot_cfg import JOINT_NAMES
 
 # Physics simulation
 PHYSICS_DT = 0.0005
@@ -118,3 +120,15 @@ def get_observation_cfg() -> dict[str, ObservationGroupCfg]:
             enable_corruption=False,
         ),
     }
+
+ACTION_SCALE = 0.15
+
+def get_action_cfg() -> JointPositionActionCfg:
+    """Return the joint position action configuration."""
+
+    return JointPositionActionCfg(
+        entity_name="robot",
+        actuator_names=JOINT_NAMES,
+        scale=ACTION_SCALE,
+        use_default_offset=True,
+    )
