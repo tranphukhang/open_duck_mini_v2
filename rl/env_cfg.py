@@ -9,6 +9,7 @@ from rl.robot_cfg import JOINT_NAMES
 from mjlab.managers.reward_manager import RewardTermCfg
 from rl.gait_reward import gait_contact_matching
 from rl.cwc_reward import cwc_penalty
+from rl.foot_width_reward import foot_width_penalty
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 import math
 from mjlab.envs import mdp as env_mdp
@@ -221,6 +222,14 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
                 "weight_friction": 1.0,
                 "weight_cop": 1.0,
                 "weight_yaw": 1.0,
+            },
+        ),
+
+        "foot_width_penalty": RewardTermCfg(
+            func=foot_width_penalty,
+            weight=-0.5,
+            params={
+                "min_width": 0.12,
             },
         ),
     }
