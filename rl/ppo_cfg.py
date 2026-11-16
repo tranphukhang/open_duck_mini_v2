@@ -42,8 +42,8 @@ def get_ppo_cfg() -> RslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
         ),
 
-        num_steps_per_env=24,
-        max_iterations=30_000,
+        num_steps_per_env=48,
+        max_iterations=600,
         save_interval=50,
 
         obs_groups={
