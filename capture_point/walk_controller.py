@@ -14,6 +14,7 @@ qua GroundTruthStateEstimator (KHONG doc joint state/khong FK measurement).
 Moi toa do tham chieu nam trong {P}, voi cac truc {P}//{W} cua MuJoCo.
 Reanchor_x dich toa do *ke hoach*, CoM measured duoc quy chieu lai
 qua chan ho tro, nhu walker.py cua anhoang-21/open_duck_isaac.
+KHONG su dung MPC state feedback (mpc_fb_pos/mpc_fb_vel).
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ class WalkConfig:
     horizon: int = 80
     num_footsteps: int = 14
 
-    # CP and ZMP preview MPC (author's walker-fk-com defaults).
+    # CP landing correction and ZMP/LIPM-MPC; no direct MPC state feedback.
     step_gain: tuple[float, float] = (0.4, 0.3)
     step_limit: tuple[float, float] = (0.04, 0.03)
     min_step_width: float = 0.12
@@ -61,8 +62,6 @@ class WalkConfig:
     q_zmp: float = 1.0
     q_vel: float = 1e-3
     r_jerk: float = 1e-6
-    mpc_fb_pos: tuple[float, float] = (0.0, 0.0)
-    mpc_fb_vel: tuple[float, float] = (0.0, 0.2)
     reanchor_x: bool = True
 
     ik_initial_iterations: int = 8
@@ -88,8 +87,6 @@ class WalkConfig:
             raise ValueError("load_gain must lie in [0, 1]")
         if self.servo_kp <= 0 or self.gravity <= 0:
             raise ValueError("servo_kp and gravity must be positive")
-        if len(self.mpc_fb_pos) != 2 or len(self.mpc_fb_vel) != 2:
-            raise ValueError("MPC feedback vectors must each have 2 elements")
 
 
 @dataclass
@@ -350,8 +347,6 @@ class WalkController:
         _, _, dcm_error = self.capture_point.compute_dcm_error(
             measured_com_plan, measured_vel, self.com_state,
         )
-        pos_err = measured_com_plan[:, :2] - self.com_state[:, :, 0]
-        vel_err = measured_vel[:, :2] - self.com_state[:, :, 1]
 
         # 4. CP correction, only while landing adjustment is still possible.
         correction = self.capture_point.compute_correction(dcm_error)
@@ -366,10 +361,8 @@ class WalkController:
         zmp_ref = self.zmp_generator.generate(
             footsteps, self.planner.feet0, j_base, self.scheduler,
         )
-        fb_pos = torch.as_tensor(cfg.mpc_fb_pos, device=self.device, dtype=self.com_state.dtype)
-        fb_vel = torch.as_tensor(cfg.mpc_fb_vel, device=self.device, dtype=self.com_state.dtype)
-        self.com_state[:, :, 0] += fb_pos * pos_err
-        self.com_state[:, :, 1] += fb_vel * vel_err
+        # LIPM-MPC is open-loop in the CoM state: no GT position/velocity
+        # feedback injection. Ground Truth only affects CP and reanchor_x.
         vref = vel_cmd[:, None, :].expand(-1, cfg.horizon, -1)
         self.com_state = self.mpc.step(self.com_state, zmp_ref, vref)
 

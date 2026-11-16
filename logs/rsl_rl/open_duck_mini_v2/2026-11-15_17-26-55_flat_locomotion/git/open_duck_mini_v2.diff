@@ -1,0 +1,42 @@
+--- git commit ---
+ddb3fadc0a1a4789261e4f77db57f58a91c0efc8
+
+
+--- git status ---
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   MUJOCO_LOG.TXT
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	logs/
+	rl/train.py
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/MUJOCO_LOG.TXT b/MUJOCO_LOG.TXT
+index 61fec87..611fc0f 100644
+--- a/MUJOCO_LOG.TXT
++++ b/MUJOCO_LOG.TXT
+@@ -40,3 +40,15 @@ tolerance: parent has 1e-08 (default), child has 1e-10, keeping parent value
+ integrator: parent has 0 (default), child has 3, keeping parent value
+ cone: parent has 0 (default), child has 1, keeping parent value
+ 
++WARNING Sun Nov 15 17:23:21 2026: Attach conflict when attaching 'open_duck_mini_v3' to 'mjlab scene', policy is 'warning'
++timestep: parent has 0.002 (default), child has 0.0005, keeping parent value
++tolerance: parent has 1e-08 (default), child has 1e-10, keeping parent value
++integrator: parent has 0 (default), child has 3, keeping parent value
++cone: parent has 0 (default), child has 1, keeping parent value
++
++WARNING Sun Nov 15 17:26:55 2026: Attach conflict when attaching 'open_duck_mini_v3' to 'mjlab scene', policy is 'warning'
++timestep: parent has 0.002 (default), child has 0.0005, keeping parent value
++tolerance: parent has 1e-08 (default), child has 1e-10, keeping parent value
++integrator: parent has 0 (default), child has 3, keeping parent value
++cone: parent has 0 (default), child has 1, keeping parent value
++

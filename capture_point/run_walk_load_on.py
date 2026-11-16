@@ -159,11 +159,20 @@ def run():
 
             if not (np.isfinite(data.qpos).all() and np.isfinite(data.qvel).all()):
                 raise FloatingPointError("Trang thai MuJoCo khong huu han")
+            
+            gt = controller.estimator.update(data)
+            if out.j_now[0].item() >= 0:
+                plan_feet = controller.planner.feet_start[0]
+            else:
+                plan_feet = controller.planner.feet0[0]
 
-            com_xy = np.asarray(data.subtree_com[base_id, :2], dtype=float)
-            com_des_xy = out.com_des[0, :2].detach().cpu().numpy()
-            err = com_xy - com_des_xy
+            support = out.contact[0].float()
+            com_meas_plan = ((plan_feet + gt.com_relative_to_feet[0]) * support[:, None]).sum(dim=0) / support.sum().clamp_min(1.0)
+            com_des_plan = out.com_des[0]
+            err = (com_meas_plan[:2] - com_des_plan[:2]).detach().cpu().numpy()
             com_xy_err_squared += float(np.dot(err, err))
+
+            
             min_base_z = min(min_base_z, float(data.xpos[base_id, 2]))
             max_actuator_torque = max(max_actuator_torque, float(np.abs(data.qfrc_actuator).max()))
             max_delta_q_deg = max(
@@ -188,7 +197,7 @@ def run():
             if sec > last_report and (sec % 2 == 0):
                 last_report = sec
                 print(f"t={data.time:5.2f} s | base z={data.xpos[base_id, 2]:.3f} m | "
-                      f"CoM XY err={np.linalg.norm(err):.4f} m | max dQ load={max_delta_q_deg:.3f} deg")
+                      f"CoM XY err (plan)={np.linalg.norm(err):.4f} m | max dQ load={max_delta_q_deg:.3f} deg")
 
         if num_run:
             print("\n--- Summary LOAD ON ---")

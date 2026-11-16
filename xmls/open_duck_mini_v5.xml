@@ -3,7 +3,7 @@
 <mujoco model="open_duck_mini_v3">
 
     <option timestep="0.0005" integrator="implicitfast" solver="Newton" cone="elliptic" tolerance="1e-10">
-        <flag nativeccd="disable"/>
+        <flag nativeccd="enable"/>
     </option>
 
     <!-- Auto inertia -->
