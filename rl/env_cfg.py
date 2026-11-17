@@ -227,7 +227,7 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
 
         "foot_width_penalty": RewardTermCfg(
             func=foot_width_penalty,
-            weight=-0.5,
+            weight=-2.0,
             params={
                 "min_width": 0.12,
             },

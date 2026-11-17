@@ -13,9 +13,12 @@ if TYPE_CHECKING:
 # Gait Parameters
 # ============================================================
 
-GAIT_CYCLE_S = 0.40
-STEP_S = 0.20
-DOUBLE_SUPPORT_S = 0.04
+
+DOUBLE_SUPPORT_S = 0.10
+SINGLE_SUPPORT_S = 0.30
+
+STEP_S = DOUBLE_SUPPORT_S + SINGLE_SUPPORT_S
+GAIT_CYCLE_S = 2.0 * STEP_S
 
 MOVING_THRESHOLD = 0.01
 

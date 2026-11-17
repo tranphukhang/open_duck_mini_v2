@@ -1,15 +1,18 @@
-"""Play a trained Open Duck Mini V2 PPO policy in MJLab/MuJoCo.
+"""Play an Open Duck Mini V2 PPO policy with MuJoCo contact visualization.
 
-Run from the open_duck_mini_v2 repository root:
+Run from the repository root after copying this file to rl/play.py:
 
-  python -m rl.play --device cuda:0
-  python -m rl.play --device cuda:0 --vx 0.0
   python -m rl.play --device cuda:0 --vx 0.08
-  python -m rl.play --checkpoint logs/rsl_rl/open_duck_mini_v2/<run>/model_XXX.pt
+  python -m rl.play --device cuda:0 --vx 0.08 --force-scale 2
+  python -m rl.play --device cuda:0 --vx 0 --force-labels
+  python -m rl.play --checkpoint /path/to/model_XXX.pt --vx 0.08
 
-The script loads ONLY the trained actor (plus observation normalizer), does not
-train PPO, and keeps episode reset behavior intact. It uses the native MuJoCo
-viewer provided by MJLab; press Space to pause and Enter to reset.
+In the native viewer: Space = pause, Enter = reset, P = reward plots.
+Contact points and contact-force arrows are enabled by default.
+
+Note: MJLab simulates contacts on GPU via MuJoCo Warp. The native viewer
+reconstructs contacts with CPU MuJoCo for visualization. Displayed forces may
+therefore differ slightly from GPU sensor values used in the RL reward.
 """
 
 from __future__ import annotations
@@ -19,19 +22,63 @@ import os
 from dataclasses import asdict
 from pathlib import Path
 
+import mujoco
 import torch
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.utils.torch import configure_torch_backends
-from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+from mjlab.viewer import NativeMujocoViewer
 
 from rl.env_cfg import get_env_cfg
 from rl.ppo_cfg import get_ppo_cfg
 
 
+class ContactViewer(NativeMujocoViewer):
+    """Native MJLab viewer showing contact positions and contact-force arrows."""
+
+    def __init__(
+        self,
+        env,
+        policy,
+        *,
+        force_scale: float = 1.0,
+        split_forces: bool = False,
+        force_labels: bool = False,
+    ) -> None:
+        super().__init__(env, policy)
+        self.force_scale = force_scale
+        self.split_forces = split_forces
+        self.force_labels = force_labels
+
+    def setup(self) -> None:
+        # MJLab's native viewer already synchronizes Warp simulation state to
+        # CPU MjData and recomputes contacts through mj_forward every frame.
+        super().setup()
+        assert self.viewer is not None
+        assert self.mjm is not None
+
+        with self.viewer.lock():
+            flags = self.viewer.opt.flags
+            flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = 1
+            flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = 1
+            flags[mujoco.mjtVisFlag.mjVIS_CONTACTSPLIT] = int(self.split_forces)
+
+            # Visualization parameters only; do not modify simulated forces.
+            self.mjm.vis.map.force *= self.force_scale
+            if self.force_labels:
+                self.viewer.opt.label = mujoco.mjtLabel.mjLABEL_CONTACTFORCE
+
+        self.viewer.sync(state_only=False)
+        print(
+            "[INFO] Contact points: ON | Contact force arrows: ON | "
+            f"scale={self.force_scale:g} | "
+            f"split={self.split_forces} | labels={self.force_labels}"
+        )
+
+
 def find_checkpoint(checkpoint: str, log_root: Path, experiment_name: str) -> Path:
-    """Choose an explicit checkpoint or the newest checkpoint on disk."""
+    """Use an explicit checkpoint or newest modified model_*.pt."""
     if checkpoint != "latest":
         path = Path(checkpoint).expanduser().resolve()
         if not path.is_file():
@@ -42,30 +89,27 @@ def find_checkpoint(checkpoint: str, log_root: Path, experiment_name: str) -> Pa
     candidates = list(search_dir.glob("*/model_*.pt"))
     if not candidates:
         raise FileNotFoundError(
-            f"No model_*.pt checkpoints in {search_dir}. "
-            "Use --checkpoint <path-to-model_XXX.pt>."
+            f"No model_*.pt found under {search_dir}. "
+            "Use --checkpoint /path/to/model_XXX.pt."
         )
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    return max(candidates, key=lambda file: file.stat().st_mtime)
 
 
 def prepare_evaluation_cfg(num_envs: int, vx: float, training_commands: bool):
-    env_cfg = get_env_cfg(num_envs=num_envs)
+    cfg = get_env_cfg(num_envs=num_envs)
 
-    # No curriculum progression while watching a frozen, trained policy.
-    # Keep the reward readouts at their last training curriculum weights.
-    for term in env_cfg.curriculum.values():
+    # Freeze curriculum during inference; retain last-stage reward weights for
+    # informational reward plots. Neither action nor policy is affected.
+    for term in cfg.curriculum.values():
         reward_name = term.params.get("reward_name")
-        stages = term.params.get("stages", [])
-        if reward_name in env_cfg.rewards and stages:
-            final_stage = max(stages, key=lambda stage: stage["step"])
-            if "weight" in final_stage:
-                env_cfg.rewards[reward_name].weight = final_stage["weight"]
-    env_cfg.curriculum = {}
+        stages = term.params.get("stages", ())
+        if reward_name in cfg.rewards and stages:
+            last_stage = max(stages, key=lambda stage: stage["step"])
+            cfg.rewards[reward_name].weight = last_stage["weight"]
+    cfg.curriculum = {}
 
-    # Use either the original training command distribution or a fixed
-    # forward velocity for a reproducible standing/walking visual test.
     if not training_commands:
-        twist = env_cfg.commands["twist"]
+        twist = cfg.commands["twist"]
         twist.ranges.lin_vel_x = (vx, vx)
         twist.ranges.lin_vel_y = (0.0, 0.0)
         twist.ranges.ang_vel_z = (0.0, 0.0)
@@ -76,61 +120,63 @@ def prepare_evaluation_cfg(num_envs: int, vx: float, training_commands: bool):
         twist.heading_command = False
         twist.init_velocity_prob = 0.0
 
-    return env_cfg
+    return cfg
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", default="latest",
-                        help="Checkpoint path or 'latest' (default).")
-    parser.add_argument("--log-root", default="logs/rsl_rl",
-                        help="Same log root used by rl.train.")
+    parser.add_argument("--checkpoint", default="latest")
+    parser.add_argument("--log-root", default="logs/rsl_rl")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--num-envs", type=int, default=1)
-    parser.add_argument("--vx", type=float, default=0.08,
-                        help="Fixed forward command (m/s). 0 = stand, 0.08 = walk.")
-    parser.add_argument("--training-commands", action="store_true",
-                        help="Use original random training commands instead of fixed vx.")
-    parser.add_argument("--viewer", choices=("native", "viser"), default="native",
-                        help="Native MuJoCo window or browser-based Viser viewer.")
+    parser.add_argument("--vx", type=float, default=0.08)
+    parser.add_argument("--training-commands", action="store_true")
     parser.add_argument("--steps", type=int, default=0,
-                        help="Policy steps to run; 0 means until viewer is closed.")
+                        help="Number of policy steps; 0 = run until viewer closes")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--force-scale", type=float, default=1.0,
+                        help="Arrow length multiplier (visual only)")
+    parser.add_argument("--split-forces", action="store_true",
+                        help="Show normal and tangential forces separately")
+    parser.add_argument("--force-labels", action="store_true",
+                        help="Display contact-force magnitudes in the native viewer")
     args = parser.parse_args()
 
-    if args.num_envs < 1 or args.steps < 0:
-        parser.error("--num-envs must be >=1; --steps must be >=0.")
+    if args.num_envs < 1 or args.steps < 0 or args.force_scale <= 0:
+        parser.error("Require --num-envs >= 1, --steps >= 0, --force-scale > 0")
     if not args.training_commands and not (0.0 <= args.vx <= 0.1):
-        parser.error("--vx must be between 0 and 0.1 m/s (training range).")
+        parser.error("--vx must be in [0.0, 0.1] m/s (training command range)")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
-        parser.error("CUDA is not available; use --device cpu or fix CUDA.")
+        parser.error("CUDA not available; use --device cpu or check installation")
 
     ppo_cfg = get_ppo_cfg()
-    ckpt = find_checkpoint(args.checkpoint, Path(args.log_root), ppo_cfg.experiment_name)
-    print(f"[INFO] Loading trained policy from: {ckpt}")
-    print(f"[INFO] Evaluation device={args.device}, num_envs={args.num_envs}")
+    checkpoint = find_checkpoint(
+        args.checkpoint, Path(args.log_root), ppo_cfg.experiment_name
+    )
+    print(f"[INFO] Checkpoint: {checkpoint}")
+    print(f"[INFO] Device: {args.device}; num_envs: {args.num_envs}")
     if args.training_commands:
-        print("[INFO] Commands: original training distribution")
+        print("[INFO] Using original training velocity command distribution")
     else:
-        print(f"[INFO] Command: vx={args.vx:.3f} m/s, vy=0, yaw_rate=0")
+        print(f"[INFO] Fixed command: vx={args.vx:.3f} m/s, vy=0, wz=0")
 
     if args.device.startswith("cuda"):
-        cuda_idx = torch.device(args.device).index or 0
-        torch.cuda.set_device(cuda_idx)
-        os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", str(cuda_idx))
+        cuda_id = torch.device(args.device).index or 0
+        torch.cuda.set_device(cuda_id)
+        os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", str(cuda_id))
     configure_torch_backends()
 
-    env_cfg = prepare_evaluation_cfg(args.num_envs, args.vx, args.training_commands)
-    env_cfg.seed = args.seed
+    cfg = prepare_evaluation_cfg(args.num_envs, args.vx, args.training_commands)
+    cfg.seed = args.seed
+
     env = None
     try:
-        env = ManagerBasedRlEnv(cfg=env_cfg, device=args.device)
+        env = ManagerBasedRlEnv(cfg=cfg, device=args.device)
         actor_dim = env.observation_manager.group_obs_dim["actor"]
-        num_actions = env.action_manager.total_action_dim
-        if actor_dim != (44,) or num_actions != 10:
+        action_dim = env.action_manager.total_action_dim
+        if actor_dim != (44,) or action_dim != 10:
             raise RuntimeError(
-                f"Unexpected actor/action dimensions: actor={actor_dim}, "
-                f"actions={num_actions}; expected (44,), 10."
+                f"Expected actor (44,) and action 10, got {actor_dim}, {action_dim}"
             )
 
         wrapped = RslRlVecEnvWrapper(env, clip_actions=ppo_cfg.clip_actions)
@@ -138,19 +184,23 @@ def main() -> None:
             wrapped, asdict(ppo_cfg), log_dir=None, device=args.device
         )
         runner.load(
-            str(ckpt),
+            str(checkpoint),
             load_cfg={"actor": True},
             strict=True,
             map_location=args.device,
         )
         policy = runner.get_inference_policy(device=args.device)
         policy.eval()
-        print("[OK] Policy loaded. Inference is deterministic (no PPO updates).")
-        print("[INFO] Viewer keys: Space=pause, Enter=reset, P=reward plots, "
-              "R=toggle debug, +/-=speed.")
 
-        viewer_cls = NativeMujocoViewer if args.viewer == "native" else ViserPlayViewer
-        viewer = viewer_cls(wrapped, policy)
+        print("[OK] Deterministic PPO policy loaded; no learning updates")
+        print("[INFO] MuJoCo keys: Space=pause, Enter=reset, P=reward plot, R=debug")
+        viewer = ContactViewer(
+            wrapped,
+            policy,
+            force_scale=args.force_scale,
+            split_forces=args.split_forces,
+            force_labels=args.force_labels,
+        )
         viewer.run(num_steps=None if args.steps == 0 else args.steps)
     finally:
         if env is not None:
