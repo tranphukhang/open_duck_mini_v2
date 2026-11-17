@@ -160,7 +160,7 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
     return {
         "track_linear_velocity": RewardTermCfg(
             func=velocity_mdp.track_linear_velocity,
-            weight=3.0,
+            weight=1.0,
             params={
                 "command_name": "twist",
                 "std": 0.1,
@@ -169,7 +169,7 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
 
         "track_angular_velocity": RewardTermCfg(
             func=velocity_mdp.track_angular_velocity,
-            weight=0.5,
+            weight=0.25,
             params={
                 "command_name": "twist",
                 "std": 0.5,
@@ -204,7 +204,7 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
 
         "gait_contact_matching": RewardTermCfg(
             func=gait_contact_matching,
-            weight=0.1,
+            weight=1.5,
             params={
                 "command_name": "twist",
                 "sensor_name": "feet_contact",
