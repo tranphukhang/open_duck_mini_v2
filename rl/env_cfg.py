@@ -197,14 +197,15 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
                     joint_names=JOINT_NAMES,
                 ),
                 "std": {
-                    r".*": 0.35,
+                    r"(L|R)_hip_yaw": 0.15,
+                    r"(L|R)_(hip_roll|hip_pitch|knee|ankle)": 0.35,
                 },
             },
         ),
 
         "gait_contact_matching": RewardTermCfg(
             func=gait_contact_matching,
-            weight=1.5,
+            weight=0.5,
             params={
                 "command_name": "twist",
                 "sensor_name": "feet_contact",
