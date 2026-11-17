@@ -205,7 +205,7 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
 
         "gait_contact_matching": RewardTermCfg(
             func=gait_contact_matching,
-            weight=0.5,
+            weight=1.5,
             params={
                 "command_name": "twist",
                 "sensor_name": "feet_contact",
