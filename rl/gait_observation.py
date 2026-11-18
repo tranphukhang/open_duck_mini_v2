@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 # ============================================================
 
 
-DOUBLE_SUPPORT_S = 0.10
-SINGLE_SUPPORT_S = 0.30
+DOUBLE_SUPPORT_S = 0.04
+SINGLE_SUPPORT_S = 0.16
 
 STEP_S = DOUBLE_SUPPORT_S + SINGLE_SUPPORT_S
 GAIT_CYCLE_S = 2.0 * STEP_S
