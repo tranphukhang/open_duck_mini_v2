@@ -1,0 +1,35 @@
+--- git commit ---
+5ef29363dac21a74b509ac5d0f2c3bdfc3c93751
+
+
+--- git status ---
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   MUJOCO_LOG.TXT
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	logs/rsl_rl/open_duck_mini_v2/2026-11-18_04-09-12_flat_locomotion/
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/MUJOCO_LOG.TXT b/MUJOCO_LOG.TXT
+index 8cecbe7..2a7c79b 100644
+--- a/MUJOCO_LOG.TXT
++++ b/MUJOCO_LOG.TXT
+@@ -136,3 +136,9 @@ tolerance: parent has 1e-08 (default), child has 1e-10, keeping parent value
+ integrator: parent has 0 (default), child has 3, keeping parent value
+ cone: parent has 0 (default), child has 1, keeping parent value
+ 
++WARNING Wed Nov 18 04:09:12 2026: Attach conflict when attaching 'open_duck_mini_v3' to 'mjlab scene', policy is 'warning'
++timestep: parent has 0.002 (default), child has 0.0005, keeping parent value
++tolerance: parent has 1e-08 (default), child has 1e-10, keeping parent value
++integrator: parent has 0 (default), child has 3, keeping parent value
++cone: parent has 0 (default), child has 1, keeping parent value
++
