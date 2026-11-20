@@ -169,7 +169,7 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
 
         "track_angular_velocity": RewardTermCfg(
             func=velocity_mdp.track_angular_velocity,
-            weight=0.25,
+            weight=0.5,
             params={
                 "command_name": "twist",
                 "std": 0.5,
@@ -197,8 +197,8 @@ def get_reward_cfg() -> dict[str, RewardTermCfg]:
                     joint_names=JOINT_NAMES,
                 ),
                 "std": {
-                    r"(L|R)_hip_yaw": 0.15,
-                    r"(L|R)_(hip_roll|hip_pitch|knee|ankle)": 0.35,
+                    r"(L|R)_hip_yaw": 0.4,
+                    r"(L|R)_(hip_roll|hip_pitch|knee|ankle)": 0.4,
                 },
             },
         ),
