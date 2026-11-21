@@ -28,6 +28,7 @@ import mujoco
 import numpy as np
 
 from walk_controller import WalkConfig, WalkController, JOINT_NAMES
+from walk_plotter import WalkPlotter
 
 
 # Che do duoc co dinh trong file nay; giu nguyen de doi chieu ON/OFF.
@@ -76,7 +77,8 @@ def parse_args():
     parser.add_argument("--xml", type=str, default=None, help="Duong dan toi MJCF scene")
     parser.add_argument("--follow-camera", action="store_true", help="Camera di theo robot theo phuong X")
     parser.add_argument("--exit-on-finish", action="store_true", help="Dong viewer ngay khi mo phong xong")
-    parser.add_argument("--no-gui", action="store_true", help="Chay headless de kiem tra/ghi log")
+    parser.add_argument("--no-gui", action="store_true", help="Chay khong mo MuJoCo Viewer")
+    parser.add_argument("--no-plot", action="store_true", help="Tat plot (mac dinh co plot)")
     args = parser.parse_args()
     if not all(math.isfinite(x) for x in (args.duration, args.vx, args.vy, args.speed)):
         parser.error("Tat ca gia tri tham so phai huu han")
@@ -96,6 +98,9 @@ def run():
     controller = WalkController(model, num_envs=1, config=config, device="cpu")
     controller.reset(data)
     controller.set_load_compensation(ENABLE_LOAD_COMPENSATION)
+
+    # Module riêng chỉ ghi trong RAM; tạo đồ thị sau khi mô phỏng kết thúc.
+    plotter = None if args.no_plot else WalkPlotter(controller, case_name="LOAD ON")
 
     act_ids = np.asarray([model.actuator(name).id for name in JOINT_NAMES], dtype=int)
     if len(np.unique(act_ids)) != 10:
@@ -159,20 +164,15 @@ def run():
 
             if not (np.isfinite(data.qpos).all() and np.isfinite(data.qvel).all()):
                 raise FloatingPointError("Trang thai MuJoCo khong huu han")
-            
-            gt = controller.estimator.update(data)
-            if out.j_now[0].item() >= 0:
-                plan_feet = controller.planner.feet_start[0]
-            else:
-                plan_feet = controller.planner.feet0[0]
 
-            support = out.contact[0].float()
-            com_meas_plan = ((plan_feet + gt.com_relative_to_feet[0]) * support[:, None]).sum(dim=0) / support.sum().clamp_min(1.0)
-            com_des_plan = out.com_des[0]
-            err = (com_meas_plan[:2] - com_des_plan[:2]).detach().cpu().numpy()
+            # Dữ liệu kế hoạch (t[k+1]) và thực tế SAU mj_step (t[k+1]).
+            if plotter is not None:
+                plotter.record(out, data, [args.vx, args.vy])
+
+            com_xy = np.asarray(data.subtree_com[base_id, :2], dtype=float)
+            com_des_xy = out.com_des[0, :2].detach().cpu().numpy()
+            err = com_xy - com_des_xy
             com_xy_err_squared += float(np.dot(err, err))
-
-            
             min_base_z = min(min_base_z, float(data.xpos[base_id, 2]))
             max_actuator_torque = max(max_actuator_torque, float(np.abs(data.qfrc_actuator).max()))
             max_delta_q_deg = max(
@@ -197,7 +197,7 @@ def run():
             if sec > last_report and (sec % 2 == 0):
                 last_report = sec
                 print(f"t={data.time:5.2f} s | base z={data.xpos[base_id, 2]:.3f} m | "
-                      f"CoM XY err (plan)={np.linalg.norm(err):.4f} m | max dQ load={max_delta_q_deg:.3f} deg")
+                      f"CoM XY err={np.linalg.norm(err):.4f} m | max dQ load={max_delta_q_deg:.3f} deg")
 
         if num_run:
             print("\n--- Summary LOAD ON ---")
@@ -209,11 +209,27 @@ def run():
             print(f"Max |reanchor_x|: {max_reanchor_dx:.5f} m")
             print(f"Valid controller ticks: {num_valid}/{num_run}")
 
+        # Vẽ ngay sau mô phỏng, trong khi MuJoCo Viewer còn mở.
+        # Không lưu CSV hoặc ảnh.
+        if plotter is not None and plotter.n_samples:
+            plotter.show(block=False)
+
         if viewer is not None and viewer.is_running() and not args.exit_on_finish:
             print("\nMo phong da ket thuc. GUI giu tu the cuoi. Dong cua so MuJoCo de thoat.")
             while viewer.is_running():
                 viewer.sync()
-                time.sleep(0.05)
+                if plotter is not None and plotter.n_samples:
+                    # Giúp Matplotlib Viewer phản hồi khi MuJoCo Viewer giữ mở.
+                    import matplotlib.pyplot as plt
+                    plt.pause(0.05)
+                else:
+                    time.sleep(0.05)
+
+    # Sau khi đóng MuJoCo Viewer, các cửa sổ Matplotlib vẫn còn để xem.
+    if plotter is not None and plotter.n_samples:
+        import matplotlib.pyplot as plt
+        if any(plt.fignum_exists(f.number) for f in plotter.figures):
+            plt.show(block=True)
 
 
 if __name__ == "__main__":
