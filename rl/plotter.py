@@ -1,9 +1,11 @@
 """Plot Open Duck Mini V2 states sampled at each policy step.
 
-Figures 1 (base motion) and 3 (foot contacts) update live in GUI mode.
-Figure 2 (joint positions) is created only after the simulation. In no-GUI
-mode, all figures are deferred until the evaluation has finished.
-Nothing is saved to CSV or image files.
+Figure 1: base motion. Figure 2: joint positions (deferred).
+Figure 3: foot contacts. Figure 4: support-boundary history and ZMP
+trajectory in World XY. Each support boundary is a separate, closed
+convex-hull outline (never joined to the next time step). With --gui,
+Figures 1/3/4 update live; with --no-gui, all plots appear after simulation.
+Nothing is saved to disk.
 """
 
 from __future__ import annotations
@@ -13,6 +15,9 @@ import time
 from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize
 
 
 LEFT_JOINT_NAMES = (
@@ -24,7 +29,7 @@ RIGHT_JOINT_NAMES = (
 
 
 class Plotter:
-    """Collect states in RAM and display three Matplotlib figures."""
+    """Record policy-rate data in RAM and display four Matplotlib figures."""
 
     def __init__(
         self,
@@ -40,23 +45,23 @@ class Plotter:
         self.refresh_interval = float(refresh_interval)
         self.time_s: list[float] = []
 
-        # Figure 1: planar base velocities [m/s].
+        # Figure 1: base linear velocity [m/s], expressed in body frame.
         self.vx_desired: list[float] = []
         self.vx_actual: list[float] = []
         self.vy_desired: list[float] = []
         self.vy_actual: list[float] = []
 
-        # Figure 1: ZYX Euler orientation of base relative to World [deg].
+        # Figure 1: base orientation wrt World (ZYX Euler) [deg].
         self.roll_deg: list[float] = []
         self.pitch_deg: list[float] = []
         self.yaw_deg: list[float] = []
 
-        # Figure 1: angular velocity in the body frame [rad/s].
+        # Figure 1: base angular rate expressed in body frame [rad/s].
         self.wx_rad_s: list[float] = []
         self.wy_rad_s: list[float] = []
         self.wz_rad_s: list[float] = []
 
-        # Figure 2: actual absolute joint positions [rad].
+        # Figure 2: actual (not home-relative) joint positions [rad].
         self.left_joint_pos: dict[str, list[float]] = {
             name: [] for name in LEFT_JOINT_NAMES
         }
@@ -64,10 +69,18 @@ class Plotter:
             name: [] for name in RIGHT_JOINT_NAMES
         }
 
-        # Figure 3: contact = 1 iff ground reaction normal force > 5 N.
+        # Figure 3: foot contact thresholded at normal ground reaction > 5 N.
         self.contact_left: list[float] = []
         self.contact_right: list[float] = []
 
+        # Figure 4: each active support polygon in World XY [m] and net ZMP [m].
+        # The polygon is a convex sequence of (x,y) vertices, unclosed.
+        # Empty polygon = no active support or a reset marker.
+        self.support_polygon_xy: list[tuple[tuple[float, float], ...]] = []
+        self.zmp_x_w: list[float] = []
+        self.zmp_y_w: list[float] = []
+
+        # Figure 1 handles.
         self._fig = None
         self._ax_x = None
         self._ax_y = None
@@ -84,12 +97,24 @@ class Plotter:
         self._line_wy = None
         self._line_wz = None
 
+        # Figure 2 is created only in show().
         self._fig_joints = None
+
+        # Figure 3 handles.
         self._fig_contacts = None
         self._ax_contact_left = None
         self._ax_contact_right = None
         self._line_contact_left = None
         self._line_contact_right = None
+
+        # Figure 4 handles.
+        self._fig_support = None
+        self._ax_support = None
+        self._support_history = None
+        self._support_outline = None
+        self._zmp_trail = None
+        self._zmp_current = None
+
         self._last_refresh = 0.0
 
     def add_sample(
@@ -108,8 +133,11 @@ class Plotter:
         joint_pos_right: Sequence[float] | None = None,
         contact_left: int | float | None = None,
         contact_right: int | float | None = None,
+        support_polygon_xy: Sequence[Sequence[float]] | None = None,
+        zmp_x_w: float | None = None,
+        zmp_y_w: float | None = None,
     ) -> None:
-        """Append one sample. All buffers use the same simulation-time axis."""
+        """Append exactly one policy-step sample to all data buffers."""
         angles = (roll_deg, pitch_deg, yaw_deg)
         rates = (wx_rad_s, wy_rad_s, wz_rad_s)
         if any(v is None for v in angles) and not all(v is None for v in angles):
@@ -120,6 +148,8 @@ class Plotter:
             raise ValueError("Provide joint_pos_left and joint_pos_right together")
         if (contact_left is None) != (contact_right is None):
             raise ValueError("Provide contact_left and contact_right together")
+        if (zmp_x_w is None) != (zmp_y_w is None):
+            raise ValueError("Provide zmp_x_w and zmp_y_w together")
 
         if joint_pos_left is None:
             left = (math.nan,) * 5
@@ -136,6 +166,13 @@ class Plotter:
             contacts = (float(contact_left), float(contact_right))
             if any(not (v in (0.0, 1.0) or math.isnan(v)) for v in contacts):
                 raise ValueError("Foot contacts must be 0, 1 or NaN (reset marker)")
+
+        if support_polygon_xy is None:
+            polygon: tuple[tuple[float, float], ...] = ()
+        else:
+            polygon = tuple((float(p[0]), float(p[1])) for p in support_polygon_xy)
+            if any(not (math.isfinite(x) and math.isfinite(y)) for x, y in polygon):
+                raise ValueError("Support polygon coordinates must be finite")
 
         self.time_s.append(len(self.time_s) * self.policy_dt)
         self.vx_desired.append(float(vx_desired))
@@ -155,9 +192,12 @@ class Plotter:
             self.right_joint_pos[name].append(angle)
         self.contact_left.append(contacts[0])
         self.contact_right.append(contacts[1])
+        self.support_polygon_xy.append(polygon)
+        self.zmp_x_w.append(math.nan if zmp_x_w is None else float(zmp_x_w))
+        self.zmp_y_w.append(math.nan if zmp_y_w is None else float(zmp_y_w))
 
     def start(self) -> None:
-        """Create Figures 1 and 3 for live display (GUI mode only)."""
+        """Create live Figures 1, 3 and 4. Figure 2 stays deferred."""
         if self._fig is not None and plt.fignum_exists(self._fig.number):
             return
 
@@ -192,19 +232,15 @@ class Plotter:
         self._ax_ang_vel.set_xlabel("Simulation time (s)")
         self._fig.tight_layout()
 
-        # Figure 3 also updates live when --gui is enabled.
-        # Figure 2 remains deferred until show().
         self._create_contact_figure()
+        self._create_support_figure()
         plt.show(block=False)
 
     def refresh(self, force: bool = False) -> None:
-        """Refresh live Figures 1 and 3, but never redraw Figure 2."""
+        """Refresh only Figures 1, 3 and 4; preserve one sample/policy step."""
         if not self.time_s:
             return
-
-        # With --no-gui, run.py never calls refresh() during simulation.
-        # At show() time, start() creates Figures 1 and 3 from buffered data.
-        if self._fig is None and self._fig_contacts is None:
+        if self._fig is None and self._fig_contacts is None and self._fig_support is None:
             self.start()
 
         now = time.perf_counter()
@@ -239,11 +275,15 @@ class Plotter:
                 ax.autoscale_view(scalex=True, scaley=False)
             self._fig_contacts.canvas.draw_idle()
 
-        # Process Matplotlib events once for both live windows.
+        if self._fig_support is not None and plt.fignum_exists(self._fig_support.number):
+            self._refresh_support_figure()
+            self._fig_support.canvas.draw_idle()
+
+        # Process events only once, for all live windows.
         plt.pause(0.001)
 
     def _create_joint_figure(self) -> None:
-        """Create Figure 2 only after simulation ends."""
+        """Create Figure 2 only after the simulation ends."""
         if self._fig_joints is not None and plt.fignum_exists(self._fig_joints.number):
             return
         self._fig_joints, (ax_left, ax_right) = plt.subplots(
@@ -266,7 +306,7 @@ class Plotter:
         self._fig_joints.tight_layout()
 
     def _create_contact_figure(self) -> None:
-        """Create Figure 3 for live binary contact histories (GUI mode)."""
+        """Create Figure 3 for live binary foot contacts."""
         if self._fig_contacts is not None and plt.fignum_exists(self._fig_contacts.number):
             return
         self._fig_contacts, (self._ax_contact_left, self._ax_contact_right) = plt.subplots(
@@ -292,15 +332,156 @@ class Plotter:
         self._ax_contact_right.set_xlabel("Simulation time (s)")
         self._fig_contacts.tight_layout()
 
+    def _create_support_figure(self) -> None:
+        """Create Figure 4: past/current support OUTLINES and measured ZMP.
+
+        Each polygon is already the convex hull of active foot-patch corners.
+        In DSP, we draw ONLY the exterior hull, never the two overlapping
+        rectangles or artificial lines between successive polygons.
+        """
+        if self._fig_support is not None and plt.fignum_exists(self._fig_support.number):
+            return
+
+        self._fig_support, self._ax_support = plt.subplots(
+            figsize=(10, 8), num="Support polygon history and ZMP (World XY)"
+        )
+        ax = self._ax_support
+
+        # One independent CLOSED path per policy step, color-coded by its
+        # simulation timestamp.  LineCollection avoids hundreds of artists.
+        self._support_history = LineCollection(
+            [],
+            cmap="viridis",
+            norm=Normalize(vmin=0.0, vmax=max(self.policy_dt, 10.0)),
+            linewidths=0.9,
+            alpha=0.32,
+            zorder=2,
+            label="Past support boundaries",
+        )
+        ax.add_collection(self._support_history)
+        colorbar = self._fig_support.colorbar(
+            self._support_history, ax=ax, pad=0.02, fraction=0.045
+        )
+        colorbar.set_label("Simulation time (s)")
+
+        (self._support_outline,) = ax.plot(
+            [], [], color="C0", linewidth=2.5, zorder=5,
+            label="Current support boundary"
+        )
+        (self._zmp_trail,) = ax.plot(
+            [], [], color="C3", linewidth=1.2, alpha=0.85,
+            zorder=3, label="ZMP trajectory"
+        )
+        (self._zmp_current,) = ax.plot(
+            [], [], marker="o", linestyle="None", color="C3",
+            markersize=8, zorder=6, label="Current ZMP"
+        )
+
+        ax.set_title("Support boundary history and measured ZMP")
+        ax.set_xlabel("World X (m)")
+        ax.set_ylabel("World Y (m)")
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True)
+        ax.legend(loc="best", fontsize="small")
+        self._fig_support.tight_layout()
+
+    def _refresh_support_figure(self) -> None:
+        """Update all past hull outlines, the latest hull and the ZMP path.
+
+        Boundary shapes are NOT joined between time steps: every stored
+        polygon is rendered as its own closed contour. No fill is used.
+        """
+        # A NaN contact marker at the final auto-reset step must not erase
+        # the last physical support polygon from the completed plot.
+        current_idx = len(self.support_polygon_xy) - 1
+        while current_idx >= 0 and (
+            math.isnan(self.contact_left[current_idx])
+            or math.isnan(self.contact_right[current_idx])
+        ):
+            current_idx -= 1
+
+        history_paths = []
+        history_times = []
+        # Keep every support boundary in RAM at 50 Hz, but display an outline
+        # approximately every 0.1 s (plus every contact-mode transition).
+        # This avoids dense, overlapping contours looking like a filled area.
+        display_stride = max(1, round(0.10 / self.policy_dt))
+        previous_contact = None
+        for k, polygon in enumerate(self.support_polygon_xy):
+            if len(polygon) < 3:
+                previous_contact = None
+                continue
+            contact = (self.contact_left[k], self.contact_right[k])
+            changed_mode = contact != previous_contact
+            previous_contact = contact
+            if k == current_idx or not (k % display_stride == 0 or changed_mode):
+                continue
+            # Closed *individual* contour. This does not connect one time
+            # step to another or draw internal edges when both feet support.
+            points = np.asarray(polygon, dtype=float)
+            history_paths.append(np.vstack((points, points[0])))
+            history_times.append(self.time_s[k])
+
+        self._support_history.set_segments(history_paths)
+        self._support_history.set_array(np.asarray(history_times, dtype=float))
+        self._support_history.set_clim(
+            0.0, max(self.policy_dt, self.time_s[-1])
+        )
+
+        current_polygon = (
+            self.support_polygon_xy[current_idx] if current_idx >= 0 else ()
+        )
+        if len(current_polygon) >= 3:
+            points = np.asarray(current_polygon, dtype=float)
+            closed = np.vstack((points, points[0]))
+            self._support_outline.set_data(closed[:, 0], closed[:, 1])
+        else:
+            self._support_outline.set_data([], [])
+
+        # NaN values retained in the ZMP trajectory break the line at resets.
+        self._zmp_trail.set_data(self.zmp_x_w, self.zmp_y_w)
+        zx = self.zmp_x_w[current_idx] if current_idx >= 0 else math.nan
+        zy = self.zmp_y_w[current_idx] if current_idx >= 0 else math.nan
+        if math.isfinite(zx) and math.isfinite(zy):
+            self._zmp_current.set_data([zx], [zy])
+        else:
+            self._zmp_current.set_data([], [])
+
+        # Matplotlib relim() ignores LineCollection: determine limits using
+        # ALL historical support vertices as well as the complete ZMP trail.
+        coords = [
+            point
+            for polygon in self.support_polygon_xy
+            for point in polygon
+        ]
+        coords.extend(
+            (x, y) for x, y in zip(self.zmp_x_w, self.zmp_y_w, strict=True)
+            if math.isfinite(x) and math.isfinite(y)
+        )
+
+        ax = self._ax_support
+        if coords:
+            bounds = np.asarray(coords, dtype=float)
+            x_min, y_min = bounds.min(axis=0)
+            x_max, y_max = bounds.max(axis=0)
+            width = max(x_max - x_min, 0.05)
+            height = max(y_max - y_min, 0.05)
+            pad = 0.08 * max(width, height)
+            ax.set_xlim(x_min - pad, x_max + pad)
+            ax.set_ylim(y_min - pad, y_max + pad)
+        else:
+            ax.set_xlim(-0.15, 0.15)
+            ax.set_ylim(-0.15, 0.15)
+
     def show(self) -> None:
-        """Finalize live Figures 1/3 and create Figure 2 after simulation."""
+        """Finalize Figures 1/3/4 and create Figure 2 after the simulation."""
         if not self.time_s:
             print("[Plotter] No policy samples to plot.")
             return
-        # In --no-gui mode, no figures were opened during evaluation.
         if self._fig is None:
             self.start()
         self._create_contact_figure()
+        self._create_support_figure()
         self.refresh(force=True)
         self._create_joint_figure()
         plt.ioff()

@@ -1,14 +1,14 @@
-"""Run an Open Duck Mini V2 PPO policy and collect motion/contact traces.
+"""Evaluate Open Duck Mini V2 PPO and plot base, joint, contact and ZMP data.
 
-Usage from the repository root:
-    python -m rl.run --device cuda:0 --vx 0.08            # Native MuJoCo GUI
-    python -m rl.run --device cuda:0 --vx 0.08 --no-gui   # Fast evaluation
+Run from the repository root:
+    python -m rl.run --device cuda:0 --vx 0.08 --gui
+    python -m rl.run --device cuda:0 --vx 0.08 --no-gui
     python -m rl.run --checkpoint /path/to/model_XXX.pt --no-gui
 
-Simulation lasts 10 s (500 policy steps at 0.02 s). With --gui,
-Figures 1 (base motion) and 3 (foot contacts) update live, while Figure 2
-(joint positions) opens only after the simulation. With --no-gui, no viewer
-or Matplotlib figures open until evaluation finishes. No files are saved.
+Simulation lasts 10 s (500 policy steps at 0.02 s). Figures 1 (base motion),
+3 (foot contacts), and 4 (support polygon + ZMP) update live with --gui.
+Figure 2 (joint positions) appears after simulation. With --no-gui, no viewer
+or plots open until the end. All data stay in RAM; no files are saved.
 """
 
 from __future__ import annotations
@@ -19,24 +19,31 @@ import os
 from dataclasses import asdict
 from pathlib import Path
 
+import mujoco
 import torch
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.utils.torch import configure_torch_backends
 
+from rl.cwc_reward import (
+    HALF_LENGTH_X,
+    HALF_WIDTH_Y,
+    OFFSET_X,
+    OFFSET_Y_LEFT_RIGHT,
+)
 from rl.env_cfg import EPISODE_LENGTH_S, POLICY_DT
 from rl.play import ContactViewer, find_checkpoint, prepare_evaluation_cfg
 from rl.plotter import Plotter
 from rl.ppo_cfg import get_ppo_cfg
-from rl.robot_cfg import FOOT_GEOM_NAMES, JOINT_NAMES
+from rl.robot_cfg import FOOT_GEOM_NAMES, FOOT_SITE_NAMES, JOINT_NAMES
 
 
 NORMAL_FORCE_THRESHOLD_N = 5.0
 
 
 def quaternion_wxyz_to_rpy_deg(quat_wxyz: torch.Tensor) -> tuple[float, float, float]:
-    """ZYX Euler angles (roll, pitch, yaw) for base relative to World [deg]."""
+    """ZYX Euler roll/pitch/yaw of the robot base wrt World [deg]."""
     w, x, y, z = quat_wxyz.detach().cpu().tolist()
     norm = math.sqrt(w * w + x * x + y * y + z * z)
     if norm < 1e-12:
@@ -49,7 +56,7 @@ def quaternion_wxyz_to_rpy_deg(quat_wxyz: torch.Tensor) -> tuple[float, float, f
 
 
 def get_joint_indices(robot) -> tuple[int, ...]:
-    """Map JOINT_NAMES onto indices of robot.data.joint_pos."""
+    """Map JOINT_NAMES onto indices of robot.data.joint_pos once at startup."""
     name_to_idx = {name: i for i, name in enumerate(robot.joint_names)}
     missing = [name for name in JOINT_NAMES if name not in name_to_idx]
     if missing:
@@ -60,13 +67,13 @@ def get_joint_indices(robot) -> tuple[int, ...]:
 
 
 def get_foot_wrench_indices(env) -> tuple[int, int]:
-    """Map left/right collision geoms to feet_wrench primary sensor ordering."""
+    """Map collision geometry names to feet_wrench primary sensor indices."""
     sensor = env.scene["feet_wrench"]
     if sensor.cfg.reduce != "netforce":
         raise RuntimeError("feet_wrench must use reduce='netforce'")
     names = sensor.primary_names
     ids: list[int] = []
-    for geom_name in FOOT_GEOM_NAMES:  # left, right
+    for geom_name in FOOT_GEOM_NAMES:
         matches = [
             i for i, name in enumerate(names)
             if name == geom_name or name.endswith("/" + geom_name)
@@ -79,24 +86,173 @@ def get_foot_wrench_indices(env) -> tuple[int, int]:
     return ids[0], ids[1]
 
 
+def get_foot_site_indices(env) -> tuple[int, int]:
+    """Resolve L6_IK and R6_IK IDs in the MuJoCo compiled model."""
+    model = env.sim.mj_model
+    ids = []
+    for site_name in FOOT_SITE_NAMES:
+        site_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_SITE, f"robot/{site_name}"
+        )
+        if site_id < 0:
+            raise RuntimeError(f"Missing IK site: robot/{site_name}")
+        ids.append(site_id)
+    return ids[0], ids[1]
+
+
+def convex_hull_xy(
+    points: list[tuple[float, float]],
+) -> tuple[tuple[float, float], ...]:
+    """Small 2D convex hull (monotonic chain), no SciPy dependency."""
+    points = sorted(set(points))
+    if len(points) < 3:
+        return tuple(points)
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list[tuple[float, float]] = []
+    for p in points:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0.0:
+            lower.pop()
+        lower.append(p)
+    upper: list[tuple[float, float]] = []
+    for p in reversed(points):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0.0:
+            upper.pop()
+        upper.append(p)
+    return tuple(lower[:-1] + upper[:-1])
+
+
 class EvaluationSampler:
-    """Collect desired/actual velocities, base motion, joints and foot contacts."""
+    """Collect one synchronized sample of robot state and contact wrench per step."""
 
     def __init__(self, env: ManagerBasedRlEnv, plotter: Plotter):
         self.env = env
         self.plotter = plotter
         self.joint_indices = get_joint_indices(env.scene["robot"])
         self.foot_indices = get_foot_wrench_indices(env)
+        self.foot_site_indices = get_foot_site_indices(env)
 
     def read_command(self) -> tuple[float, float]:
-        """Read the command in body frame before stepping/resampling."""
+        """Read command in body frame before policy step/resampling."""
         command = self.env.command_manager.get_command("twist")
         if command is None:
             raise RuntimeError("Command 'twist' is missing")
         return tuple(command[0, :2].detach().cpu().tolist())
 
+    def read_contact_support_zmp(
+        self,
+    ) -> tuple[
+        tuple[int, int],
+        tuple[tuple[float, float], ...],
+        tuple[float, float],
+    ]:
+        """Read contact state, effective support polygon and net ZMP in World XY.
+
+        Wrench convention matches rl/cwc_reward.py: feet_wrench reports
+        foot-on-ground net force/torque in World, at sensor.data.pos.
+        Negating both gives terrain-on-foot GRF (f) and contact moment (M).
+        Transform each moment to World origin O: M_O = M_at_pos + pos cross f.
+        For horizontal z=0: x_ZMP = -M_O,y/f_z; y_ZMP = M_O,x/f_z.
+
+        Only contacts with found=True and normal GRF > 5 N contribute.
+        Effective rectangles and offsets are imported from rl/cwc_reward.py.
+        """
+        wrench = self.env.scene["feet_wrench"].data
+        if any(getattr(wrench, field) is None for field in (
+            "force", "torque", "pos", "found"
+        )):
+            raise RuntimeError(
+                "feet_wrench must provide force, torque, pos and found"
+            )
+
+        order = list(self.foot_indices)
+        # (2,3) World-frame force, torque and wrench reference positions.
+        force_w = -wrench.force[0, order, :]
+        torque_w = -wrench.torque[0, order, :]
+        pos_w = wrench.pos[0, order, :]
+        found = wrench.found[0, order] > 0
+
+        finite = (
+            torch.isfinite(force_w).all(dim=-1)
+            & torch.isfinite(torque_w).all(dim=-1)
+            & torch.isfinite(pos_w).all(dim=-1)
+        )
+        active = found & (force_w[:, 2] > NORMAL_FORCE_THRESHOLD_N) & finite
+        active_list = active.detach().cpu().tolist()
+        contact_pair = (int(active_list[0]), int(active_list[1]))
+
+        # Build current support polygon from the effective CWC rectangles.
+        # The IK site's +X (not the collision geom's +X) defines foot length.
+        vertices: list[tuple[float, float]] = []
+        if any(active_list):
+            site_ids = list(self.foot_site_indices)
+            site_pos_xy = self.env.sim.data.site_xpos[
+                0, site_ids, :2
+            ].detach().cpu().tolist()
+            site_rot = self.env.sim.data.site_xmat[
+                0, site_ids
+            ].reshape(2, 3, 3).detach().cpu().tolist()
+
+            for foot_idx, is_active in enumerate(active_list):
+                if not is_active:
+                    continue
+                # First column: world direction of IK site's local X axis.
+                foot_x = site_rot[foot_idx]
+                ex_x, ex_y = foot_x[0][0], foot_x[1][0]
+                norm_xy = math.hypot(ex_x, ex_y)
+                if norm_xy > 1.0e-6:
+                    ex_x /= norm_xy
+                    ex_y /= norm_xy
+                else:
+                    ex_x, ex_y = 1.0, 0.0
+                ey_x, ey_y = -ex_y, ex_x
+
+                center_x = (
+                    site_pos_xy[foot_idx][0]
+                    + OFFSET_X * ex_x
+                    + OFFSET_Y_LEFT_RIGHT[foot_idx] * ey_x
+                )
+                center_y = (
+                    site_pos_xy[foot_idx][1]
+                    + OFFSET_X * ex_y
+                    + OFFSET_Y_LEFT_RIGHT[foot_idx] * ey_y
+                )
+                for sx, sy in ((-1, -1), (-1, 1), (1, 1), (1, -1)):
+                    vertices.append((
+                        center_x + sx * HALF_LENGTH_X * ex_x
+                                 + sy * HALF_WIDTH_Y * ey_x,
+                        center_y + sx * HALF_LENGTH_X * ex_y
+                                 + sy * HALF_WIDTH_Y * ey_y,
+                    ))
+
+        support_polygon = convex_hull_xy(vertices) if vertices else ()
+
+        if not any(active_list):
+            return contact_pair, support_polygon, (math.nan, math.nan)
+
+        # Sum contact wrenches about WORLD ORIGIN, not about the foot sites.
+        moment_about_world = torque_w + torch.cross(pos_w, force_w, dim=-1)
+        zeros_f = torch.zeros_like(force_w)
+        zeros_m = torch.zeros_like(moment_about_world)
+        total_force = torch.where(active[:, None], force_w, zeros_f).sum(dim=0)
+        total_moment = torch.where(
+            active[:, None], moment_about_world, zeros_m
+        ).sum(dim=0)
+
+        fz = float(total_force[2].item())
+        if not math.isfinite(fz) or fz <= NORMAL_FORCE_THRESHOLD_N:
+            return contact_pair, support_polygon, (math.nan, math.nan)
+        mx, my = total_moment[:2].detach().cpu().tolist()
+        zmp_x, zmp_y = -my / fz, mx / fz
+        if not (math.isfinite(zmp_x) and math.isfinite(zmp_y)):
+            zmp_x = zmp_y = math.nan
+
+        return contact_pair, support_polygon, (zmp_x, zmp_y)
+
     def record(self, command_xy: tuple[float, float], *, reset: bool = False) -> None:
-        """Record one policy sample, with NaN at an auto/manual reset boundary."""
+        """Record a policy sample; break actual traces at reset boundaries."""
         if reset:
             vx_actual = vy_actual = math.nan
             roll_deg = pitch_deg = yaw_deg = math.nan
@@ -104,6 +260,8 @@ class EvaluationSampler:
             left_joint_pos = [math.nan] * 5
             right_joint_pos = [math.nan] * 5
             contact_left = contact_right = math.nan
+            polygon_xy: tuple[tuple[float, float], ...] = ()
+            zmp_x = zmp_y = math.nan
         else:
             robot = self.env.scene["robot"]
             data = robot.data
@@ -116,46 +274,27 @@ class EvaluationSampler:
             wx_rad_s, wy_rad_s, wz_rad_s = (
                 data.root_link_ang_vel_b[0, :3].detach().cpu().tolist()
             )
-            joints = (
-                data.joint_pos[0, list(self.joint_indices)].detach().cpu().tolist()
-            )
+            joints = data.joint_pos[
+                0, list(self.joint_indices)
+            ].detach().cpu().tolist()
             left_joint_pos, right_joint_pos = joints[:5], joints[5:]
-
-            wrench = self.env.scene["feet_wrench"].data
-            if wrench.force is None or wrench.found is None:
-                raise RuntimeError("feet_wrench must provide 'force' and 'found'")
-
-            # Sensor primary=foot, secondary=terrain, reduce='netforce'.
-            # In this repository, force is FOOT-on-TERRAIN (World frame).
-            # Negating it gives the ground reaction on the foot; its world Z
-            # component is the normal force on the horizontal ground.
-            normal_force = -wrench.force[0, list(self.foot_indices), 2]
-            found = wrench.found[0, list(self.foot_indices)] > 0
-            contacts = (found & (normal_force > NORMAL_FORCE_THRESHOLD_N))
-            contact_left, contact_right = (
-                contacts.to(torch.int32).detach().cpu().tolist()
+            (contact_left, contact_right), polygon_xy, (zmp_x, zmp_y) = (
+                self.read_contact_support_zmp()
             )
 
         self.plotter.add_sample(
-            vx_desired=command_xy[0],
-            vx_actual=vx_actual,
-            vy_desired=command_xy[1],
-            vy_actual=vy_actual,
-            roll_deg=roll_deg,
-            pitch_deg=pitch_deg,
-            yaw_deg=yaw_deg,
-            wx_rad_s=wx_rad_s,
-            wy_rad_s=wy_rad_s,
-            wz_rad_s=wz_rad_s,
-            joint_pos_left=left_joint_pos,
-            joint_pos_right=right_joint_pos,
-            contact_left=contact_left,
-            contact_right=contact_right,
+            vx_desired=command_xy[0], vx_actual=vx_actual,
+            vy_desired=command_xy[1], vy_actual=vy_actual,
+            roll_deg=roll_deg, pitch_deg=pitch_deg, yaw_deg=yaw_deg,
+            wx_rad_s=wx_rad_s, wy_rad_s=wy_rad_s, wz_rad_s=wz_rad_s,
+            joint_pos_left=left_joint_pos, joint_pos_right=right_joint_pos,
+            contact_left=contact_left, contact_right=contact_right,
+            support_polygon_xy=polygon_xy, zmp_x_w=zmp_x, zmp_y_w=zmp_y,
         )
 
 
 class PlottingContactViewer(ContactViewer):
-    """Native MuJoCo viewer that records once per successful policy step."""
+    """Native MuJoCo viewer recording once per successful policy step."""
 
     def __init__(
         self,
@@ -183,7 +322,7 @@ class PlottingContactViewer(ContactViewer):
         )
         self.sampler.record(command_xy, reset=reset)
         self._break_after_manual_reset = False
-        self.sampler.plotter.refresh()  # Figures 1 and 3, in GUI mode.
+        self.sampler.plotter.refresh()  # Live Figures 1, 3 and 4.
         return True
 
 
@@ -193,7 +332,7 @@ def run_without_gui(
     sampler: EvaluationSampler,
     max_policy_steps: int,
 ) -> None:
-    """Policy evaluation with no Viewer, plotting, or wall-clock pacing."""
+    """Policy evaluation without MuJoCo Viewer or Matplotlib during rollout."""
     reset_fn = getattr(policy, "reset", None)
     with torch.inference_mode():
         for _ in range(max_policy_steps):
@@ -217,16 +356,16 @@ def parse_args() -> argparse.Namespace:
     gui_group = parser.add_mutually_exclusive_group()
     gui_group.add_argument(
         "--gui", dest="gui", action="store_true",
-        help="Show MuJoCo Viewer and live Figures 1/3 (default)",
+        help="Show MuJoCo Viewer and live Figures 1/3/4 (default)",
     )
     gui_group.add_argument(
         "--no-gui", dest="gui", action="store_false",
-        help="Run without viewer/live plots, display results after simulation",
+        help="Run without Viewer/live plots; show results after simulation",
     )
     parser.set_defaults(gui=True)
     parser.add_argument(
         "--refresh-interval", type=float, default=0.10,
-        help="Live Figures 1/3 refresh interval in wall-clock seconds",
+        help="Live Figures 1/3/4 refresh interval in wall-clock seconds",
     )
     parser.add_argument(
         "--force-scale", type=float, default=1.0,
@@ -303,7 +442,7 @@ def main() -> None:
         if args.gui:
             plotter.start()
             plotter.refresh(force=True)
-            print("[INFO] GUI: Figures 1/3 live; Figure 2 deferred")
+            print("[INFO] GUI: Figures 1/3/4 live; Figure 2 deferred")
             viewer = PlottingContactViewer(
                 wrapped, policy, sampler, force_scale=args.force_scale
             )
@@ -313,7 +452,7 @@ def main() -> None:
             run_without_gui(wrapped, policy, sampler, max_policy_steps)
 
         print(f"[INFO] Recorded {len(plotter.time_s)} samples in RAM")
-        print("[INFO] Displaying three figures (no files saved)")
+        print("[INFO] Displaying four figures (no files saved)")
         plotter.show()
     finally:
         if env is not None:
