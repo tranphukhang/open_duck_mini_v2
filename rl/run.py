@@ -43,7 +43,7 @@ NORMAL_FORCE_THRESHOLD_N = 5.0
 # Site-local +X points towards the toe, +Y is left in the levelled foot frame.
 SUPPORT_TOE_X = 0.06433       # site -> toe: 64.33 mm
 SUPPORT_HEEL_X = -0.04000     # site -> heel: -40.00 mm
-SUPPORT_LATERAL_WIDTH = 0.01550   # total rectangle width: 11.62 mm
+SUPPORT_LATERAL_WIDTH = 0.01550   # total rectangle width: 15.5 mm
 SUPPORT_LATERAL_CENTER = (0.00774, -0.00774)  # left/right site offset
 
 # Derived rectangular support geometry for the existing centre-and-half-size

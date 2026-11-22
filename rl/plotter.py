@@ -61,7 +61,8 @@ class Plotter:
         self.wy_rad_s: list[float] = []
         self.wz_rad_s: list[float] = []
 
-        # Figure 2: actual (not home-relative) joint positions [rad].
+        # Figure 2: actual joint positions stored in radians.
+        # Conversion to degrees is performed only when plotting.
         self.left_joint_pos: dict[str, list[float]] = {
             name: [] for name in LEFT_JOINT_NAMES
         }
@@ -277,27 +278,41 @@ class Plotter:
             self._refresh_support_figure()
             self._fig_support.canvas.draw_idle()
 
-
     def _create_joint_figure(self) -> None:
-        """Create Figure 2 only after the simulation ends."""
+        """Create Figure 2 with joint positions converted to degrees."""
         if self._fig_joints is not None and plt.fignum_exists(self._fig_joints.number):
             return
+
         self._fig_joints, (ax_left, ax_right) = plt.subplots(
             nrows=2, ncols=1, sharex=True, figsize=(11, 8),
             num="Joint positions",
         )
+
+        # Left leg joint positions (rad -> deg)
         for name in LEFT_JOINT_NAMES:
-            ax_left.plot(self.time_s, self.left_joint_pos[name], label=name)
+            ax_left.plot(
+                self.time_s,
+                np.rad2deg(self.left_joint_pos[name]),
+                label=name,
+            )
+
+        # Right leg joint positions (rad -> deg)
         for name in RIGHT_JOINT_NAMES:
-            ax_right.plot(self.time_s, self.right_joint_pos[name], label=name)
+            ax_right.plot(
+                self.time_s,
+                np.rad2deg(self.right_joint_pos[name]),
+                label=name,
+            )
+
         for ax, title in (
             (ax_left, "Left leg joint positions"),
             (ax_right, "Right leg joint positions"),
         ):
             ax.set_title(title)
-            ax.set_ylabel("Joint position (rad)")
+            ax.set_ylabel("Joint position (deg)")
             ax.grid(True)
             ax.legend(loc="upper right", ncol=2, fontsize="small")
+
         ax_right.set_xlabel("Simulation time (s)")
         self._fig_joints.tight_layout()
 
@@ -344,7 +359,7 @@ class Plotter:
         ax = self._ax_support
 
         # One independent CLOSED path per policy step, color-coded by its
-        # simulation timestamp.  LineCollection avoids hundreds of artists.
+        # simulation timestamp. LineCollection avoids hundreds of artists.
         self._support_history = LineCollection(
             [],
             cmap="viridis",
@@ -398,21 +413,26 @@ class Plotter:
 
         history_paths = []
         history_times = []
+
         # Keep every support boundary in RAM at 50 Hz, but display an outline
         # approximately every 0.1 s (plus every contact-mode transition).
         # This avoids dense, overlapping contours looking like a filled area.
         display_stride = max(1, round(0.10 / self.policy_dt))
         previous_contact = None
+
         for k, polygon in enumerate(self.support_polygon_xy):
             if len(polygon) < 3:
                 previous_contact = None
                 continue
+
             contact = (self.contact_left[k], self.contact_right[k])
             changed_mode = contact != previous_contact
             previous_contact = contact
+
             if k == current_idx or not (k % display_stride == 0 or changed_mode):
                 continue
-            # Closed *individual* contour. This does not connect one time
+
+            # Closed individual contour. This does not connect one time
             # step to another or draw internal edges when both feet support.
             points = np.asarray(polygon, dtype=float)
             history_paths.append(np.vstack((points, points[0])))
@@ -427,6 +447,7 @@ class Plotter:
         current_polygon = (
             self.support_polygon_xy[current_idx] if current_idx >= 0 else ()
         )
+
         if len(current_polygon) >= 3:
             points = np.asarray(current_polygon, dtype=float)
             closed = np.vstack((points, points[0]))
@@ -436,8 +457,10 @@ class Plotter:
 
         # NaN values retained in the ZMP trajectory break the line at resets.
         self._zmp_trail.set_data(self.zmp_x_w, self.zmp_y_w)
+
         zx = self.zmp_x_w[current_idx] if current_idx >= 0 else math.nan
         zy = self.zmp_y_w[current_idx] if current_idx >= 0 else math.nan
+
         if math.isfinite(zx) and math.isfinite(zy):
             self._zmp_current.set_data([zx], [zy])
         else:
@@ -456,13 +479,16 @@ class Plotter:
         )
 
         ax = self._ax_support
+
         if coords:
             bounds = np.asarray(coords, dtype=float)
             x_min, y_min = bounds.min(axis=0)
             x_max, y_max = bounds.max(axis=0)
+
             width = max(x_max - x_min, 0.05)
             height = max(y_max - y_min, 0.05)
             pad = 0.08 * max(width, height)
+
             ax.set_xlim(x_min - pad, x_max + pad)
             ax.set_ylim(y_min - pad, y_max + pad)
         else:
@@ -474,12 +500,16 @@ class Plotter:
         if not self.time_s:
             print("[Plotter] No policy samples to plot.")
             return
+
         plt.ioff()
+
         if self._fig is None:
             self.start()
+
         self._create_contact_figure()
         self._create_support_figure()
         self.refresh(force=True)
         self._create_joint_figure()
+
         plt.ioff()
         plt.show()
