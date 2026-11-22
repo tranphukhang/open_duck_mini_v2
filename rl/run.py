@@ -1,12 +1,12 @@
-"""Run the trained PPO policy with X/Y velocity, base RPY, and body angular-rate plots.
+"""Run PPO with live base plots and deferred left/right joint-position plots.
 
 Run from the repository root:
     python -m rl.run --device cuda:0 --vx 0.08
     python -m rl.run --checkpoint logs/rsl_rl/open_duck_mini_v2/<run>/model_XXX.pt
 
 Evaluation lasts 10 seconds of simulated time (500 policy steps at 0.02 s).
-This file reuses rl.play for PPO loading and native MuJoCo contact rendering.
-Only one environment is plotted. No CSV or figure files are written.
+Reuses rl.play for PPO loading and native MuJoCo contact rendering.
+Only one environment is plotted; nothing is saved to CSV or images.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from rl.env_cfg import POLICY_DT, EPISODE_LENGTH_S
 from rl.play import ContactViewer, find_checkpoint, prepare_evaluation_cfg
 from rl.plotter import Plotter
 from rl.ppo_cfg import get_ppo_cfg
+from rl.robot_cfg import JOINT_NAMES
 
 
 def quaternion_wxyz_to_rpy_deg(quat_wxyz: torch.Tensor) -> tuple[float, float, float]:
@@ -44,12 +45,41 @@ def quaternion_wxyz_to_rpy_deg(quat_wxyz: torch.Tensor) -> tuple[float, float, f
     return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
 
-class PlottingContactViewer(ContactViewer):
-    """Append one complete base-state sample per policy step, not per frame."""
+def get_joint_indices(robot) -> tuple[int, ...]:
+    """Resolve names into robot.data.joint_pos indices, once at startup.
 
-    def __init__(self, env, policy, plotter: Plotter, *, force_scale: float = 1.0):
+    Do not assume that the MJCF internal joint order equals JOINT_NAMES.
+    """
+    name_to_idx = {name: i for i, name in enumerate(robot.joint_names)}
+    missing = [name for name in JOINT_NAMES if name not in name_to_idx]
+    if missing:
+        raise RuntimeError(f"Missing robot joints: {missing}")
+    if len(JOINT_NAMES) != 10:
+        raise RuntimeError("Expected five left and five right joints")
+    return tuple(name_to_idx[name] for name in JOINT_NAMES)
+
+
+def read_joint_positions(robot, joint_indices: tuple[int, ...]):
+    """Return actual absolute left/right joint angles [rad]."""
+    joint_pos = robot.data.joint_pos[0, list(joint_indices)].detach().cpu().tolist()
+    return joint_pos[:5], joint_pos[5:]
+
+
+class PlottingContactViewer(ContactViewer):
+    """Append one complete robot sample per policy step, not per render frame."""
+
+    def __init__(
+        self,
+        env,
+        policy,
+        plotter: Plotter,
+        joint_indices: tuple[int, ...],
+        *,
+        force_scale: float = 1.0,
+    ):
         super().__init__(env, policy, force_scale=force_scale)
         self.plotter = plotter
+        self.joint_indices = joint_indices
         self._break_after_manual_reset = False
 
     def reset_environment(self) -> None:
@@ -61,7 +91,7 @@ class PlottingContactViewer(ContactViewer):
         """Sample after every env.step() with a fixed policy-step time base."""
         base_env = self.env.unwrapped
 
-        # Preserve the command used by this step. It may be resampled on reset.
+        # Capture the command used for this step, before possible resampling.
         command = base_env.command_manager.get_command("twist")
         if command is None:
             raise RuntimeError("Command 'twist' is missing")
@@ -71,27 +101,31 @@ class PlottingContactViewer(ContactViewer):
         if not super()._execute_step():
             return False
 
-        # When auto-reset occurs, env.step() returns the NEW episode's
-        # initial state. Insert NaNs instead of mislabeling it as the previous
-        # episode's terminal state. This also handles a manual reset marker.
+        # After auto-reset, MJLab exposes the new episode's initial state.
+        # Use NaNs to avoid plotting it as the preceding episode's final state.
         auto_reset = base_env.episode_length_buf[0].item() == 0
         if auto_reset or self._break_after_manual_reset:
             vx_actual = vy_actual = math.nan
             roll_deg = pitch_deg = yaw_deg = math.nan
             wx_rad_s = wy_rad_s = wz_rad_s = math.nan
+            left_joint_pos = [math.nan] * 5
+            right_joint_pos = [math.nan] * 5
             self._break_after_manual_reset = False
         else:
-            robot_data = base_env.scene["robot"].data
+            robot = base_env.scene["robot"]
+            robot_data = robot.data
             vx_actual, vy_actual = (
                 robot_data.root_link_lin_vel_b[0, :2].detach().cpu().tolist()
             )
             roll_deg, pitch_deg, yaw_deg = quaternion_wxyz_to_rpy_deg(
                 robot_data.root_link_quat_w[0]
             )
-            # Angular velocity expressed in the base/body frame [rad/s].
-            # These are physical angular rates, not Euler-angle derivatives.
+            # These are physical angular velocities, not Euler-angle derivatives.
             wx_rad_s, wy_rad_s, wz_rad_s = (
                 robot_data.root_link_ang_vel_b[0, :3].detach().cpu().tolist()
+            )
+            left_joint_pos, right_joint_pos = read_joint_positions(
+                robot, self.joint_indices
             )
 
         self.plotter.add_sample(
@@ -105,6 +139,8 @@ class PlottingContactViewer(ContactViewer):
             wx_rad_s=wx_rad_s,
             wy_rad_s=wy_rad_s,
             wz_rad_s=wz_rad_s,
+            joint_pos_left=left_joint_pos,
+            joint_pos_right=right_joint_pos,
         )
         self.plotter.refresh()
         return True
@@ -117,10 +153,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--vx", type=float, default=0.08)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--refresh-interval", type=float, default=0.10,
-                        help="Matplotlib refresh interval in wall-clock seconds")
-    parser.add_argument("--force-scale", type=float, default=1.0,
-                        help="Viewer contact-force arrow scaling (visual only)")
+    parser.add_argument(
+        "--refresh-interval", type=float, default=0.10,
+        help="Matplotlib refresh interval in wall-clock seconds",
+    )
+    parser.add_argument(
+        "--force-scale", type=float, default=1.0,
+        help="Viewer contact-force arrow scaling (visual only)",
+    )
     args = parser.parse_args()
 
     if not 0.0 <= args.vx <= 0.1:
@@ -151,7 +191,7 @@ def main() -> None:
 
     cfg = prepare_evaluation_cfg(num_envs=1, vx=args.vx, training_commands=False)
     cfg.seed = args.seed
-    # Keep training-like auto-reset on falls before the 10-second horizon.
+    # Keep training-like auto-reset if the robot falls before 10 seconds.
 
     env = None
     try:
@@ -162,7 +202,6 @@ def main() -> None:
                 or env.action_manager.total_action_dim != 10):
             raise RuntimeError("Unexpected actor/action dimensions; verify rl/env_cfg.py")
 
-        # Derive step limit from the episode duration in the env configuration.
         num_steps_exact = EPISODE_LENGTH_S / env.step_dt
         max_policy_steps = round(num_steps_exact)
         if not math.isclose(num_steps_exact, max_policy_steps, abs_tol=1e-10):
@@ -185,7 +224,6 @@ def main() -> None:
         policy = runner.get_inference_policy(device=args.device)
         policy.eval()
 
-        # Record initial state at t=0 before the 500 policy steps.
         env.reset()
         plotter = Plotter(
             policy_dt=POLICY_DT,
@@ -194,7 +232,9 @@ def main() -> None:
         command = env.command_manager.get_command("twist")
         if command is None:
             raise RuntimeError("Command 'twist' is missing after reset")
-        robot_data = env.scene["robot"].data
+        robot = env.scene["robot"]
+        robot_data = robot.data
+        joint_indices = get_joint_indices(robot)
         vx_desired, vy_desired = command[0, :2].detach().cpu().tolist()
         vx_actual, vy_actual = (
             robot_data.root_link_lin_vel_b[0, :2].detach().cpu().tolist()
@@ -205,24 +245,30 @@ def main() -> None:
         wx_rad_s, wy_rad_s, wz_rad_s = (
             robot_data.root_link_ang_vel_b[0, :3].detach().cpu().tolist()
         )
+        left_joint_pos, right_joint_pos = read_joint_positions(robot, joint_indices)
         plotter.add_sample(
             vx_desired=vx_desired, vx_actual=vx_actual,
             vy_desired=vy_desired, vy_actual=vy_actual,
             roll_deg=roll_deg, pitch_deg=pitch_deg, yaw_deg=yaw_deg,
             wx_rad_s=wx_rad_s, wy_rad_s=wy_rad_s, wz_rad_s=wz_rad_s,
+            joint_pos_left=left_joint_pos, joint_pos_right=right_joint_pos,
         )
         plotter.start()
         plotter.refresh(force=True)
 
-        print("[OK] Policy loaded. MuJoCo viewer and 4 plots started")
+        print("[OK] Policy loaded. Figure 1 updates live; Figure 2 opens after simulation")
         print("[INFO] MuJoCo: Space=pause; avoid Enter/reset during the 10s run")
         viewer = PlottingContactViewer(
-            wrapped, policy, plotter, force_scale=args.force_scale
+            wrapped,
+            policy,
+            plotter,
+            joint_indices,
+            force_scale=args.force_scale,
         )
         viewer.run(num_steps=max_policy_steps)
 
-        # Keep final Matplotlib window open after the 10-second simulation.
         print(f"[INFO] Recorded {len(plotter.time_s)} samples in RAM")
+        # Create Figure 2 only now, after all policy steps have completed.
         plotter.show()
     finally:
         if env is not None:
