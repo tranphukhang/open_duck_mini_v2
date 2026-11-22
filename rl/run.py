@@ -1,12 +1,12 @@
-"""Run the trained PPO policy and plot X/Y velocities and base Roll/Pitch/Yaw.
+"""Run the trained PPO policy with X/Y velocity, base RPY, and body angular-rate plots.
 
-From the repository root:
+Run from the repository root:
     python -m rl.run --device cuda:0 --vx 0.08
-    # Evaluation runs for 10 seconds of simulated time (500 policy steps).
     python -m rl.run --checkpoint logs/rsl_rl/open_duck_mini_v2/<run>/model_XXX.pt
 
-This file reuses rl.play for PPO loading and the native MuJoCo contact viewer.
-Only one environment is used for plotting. Data remains in RAM (no CSV/images).
+Evaluation lasts 10 seconds of simulated time (500 policy steps at 0.02 s).
+This file reuses rl.play for PPO loading and native MuJoCo contact rendering.
+Only one environment is plotted. No CSV or figure files are written.
 """
 
 from __future__ import annotations
@@ -30,11 +30,7 @@ from rl.ppo_cfg import get_ppo_cfg
 
 
 def quaternion_wxyz_to_rpy_deg(quat_wxyz: torch.Tensor) -> tuple[float, float, float]:
-    """Convert the root-link orientation in World to roll, pitch, yaw [deg].
-
-    MJLab/MuJoCo quaternions use [w, x, y, z].
-    Convention: roll about X, pitch about Y, yaw about Z (ZYX Euler).
-    """
+    """Convert root-link orientation relative to World into ZYX Euler angles [deg]."""
     w, x, y, z = quat_wxyz.detach().cpu().tolist()
     norm = math.sqrt(w * w + x * x + y * y + z * z)
     if norm < 1e-12:
@@ -45,12 +41,11 @@ def quaternion_wxyz_to_rpy_deg(quat_wxyz: torch.Tensor) -> tuple[float, float, f
     sin_pitch = 2.0 * (w * y - z * x)
     pitch = math.asin(max(-1.0, min(1.0, sin_pitch)))
     yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-
     return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
 
 class PlottingContactViewer(ContactViewer):
-    """Extend the existing viewer with exactly one sample per policy step."""
+    """Append one complete base-state sample per policy step, not per frame."""
 
     def __init__(self, env, policy, plotter: Plotter, *, force_scale: float = 1.0):
         super().__init__(env, policy, force_scale=force_scale)
@@ -58,44 +53,47 @@ class PlottingContactViewer(ContactViewer):
         self._break_after_manual_reset = False
 
     def reset_environment(self) -> None:
-        """Keep the plot history while avoiding a line across a manual reset."""
+        """Keep plot history but prevent joining curves across a manual reset."""
         super().reset_environment()
         self._break_after_manual_reset = True
 
     def _execute_step(self) -> bool:
-        """Sample after each env.step(), not after each rendering frame."""
+        """Sample after every env.step() with a fixed policy-step time base."""
         base_env = self.env.unwrapped
 
-        # Capture the command USED for the upcoming step. The command manager
-        # may resample it inside env.step() (particularly on auto-reset).
+        # Preserve the command used by this step. It may be resampled on reset.
         command = base_env.command_manager.get_command("twist")
         if command is None:
             raise RuntimeError("Command 'twist' is missing")
         vx_desired, vy_desired = command[0, :2].detach().cpu().tolist()
 
-        # Native viewer handles observations, deterministic policy inference,
-        # physics, terminations, playback controls, and contact rendering.
+        # BaseViewer executes observation -> policy -> action -> physics.
         if not super()._execute_step():
             return False
 
-        # MJLab auto-reset replaces the terminal state before returning from
-        # env.step(). Do not plot the new episode's initial velocity as though
-        # it were the previous episode's last measured velocity.
+        # When auto-reset occurs, env.step() returns the NEW episode's
+        # initial state. Insert NaNs instead of mislabeling it as the previous
+        # episode's terminal state. This also handles a manual reset marker.
         auto_reset = base_env.episode_length_buf[0].item() == 0
         if auto_reset or self._break_after_manual_reset:
-            vx_actual = math.nan
-            vy_actual = math.nan
+            vx_actual = vy_actual = math.nan
             roll_deg = pitch_deg = yaw_deg = math.nan
+            wx_rad_s = wy_rad_s = wz_rad_s = math.nan
             self._break_after_manual_reset = False
         else:
             robot_data = base_env.scene["robot"].data
-            actual = robot_data.root_link_lin_vel_b
-            vx_actual, vy_actual = actual[0, :2].detach().cpu().tolist()
+            vx_actual, vy_actual = (
+                robot_data.root_link_lin_vel_b[0, :2].detach().cpu().tolist()
+            )
             roll_deg, pitch_deg, yaw_deg = quaternion_wxyz_to_rpy_deg(
                 robot_data.root_link_quat_w[0]
             )
+            # Angular velocity expressed in the base/body frame [rad/s].
+            # These are physical angular rates, not Euler-angle derivatives.
+            wx_rad_s, wy_rad_s, wz_rad_s = (
+                robot_data.root_link_ang_vel_b[0, :3].detach().cpu().tolist()
+            )
 
-        # This call occurs once per policy step: dt = POLICY_DT.
         self.plotter.add_sample(
             vx_desired=vx_desired,
             vx_actual=vx_actual,
@@ -104,6 +102,9 @@ class PlottingContactViewer(ContactViewer):
             roll_deg=roll_deg,
             pitch_deg=pitch_deg,
             yaw_deg=yaw_deg,
+            wx_rad_s=wx_rad_s,
+            wy_rad_s=wy_rad_s,
+            wz_rad_s=wz_rad_s,
         )
         self.plotter.refresh()
         return True
@@ -148,11 +149,9 @@ def main() -> None:
     print(f"[INFO] Fixed body-frame command: vx={args.vx:.3f}, vy=0.000 m/s")
     print(f"[INFO] Policy sampling interval: {POLICY_DT:.3f} s")
 
-    # Reuse the SAME inference environment settings as rl.play.
     cfg = prepare_evaluation_cfg(num_envs=1, vx=args.vx, training_commands=False)
     cfg.seed = args.seed
-    # Keep training-like auto-reset if the robot falls before the 10s horizon.
-    # run() still stops after exactly 500 total policy steps.
+    # Keep training-like auto-reset on falls before the 10-second horizon.
 
     env = None
     try:
@@ -163,12 +162,11 @@ def main() -> None:
                 or env.action_manager.total_action_dim != 10):
             raise RuntimeError("Unexpected actor/action dimensions; verify rl/env_cfg.py")
 
-        # Derive the policy step cap from the environment episode duration.
+        # Derive step limit from the episode duration in the env configuration.
         num_steps_exact = EPISODE_LENGTH_S / env.step_dt
         max_policy_steps = round(num_steps_exact)
         if not math.isclose(num_steps_exact, max_policy_steps, abs_tol=1e-10):
             raise RuntimeError("Episode duration must be a multiple of policy_dt")
-
         print(
             f"[INFO] Simulation horizon: {EPISODE_LENGTH_S:g} s "
             f"= {max_policy_steps} policy steps"
@@ -187,38 +185,43 @@ def main() -> None:
         policy = runner.get_inference_policy(device=args.device)
         policy.eval()
 
-        # Ensure initial command/state are valid and register t=0.
+        # Record initial state at t=0 before the 500 policy steps.
         env.reset()
         plotter = Plotter(
             policy_dt=POLICY_DT,
             refresh_interval=args.refresh_interval,
         )
         command = env.command_manager.get_command("twist")
-        actual = env.scene["robot"].data.root_link_lin_vel_b
         if command is None:
             raise RuntimeError("Command 'twist' is missing after reset")
-        desired_xy = command[0, :2].detach().cpu().tolist()
-        actual_xy = actual[0, :2].detach().cpu().tolist()
+        robot_data = env.scene["robot"].data
+        vx_desired, vy_desired = command[0, :2].detach().cpu().tolist()
+        vx_actual, vy_actual = (
+            robot_data.root_link_lin_vel_b[0, :2].detach().cpu().tolist()
+        )
         roll_deg, pitch_deg, yaw_deg = quaternion_wxyz_to_rpy_deg(
-            env.scene["robot"].data.root_link_quat_w[0]
+            robot_data.root_link_quat_w[0]
+        )
+        wx_rad_s, wy_rad_s, wz_rad_s = (
+            robot_data.root_link_ang_vel_b[0, :3].detach().cpu().tolist()
         )
         plotter.add_sample(
-            vx_desired=desired_xy[0], vx_actual=actual_xy[0],
-            vy_desired=desired_xy[1], vy_actual=actual_xy[1],
+            vx_desired=vx_desired, vx_actual=vx_actual,
+            vy_desired=vy_desired, vy_actual=vy_actual,
             roll_deg=roll_deg, pitch_deg=pitch_deg, yaw_deg=yaw_deg,
+            wx_rad_s=wx_rad_s, wy_rad_s=wy_rad_s, wz_rad_s=wz_rad_s,
         )
         plotter.start()
         plotter.refresh(force=True)
 
-        print("[OK] Policy loaded. Native MuJoCo viewer and velocity/RPY plots started")
+        print("[OK] Policy loaded. MuJoCo viewer and 4 plots started")
         print("[INFO] MuJoCo: Space=pause; avoid Enter/reset during the 10s run")
         viewer = PlottingContactViewer(
             wrapped, policy, plotter, force_scale=args.force_scale
         )
         viewer.run(num_steps=max_policy_steps)
 
-        # After 500 steps (10s simulated), the viewer closes automatically.
-        # The final plotting window stays open for inspection.
+        # Keep final Matplotlib window open after the 10-second simulation.
         print(f"[INFO] Recorded {len(plotter.time_s)} samples in RAM")
         plotter.show()
     finally:
