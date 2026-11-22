@@ -3,8 +3,8 @@
 Figure 1: base motion. Figure 2: joint positions (deferred).
 Figure 3: foot contacts. Figure 4: support-boundary history and ZMP
 trajectory in World XY. Each support boundary is a separate, closed
-convex-hull outline (never joined to the next time step). With --gui,
-Figures 1/3/4 update live; with --no-gui, all plots appear after simulation.
+convex-hull outline (never joined to the next time step). ALL figures are
+created only after the rollout, regardless of MuJoCo GUI settings.
 Nothing is saved to disk.
 """
 
@@ -197,11 +197,10 @@ class Plotter:
         self.zmp_y_w.append(math.nan if zmp_y_w is None else float(zmp_y_w))
 
     def start(self) -> None:
-        """Create live Figures 1, 3 and 4. Figure 2 stays deferred."""
+        """Create Figures 1, 3 and 4 after the simulation finishes."""
         if self._fig is not None and plt.fignum_exists(self._fig.number):
             return
 
-        plt.ion()
         self._fig, (self._ax_x, self._ax_y, self._ax_rpy, self._ax_ang_vel) = (
             plt.subplots(
                 nrows=4, ncols=1, sharex=True, figsize=(11, 11),
@@ -234,10 +233,9 @@ class Plotter:
 
         self._create_contact_figure()
         self._create_support_figure()
-        plt.show(block=False)
 
     def refresh(self, force: bool = False) -> None:
-        """Refresh only Figures 1, 3 and 4; preserve one sample/policy step."""
+        """Populate buffered line artists once, when the rollout ends."""
         if not self.time_s:
             return
         if self._fig is None and self._fig_contacts is None and self._fig_support is None:
@@ -279,8 +277,6 @@ class Plotter:
             self._refresh_support_figure()
             self._fig_support.canvas.draw_idle()
 
-        # Process events only once, for all live windows.
-        plt.pause(0.001)
 
     def _create_joint_figure(self) -> None:
         """Create Figure 2 only after the simulation ends."""
@@ -474,10 +470,11 @@ class Plotter:
             ax.set_ylim(-0.15, 0.15)
 
     def show(self) -> None:
-        """Finalize Figures 1/3/4 and create Figure 2 after the simulation."""
+        """Create and render all four figures after the simulation finishes."""
         if not self.time_s:
             print("[Plotter] No policy samples to plot.")
             return
+        plt.ioff()
         if self._fig is None:
             self.start()
         self._create_contact_figure()

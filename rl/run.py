@@ -5,10 +5,11 @@ Run from the repository root:
     python -m rl.run --device cuda:0 --vx 0.08 --no-gui
     python -m rl.run --checkpoint /path/to/model_XXX.pt --no-gui
 
-Simulation lasts 10 s (500 policy steps at 0.02 s). Figures 1 (base motion),
-3 (foot contacts), and 4 (support polygon + ZMP) update live with --gui.
-Figure 2 (joint positions) appears after simulation. With --no-gui, no viewer
-or plots open until the end. All data stay in RAM; no files are saved.
+Simulation lasts 10 s (500 policy steps at 0.02 s). ALL Matplotlib figures
+are created only after the rollout, regardless of --gui/--no-gui.
+When --gui is selected, the MuJoCo native viewer displays a transparent robot,
+current and historical support-polygon outlines, and measured ZMP trajectory.
+With --no-gui no viewer opens during evaluation. No data files are written.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import mujoco
+import numpy as np
 import torch
 
 from mjlab.envs import ManagerBasedRlEnv
@@ -294,7 +296,12 @@ class EvaluationSampler:
 
 
 class PlottingContactViewer(ContactViewer):
-    """Native MuJoCo viewer recording once per successful policy step."""
+    """Native viewer: transparent robot + 3D support/ZMP; no live Matplotlib.
+
+    The user_scn decorations are refreshed in _render_other_env_geoms(), a
+    hook called by MJLab AFTER it clears prior-frame debug geoms and BEFORE
+    its final viewer.sync(). This avoids a second viewer.sync per frame.
+    """
 
     def __init__(
         self,
@@ -307,6 +314,151 @@ class PlottingContactViewer(ContactViewer):
         super().__init__(env, policy, force_scale=force_scale)
         self.sampler = sampler
         self._break_after_manual_reset = False
+
+    def setup(self) -> None:
+        """Enable MuJoCo's visual-only transparency on dynamic robot geoms."""
+        super().setup()
+        assert self.viewer is not None
+        with self.viewer.lock():
+            self.viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = 1
+        # setup() of the parent has already synchronized once; the following
+        # render frame propagates transparency without changing mjModel RGBA.
+        print("[INFO] Robot transparency ON; 3D support boundary + ZMP ON")
+
+    @staticmethod
+    def _add_segment(scene, point_a, point_b, color, width: float) -> bool:
+        """Add a decorative capsule segment in World coordinates."""
+        if scene.ngeom >= scene.maxgeom:
+            return False
+        a = np.asarray(point_a, dtype=np.float64)
+        b = np.asarray(point_b, dtype=np.float64)
+        if not (np.isfinite(a).all() and np.isfinite(b).all()):
+            return False
+        if np.linalg.norm(b - a) < 1e-8:
+            return False
+        geom = scene.geoms[scene.ngeom]
+        mujoco.mjv_initGeom(
+            geom=geom,
+            type=mujoco.mjtGeom.mjGEOM_CAPSULE.value,
+            size=np.zeros(3),
+            pos=np.zeros(3),
+            mat=np.eye(3).ravel(),
+            rgba=np.asarray(color, dtype=np.float32),
+        )
+        mujoco.mjv_connector(
+            geom=geom,
+            type=mujoco.mjtGeom.mjGEOM_CAPSULE.value,
+            width=width,
+            from_=a,
+            to=b,
+        )
+        geom.category = mujoco.mjtCatBit.mjCAT_DECOR
+        scene.ngeom += 1
+        return True
+
+    @staticmethod
+    def _add_marker(scene, xy, *, z: float, radius: float, color) -> bool:
+        """Add a decorative sphere at the measured ZMP."""
+        if scene.ngeom >= scene.maxgeom:
+            return False
+        xy = np.asarray(xy, dtype=np.float64)
+        if xy.shape != (2,) or not np.isfinite(xy).all():
+            return False
+        geom = scene.geoms[scene.ngeom]
+        mujoco.mjv_initGeom(
+            geom=geom,
+            type=mujoco.mjtGeom.mjGEOM_SPHERE.value,
+            size=np.array([radius, radius, radius]),
+            pos=np.array([xy[0], xy[1], z], dtype=np.float64),
+            mat=np.eye(3).ravel(),
+            rgba=np.asarray(color, dtype=np.float32),
+        )
+        geom.category = mujoco.mjtCatBit.mjCAT_DECOR
+        scene.ngeom += 1
+        return True
+
+    @classmethod
+    def _add_polygon_outline(cls, scene, polygon, *, z, color, width):
+        """Draw only the CLOSED EXTERIOR hull, never edges inside DSP."""
+        if len(polygon) < 3:
+            return
+        for a, b in zip(polygon, (*polygon[1:], polygon[0])):
+            if not cls._add_segment(
+                scene, (a[0], a[1], z), (b[0], b[1], z), color, width
+            ):
+                return
+
+    def _render_other_env_geoms(self, viewer, sim, sim_data) -> None:
+        """Append overlay after the base MJLab debug visuals but before sync."""
+        super()._render_other_env_geoms(viewer, sim, sim_data)
+        if not viewer.is_running():
+            return
+        traces = self.sampler.plotter
+        if not traces.time_s:
+            return
+        scene = viewer.user_scn
+
+        # Last sample may be the automatic 10-second reset marker. Retain the
+        # last actual support state rather than drawing the newly reset pose.
+        last = len(traces.time_s) - 1
+        while last >= 0 and (
+            math.isnan(traces.contact_left[last])
+            or math.isnan(traces.contact_right[last])
+        ):
+            last -= 1
+        if last < 0:
+            return
+
+        # Past support boundaries: sparse samples (0.5s) AND contact mode
+        # transitions. Each outline is independent, never joined across time.
+        # Very low alpha/width avoids obscuring the current outline or robot.
+        stride = max(1, round(0.50 / traces.policy_dt))
+        previous_mode = None
+        with viewer.lock():
+            for k in range(last):
+                polygon = traces.support_polygon_xy[k]
+                if len(polygon) < 3:
+                    previous_mode = None
+                    continue
+                mode = (traces.contact_left[k], traces.contact_right[k])
+                mode_changed = mode != previous_mode
+                previous_mode = mode
+                if k % stride and not mode_changed:
+                    continue
+                self._add_polygon_outline(
+                    scene, polygon, z=0.006, width=0.0007,
+                    color=(0.15, 0.60, 0.95, 0.28),
+                )
+
+            # ZMP history: decimate the drawn trajectory only. All full-rate
+            # samples remain in RAM for Figure 4. NaN resets break the line.
+            prev = None
+            trail_stride = max(1, round(0.06 / traces.policy_dt))
+            for k in range(last + 1):
+                x, y = traces.zmp_x_w[k], traces.zmp_y_w[k]
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    prev = None
+                    continue
+                if k % trail_stride and k != last:
+                    continue
+                curr = (x, y, 0.010)
+                if prev is not None:
+                    self._add_segment(
+                        scene, prev, curr,
+                        color=(0.90, 0.12, 0.18, 0.85), width=0.001,
+                    )
+                prev = curr
+
+            # CURRENT support hull is one bright, CLOSED outer boundary.
+            # In DSP it is the convex hull of the 8 contact-patch vertices.
+            self._add_polygon_outline(
+                scene, traces.support_polygon_xy[last], z=0.004,
+                color=(0.02, 0.85, 0.98, 1.0), width=0.004,
+            )
+            self._add_marker(
+                scene, (traces.zmp_x_w[last], traces.zmp_y_w[last]),
+                z=0.014, radius=0.004, color=(1.0, 0.05, 0.05, 1.0),
+            )
 
     def reset_environment(self) -> None:
         super().reset_environment()
@@ -322,7 +474,6 @@ class PlottingContactViewer(ContactViewer):
         )
         self.sampler.record(command_xy, reset=reset)
         self._break_after_manual_reset = False
-        self.sampler.plotter.refresh()  # Live Figures 1, 3 and 4.
         return True
 
 
@@ -356,16 +507,16 @@ def parse_args() -> argparse.Namespace:
     gui_group = parser.add_mutually_exclusive_group()
     gui_group.add_argument(
         "--gui", dest="gui", action="store_true",
-        help="Show MuJoCo Viewer and live Figures 1/3/4 (default)",
+        help="Open transparent MuJoCo Viewer with live 3D support/ZMP (default)",
     )
     gui_group.add_argument(
         "--no-gui", dest="gui", action="store_false",
-        help="Run without Viewer/live plots; show results after simulation",
+        help="Skip MuJoCo Viewer; show all four figures after simulation",
     )
     parser.set_defaults(gui=True)
     parser.add_argument(
         "--refresh-interval", type=float, default=0.10,
-        help="Live Figures 1/3/4 refresh interval in wall-clock seconds",
+        help="Reserved for Plotter compatibility; no live Matplotlib during rollout",
     )
     parser.add_argument(
         "--force-scale", type=float, default=1.0,
@@ -440,9 +591,8 @@ def main() -> None:
         sampler.record(sampler.read_command())  # Initial sample at t=0.
 
         if args.gui:
-            plotter.start()
-            plotter.refresh(force=True)
-            print("[INFO] GUI: Figures 1/3/4 live; Figure 2 deferred")
+            print("[INFO] GUI: transparent robot, live 3D support polygon and ZMP")
+            print("[INFO] Matplotlib: all 4 figures deferred until rollout ends")
             viewer = PlottingContactViewer(
                 wrapped, policy, sampler, force_scale=args.force_scale
             )
@@ -452,7 +602,7 @@ def main() -> None:
             run_without_gui(wrapped, policy, sampler, max_policy_steps)
 
         print(f"[INFO] Recorded {len(plotter.time_s)} samples in RAM")
-        print("[INFO] Displaying four figures (no files saved)")
+        print("[INFO] Plotting all four figures now (no files saved)")
         plotter.show()
     finally:
         if env is not None:
