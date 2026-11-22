@@ -20,6 +20,10 @@ KHÔNG ghi CSV, PNG hay bất kỳ tệp kết quả nào.
 - velocity_x/y_actual: vận tốc CoM Ground Truth từ MuJoCo (không lọc).
 - joint_ref_IK: q_ik trước bù tải, KHÔNG phải q_cmd đã bù tải.
 - joint_actual: qpos của khớp trong MuJoCo sau bước mô phỏng.
+- DCM plan/actual: xi = CoM_xy + CoM_velocity_xy / omega [m],
+  omega = sqrt(g/h_LIPM) [1/s]. Vị trí thực trong cùng {P} sau reanchor_x.
+  Plan velocity từ trạng thái LIPM-MPC ở t[k+1]; actual velocity từ
+  Ground Truth sau mj_step, KHÔNG dùng out.dcm_error (được tính tại t[k]).
 
 Cần numpy, torch (qua controller), matplotlib chỉ khi hiển thị đồ thị.
 """
@@ -49,6 +53,8 @@ class WalkPlotData:
     velocity_actual: np.ndarray      # (T,2), m/s: GT CoM
     joint_ref_ik: np.ndarray         # (T,10), rad
     joint_actual: np.ndarray         # (T,10), rad
+    dcm_plan: np.ndarray             # (T,2), m trong {P}
+    dcm_actual: np.ndarray           # (T,2), m trong {P}
 
 
 class WalkPlotter:
@@ -73,6 +79,9 @@ class WalkPlotter:
             int(model.jnt_qposadr[model.joint(j).id]) for j in JOINT_NAMES
         ], dtype=int)
         self.lipm_height = float(controller.lipm_height)
+        self.omega = float(controller.capture_point.omega)
+        if not np.isfinite(self.omega) or self.omega <= 0:
+            raise ValueError("omega LIPM phải hữu hạn và dương")
         self._samples: list[dict[str, np.ndarray | float]] = []
         self.figures = []
 
@@ -127,11 +136,19 @@ class WalkPlotter:
         com_plan = np.asarray(self._to_numpy(output.com_des[i]), dtype=np.float64)
         com_actual = np.asarray(self._to_numpy(actual_in_plan), dtype=np.float64)
         vel_actual = np.asarray(self._to_numpy(gt.com_vel[i, :2]), dtype=np.float64)
+        # Đồng bộ t[k+1]: com_state đã được MPC cập nhật trong controller.step.
+        # Không sử dụng output.dcm_error vì nó tính ở t[k] trước khi physics chạy.
+        vel_plan = np.asarray(
+            self._to_numpy(self.controller.com_state[i, :, 1]), dtype=np.float64
+        )
+        dcm_plan = com_plan[:2] + vel_plan / self.omega
+        dcm_actual = com_actual[:2] + vel_actual / self.omega
         q_ik = np.asarray(self._to_numpy(output.q_ik[i]), dtype=np.float64)
         q_actual = np.asarray(d.qpos[self.qpos_addresses], dtype=np.float64).copy()
 
         if not all(np.isfinite(a).all() for a in (
-            cmd_i, com_plan, com_actual, vel_actual, q_ik, q_actual,
+            cmd_i, com_plan, com_actual, vel_actual, vel_plan,
+            dcm_plan, dcm_actual, q_ik, q_actual,
         )):
             raise FloatingPointError("Giá trị không hữu hạn khi ghi dữ liệu đồ thị")
 
@@ -143,6 +160,8 @@ class WalkPlotter:
             "velocity_actual": vel_actual,
             "joint_ref_ik": q_ik,
             "joint_actual": q_actual,
+            "dcm_plan": dcm_plan.copy(),
+            "dcm_actual": dcm_actual.copy(),
         })
 
     @property
@@ -162,6 +181,8 @@ class WalkPlotter:
             velocity_actual=np.stack([x["velocity_actual"] for x in s]),
             joint_ref_ik=np.stack([x["joint_ref_ik"] for x in s]),
             joint_actual=np.stack([x["joint_actual"] for x in s]),
+            dcm_plan=np.stack([x["dcm_plan"] for x in s]),
+            dcm_actual=np.stack([x["dcm_actual"] for x in s]),
         )
 
     @staticmethod
@@ -173,10 +194,11 @@ class WalkPlotter:
         ax.legend(fontsize=8, loc="best")
 
     def make_figures(self):
-        """Tạo hai figure, không show và không lưu ảnh.
+        """Tạo ba figure, không show và không lưu ảnh.
 
         Figure 1: 5 trục: x/y/z CoM, vx/vy.
         Figure 2: 10 khớp trên 10 ô riêng, mỗi ô gồm IK và actual.
+        Figure 3: DCM X/Y: kế hoạch và Ground Truth trong cùng {P} [m].
         """
         import matplotlib.pyplot as plt
 
@@ -213,11 +235,21 @@ class WalkPlotter:
             self._plot_pair(ax, t, q_ik_deg[:, j], q_actual_deg[:, j],
                             name, "Góc (deg)", "joint_ref_IK", "joint_actual")
 
-        self.figures = [fig1, fig2]
+        fig3, axes3 = plt.subplots(1, 2, figsize=(13, 4.5), sharex=True, constrained_layout=True)
+        fig3.suptitle(
+            f"{self.case_name} | DCM: kế hoạch / thực tế | omega = {self.omega:.4f} s⁻¹",
+            fontweight="bold",
+        )
+        self._plot_pair(axes3[0], t, a.dcm_plan[:, 0], a.dcm_actual[:, 0],
+                        "DCM X: kế hoạch / thực tế", "DCM X (m)", "DCM_x_plan", "DCM_x_actual")
+        self._plot_pair(axes3[1], t, a.dcm_plan[:, 1], a.dcm_actual[:, 1],
+                        "DCM Y: kế hoạch / thực tế", "DCM Y (m)", "DCM_y_plan", "DCM_y_actual")
+
+        self.figures = [fig1, fig2, fig3]
         return self.figures
 
     def show(self, block: bool = True):
-        """Hiện hai cửa sổ Matplotlib. block=False nếu viewer vẫn đang mở."""
+        """Hiện ba cửa sổ Matplotlib. block=False nếu viewer vẫn đang mở."""
         import matplotlib.pyplot as plt
 
         self.make_figures()
