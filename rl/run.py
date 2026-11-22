@@ -9,7 +9,8 @@ Simulation lasts 10 s (500 policy steps at 0.02 s). ALL Matplotlib figures
 are created only after the rollout, regardless of --gui/--no-gui.
 When --gui is selected, the MuJoCo native viewer displays a transparent robot,
 current and historical support-polygon outlines, and measured ZMP trajectory.
-With --no-gui no viewer opens during evaluation. No data files are written.
+With --no-gui no viewer opens during evaluation.
+CSV and optional offscreen MuJoCo MP4 are saved under rl/log/ after rollout.
 """
 
 from __future__ import annotations
@@ -485,6 +486,7 @@ class PlottingContactViewer(ContactViewer):
             or self._break_after_manual_reset
         )
         self.sampler.record(command_xy, reset=reset)
+        self.sampler.plotter.capture_video(self.env.unwrapped)
         self._break_after_manual_reset = False
         return True
 
@@ -507,6 +509,7 @@ def run_without_gui(
                 reset_fn(dones)
             reset = sampler.env.episode_length_buf[0].item() == 0
             sampler.record(command_xy, reset=reset)
+            sampler.plotter.capture_video(sampler.env)
 
 
 def parse_args() -> argparse.Namespace:
@@ -527,6 +530,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(gui=True)
     parser.add_argument(
+        "--output-dir", type=Path, default=None,
+        help="Evaluation results directory (default: <repo>/rl/log)",
+    )
+    parser.add_argument(
+        "--no-video", action="store_true",
+        help="Only save CSV; do not record the offscreen MuJoCo MP4",
+    )
+    parser.add_argument("--video-fps", type=int, default=25)
+    parser.add_argument("--video-width", type=int, default=1280)
+    parser.add_argument("--video-height", type=int, default=720)
+    parser.add_argument(
         "--refresh-interval", type=float, default=0.10,
         help="Reserved for Plotter compatibility; no live Matplotlib during rollout",
     )
@@ -539,6 +553,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--vx must lie in [0.0, 0.1] m/s")
     if args.refresh_interval < 0 or args.force_scale <= 0:
         parser.error("Require --refresh-interval >= 0 and --force-scale > 0")
+    if args.video_fps <= 0 or args.video_width <= 0 or args.video_height <= 0:
+        parser.error("Video FPS and dimensions must be positive")
+    if not args.no_video and not math.isclose(
+        1.0 / (args.video_fps * POLICY_DT),
+        round(1.0 / (args.video_fps * POLICY_DT)),
+        rel_tol=0.0, abs_tol=1.0e-9,
+    ):
+        parser.error("--video-fps must divide the 50 Hz policy sampling rate")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         parser.error("CUDA unavailable; check the environment or use --device cpu")
     return args
@@ -600,21 +622,34 @@ def main() -> None:
         env.reset()
         plotter = Plotter(policy_dt=POLICY_DT, refresh_interval=args.refresh_interval)
         sampler = EvaluationSampler(env, plotter)
-        sampler.record(sampler.read_command())  # Initial sample at t=0.
 
-        if args.gui:
-            print("[INFO] GUI: transparent robot, live 3D support polygon and ZMP")
-            print("[INFO] Matplotlib: all 4 figures deferred until rollout ends")
-            viewer = PlottingContactViewer(
-                wrapped, policy, sampler, force_scale=args.force_scale
-            )
-            viewer.run(num_steps=max_policy_steps)
-        else:
-            print("[INFO] No GUI during evaluation; collecting data in RAM")
-            run_without_gui(wrapped, policy, sampler, max_policy_steps)
+        try:
+            if not args.no_video:
+                plotter.start_video(
+                    env, fps=args.video_fps,
+                    width=args.video_width, height=args.video_height,
+                    output_root=args.output_dir,
+                )
+            sampler.record(sampler.read_command())  # Initial sample at t=0.
+            plotter.capture_video(env)
+
+            if args.gui:
+                print("[INFO] GUI: transparent robot, live 3D support polygon and ZMP")
+                print("[INFO] Matplotlib: all 4 figures deferred until rollout ends")
+                viewer = PlottingContactViewer(
+                    wrapped, policy, sampler, force_scale=args.force_scale
+                )
+                viewer.run(num_steps=max_policy_steps)
+            else:
+                print("[INFO] No GUI during evaluation; collecting data in RAM")
+                run_without_gui(wrapped, policy, sampler, max_policy_steps)
+        finally:
+            plotter.close_video()  # Flush MP4, even if the viewer closes early.
 
         print(f"[INFO] Recorded {len(plotter.time_s)} samples in RAM")
-        print("[INFO] Plotting all four figures now (no files saved)")
+        run_dir = plotter.save_csv(output_root=args.output_dir)
+        print(f"[INFO] Evaluation results: {run_dir}")
+        print("[INFO] Plotting all four figures now")
         plotter.show()
     finally:
         if env is not None:

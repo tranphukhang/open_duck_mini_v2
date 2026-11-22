@@ -5,14 +5,18 @@ Figure 3: foot contacts. Figure 4: support-boundary history and ZMP
 trajectory in World XY. Each support boundary is a separate, closed
 convex-hull outline (never joined to the next time step). ALL figures are
 created only after the rollout, regardless of MuJoCo GUI settings.
-Nothing is saved to disk.
+After the rollout, data and a MuJoCo video can be saved under rl/log/.
 """
 
 from __future__ import annotations
 
+import copy
+import csv
 import math
 import time
 from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -117,6 +121,11 @@ class Plotter:
         self._zmp_current = None
 
         self._last_refresh = 0.0
+
+        # Evaluation artifacts: CSV and optional video share one run directory.
+        self._output_dir: Path | None = None
+        self._video: MuJoCoVideoRecorder | None = None
+        self._video_stride = 1
 
     def add_sample(
         self,
@@ -495,6 +504,167 @@ class Plotter:
             ax.set_xlim(-0.15, 0.15)
             ax.set_ylim(-0.15, 0.15)
 
+    def get_output_dir(self, output_root: str | Path | None = None) -> Path:
+        """Create one unique rl/log/eval_<timestamp> directory per evaluation."""
+        if self._output_dir is None:
+            root = (
+                Path(output_root).expanduser()
+                if output_root is not None
+                else Path(__file__).resolve().parent / "log"
+            )
+            root = root.resolve()
+            self._output_dir = root / (
+                "eval_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            )
+            self._output_dir.mkdir(parents=True, exist_ok=False)
+        elif output_root is not None:
+            expected_root = Path(output_root).expanduser().resolve()
+            if self._output_dir.parent != expected_root:
+                raise ValueError(
+                    "Output root differs from the directory used for this evaluation"
+                )
+        return self._output_dir
+
+    def save_csv(self, output_root: str | Path | None = None) -> Path:
+        """Export all recorded data for MATLAB, without downsampling.
+
+        states.csv: one row per policy sample, with raw joint rad and plot deg.
+        support_polygon.csv: one row per hull vertex, no duplicated closing
+        vertex. A common sample_index (1-based) connects the two tables.
+        """
+        if not self.time_s:
+            raise ValueError("Cannot export CSV: no samples were recorded")
+
+        n = len(self.time_s)
+        series = {
+            "vx_desired": self.vx_desired,
+            "vx_actual": self.vx_actual,
+            "vy_desired": self.vy_desired,
+            "vy_actual": self.vy_actual,
+            "roll_deg": self.roll_deg,
+            "pitch_deg": self.pitch_deg,
+            "yaw_deg": self.yaw_deg,
+            "wx_rad_s": self.wx_rad_s,
+            "wy_rad_s": self.wy_rad_s,
+            "wz_rad_s": self.wz_rad_s,
+            "contact_left": self.contact_left,
+            "contact_right": self.contact_right,
+            "zmp_x_w": self.zmp_x_w,
+            "zmp_y_w": self.zmp_y_w,
+            "support_polygon_xy": self.support_polygon_xy,
+            **self.left_joint_pos,
+            **self.right_joint_pos,
+        }
+        for name, values in series.items():
+            if len(values) != n:
+                raise ValueError(f"Buffer {name}: {len(values)} samples; expected {n}")
+
+        output_dir = self.get_output_dir(output_root)
+        states_path = output_dir / "states.csv"
+        polygon_path = output_dir / "support_polygon.csv"
+        joints = (*LEFT_JOINT_NAMES, *RIGHT_JOINT_NAMES)
+
+        header = [
+            "sample_index", "time_s",
+            "vx_desired_m_s", "vx_actual_m_s",
+            "vy_desired_m_s", "vy_actual_m_s",
+            "roll_deg", "pitch_deg", "yaw_deg",
+            "wx_rad_s", "wy_rad_s", "wz_rad_s",
+        ]
+        header += [f"{name}_rad" for name in joints]
+        header += [f"{name}_deg" for name in joints]
+        header += [
+            "contact_left", "contact_right", "zmp_x_w_m", "zmp_y_w_m",
+            "polygon_vertex_count",
+        ]
+
+        with (
+            states_path.open("w", newline="", encoding="utf-8") as fs,
+            polygon_path.open("w", newline="", encoding="utf-8") as fp,
+        ):
+            writer = csv.writer(fs)
+            vertices_writer = csv.writer(fp)
+            writer.writerow(header)
+            vertices_writer.writerow([
+                "sample_index", "time_s", "vertex_index", "x_w_m", "y_w_m"
+            ])
+
+            for k, t in enumerate(self.time_s):
+                joint_rad = [
+                    *[self.left_joint_pos[name][k] for name in LEFT_JOINT_NAMES],
+                    *[self.right_joint_pos[name][k] for name in RIGHT_JOINT_NAMES],
+                ]
+                polygon = self.support_polygon_xy[k]
+                writer.writerow([
+                    k + 1, t,
+                    self.vx_desired[k], self.vx_actual[k],
+                    self.vy_desired[k], self.vy_actual[k],
+                    self.roll_deg[k], self.pitch_deg[k], self.yaw_deg[k],
+                    self.wx_rad_s[k], self.wy_rad_s[k], self.wz_rad_s[k],
+                    *joint_rad,
+                    *[math.degrees(value) for value in joint_rad],
+                    self.contact_left[k], self.contact_right[k],
+                    self.zmp_x_w[k], self.zmp_y_w[k], len(polygon),
+                ])
+                for j, (x, y) in enumerate(polygon, start=1):
+                    vertices_writer.writerow([k + 1, t, j, x, y])
+
+        print(f"[CSV] Saved: {states_path}")
+        print(f"[CSV] Saved: {polygon_path}")
+        return output_dir
+
+    def start_video(
+        self, env, *, fps: int = 25, width: int = 1280, height: int = 720,
+        output_root: str | Path | None = None,
+    ) -> None:
+        """Start offscreen MP4 recording (works with --gui and --no-gui)."""
+        if self._video is not None:
+            raise RuntimeError("Video recording has already started")
+        if fps <= 0 or width <= 0 or height <= 0:
+            raise ValueError("Video fps, width and height must all be positive")
+        # FPS is a divisor of the policy rate, so no samples need interpolation.
+        frames_per_policy = 1.0 / (fps * self.policy_dt)
+        stride = round(frames_per_policy)
+        if stride < 1 or not math.isclose(
+            frames_per_policy, stride, rel_tol=0.0, abs_tol=1.0e-9
+        ):
+            raise ValueError(
+                f"Video fps must divide the policy rate ({1 / self.policy_dt:g} Hz)"
+            )
+        if width % 2 or height % 2:
+            raise ValueError("Video width and height must be even for H.264")
+
+        output_dir = self.get_output_dir(output_root)
+        self._video = MuJoCoVideoRecorder(
+            env, output_dir / "simulation.mp4", fps=fps,
+            width=width, height=height,
+        )
+        self._video_stride = stride
+        print(f"[VIDEO] Recording at {fps} FPS, {width}x{height}")
+
+    def capture_video(self, env) -> None:
+        """Capture the most recent valid policy sample at a fixed sim-time rate."""
+        if self._video is None or not self.time_s:
+            return
+        k = len(self.time_s) - 1
+        if k % self._video_stride != 0:
+            return
+        # On a reset boundary the sampler logs NaNs: do not record reset pose.
+        if (
+            not math.isfinite(self.contact_left[k])
+            or not math.isfinite(self.contact_right[k])
+        ):
+            return
+        self._video.capture(env, self)
+
+    def close_video(self) -> None:
+        """Flush MP4 even if the GUI was closed before the episode finished."""
+        if self._video is None:
+            return
+        video = self._video
+        self._video = None
+        video.close()
+
     def show(self) -> None:
         """Create and render all four figures after the simulation finishes."""
         if not self.time_s:
@@ -513,3 +683,153 @@ class Plotter:
 
         plt.ioff()
         plt.show()
+
+class MuJoCoVideoRecorder:
+    """Write a simulation-time MP4 stream using MJLab's offscreen renderer.
+
+    This renders the MuJoCo scene (not the GUI desktop/window chrome) from a
+    tracking camera, and overlays the actual ZMP and support polygon recorded
+    by EvaluationSampler. Only one video frame is held in RAM at a time.
+    """
+
+    def __init__(self, env, path: Path, *, fps: int, width: int, height: int):
+        try:
+            import imageio_ffmpeg
+        except ImportError as exc:
+            raise RuntimeError(
+                "Missing video encoder: pip install imageio-ffmpeg"
+            ) from exc
+        import mujoco
+        from mjlab.viewer.offscreen_renderer import OffscreenRenderer
+        from mjlab.viewer.viewer_config import ViewerConfig
+
+        cfg = copy.copy(env.cfg.viewer)
+        cfg.height = height
+        cfg.width = width
+        cfg.env_idx = 0
+        cfg.max_extra_envs = 0
+        cfg.origin_type = ViewerConfig.OriginType.ASSET_ROOT
+        cfg.entity_name = "robot"
+        cfg.distance = 1.1
+        cfg.azimuth = 135.0
+        cfg.elevation = -22.0
+
+        self.path = Path(path)
+        self._mujoco = mujoco
+        self._renderer = OffscreenRenderer(
+            model=env.sim.mj_model,
+            cfg=cfg,
+            scene=env.scene,
+            sim_model=env.sim.model,
+            expanded_fields=env.sim.expanded_fields,
+        )
+        self._writer = None
+        self.frames = 0
+        try:
+            self._renderer.initialize()
+            # Visualization-only flags; simulated forces and model untouched.
+            flags = self._renderer._opt.flags
+            flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = 1
+            flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = 1
+            flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = 1
+
+            self._writer = imageio_ffmpeg.write_frames(
+                str(self.path), (width, height), fps=fps,
+                codec="libx264", pix_fmt_in="rgb24", pix_fmt_out="yuv420p",
+                quality=7, macro_block_size=16,
+                output_params=["-movflags", "+faststart"],
+            )
+            self._writer.send(None)
+        except Exception:
+            self.close()
+            raise
+
+    @staticmethod
+    def _segment(mujoco, scene, a, b, color, width):
+        if scene.ngeom >= scene.maxgeom:
+            return False
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        if not (np.isfinite(a).all() and np.isfinite(b).all()):
+            return False
+        if np.linalg.norm(b - a) < 1.0e-8:
+            return False
+        geom = scene.geoms[scene.ngeom]
+        mujoco.mjv_initGeom(
+            geom=geom,
+            type=mujoco.mjtGeom.mjGEOM_CAPSULE.value,
+            size=np.zeros(3), pos=np.zeros(3), mat=np.eye(3).ravel(),
+            rgba=np.asarray(color, dtype=np.float32),
+        )
+        mujoco.mjv_connector(
+            geom=geom, type=mujoco.mjtGeom.mjGEOM_CAPSULE.value,
+            width=width, from_=a, to=b,
+        )
+        geom.category = mujoco.mjtCatBit.mjCAT_DECOR
+        scene.ngeom += 1
+        return True
+
+    def _overlay(self, plotter: Plotter) -> None:
+        """Draw the current hull and recent measured ZMP above the ground."""
+        mujoco = self._mujoco
+        scene = self._renderer.renderer.scene
+        k = len(plotter.time_s) - 1
+        polygon = plotter.support_polygon_xy[k]
+        for a, b in zip(polygon, (*polygon[1:], polygon[0])) if len(polygon) >= 3 else ():
+            self._segment(
+                mujoco, scene, (a[0], a[1], 0.008), (b[0], b[1], 0.008),
+                (0.02, 0.85, 0.98, 1.0), 0.003,
+            )
+
+        # Recent ZMP trail (last 2 seconds) plus a bright current ZMP marker.
+        first = max(0, k - round(2.0 / plotter.policy_dt))
+        prev = None
+        for j in range(first, k + 1):
+            x, y = plotter.zmp_x_w[j], plotter.zmp_y_w[j]
+            if not (math.isfinite(x) and math.isfinite(y)):
+                prev = None
+                continue
+            cur = (x, y, 0.010)
+            if prev is not None:
+                self._segment(
+                    mujoco, scene, prev, cur,
+                    (0.90, 0.12, 0.18, 0.85), 0.0015,
+                )
+            prev = cur
+
+        x, y = plotter.zmp_x_w[k], plotter.zmp_y_w[k]
+        if math.isfinite(x) and math.isfinite(y) and scene.ngeom < scene.maxgeom:
+            geom = scene.geoms[scene.ngeom]
+            mujoco.mjv_initGeom(
+                geom=geom, type=mujoco.mjtGeom.mjGEOM_SPHERE.value,
+                size=np.array([0.008, 0.008, 0.008]),
+                pos=np.array([x, y, 0.014]), mat=np.eye(3).ravel(),
+                rgba=np.array([1.0, 0.05, 0.05, 1.0], dtype=np.float32),
+            )
+            geom.category = mujoco.mjtCatBit.mjCAT_DECOR
+            scene.ngeom += 1
+
+    def capture(self, env, plotter: Plotter) -> None:
+        """GPU state -> MuJoCo CPU scene -> RGB frame -> MP4 encoder."""
+        if self._writer is None:
+            raise RuntimeError("MP4 writer is closed")
+        self._renderer.update(env.sim.data)
+        self._overlay(plotter)
+        frame = self._renderer.render()
+        if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
+            raise RuntimeError(f"Unexpected MuJoCo video frame format: {frame.shape}")
+        self._writer.send(np.ascontiguousarray(frame).tobytes())
+        self.frames += 1
+
+    def close(self) -> None:
+        """Close FFmpeg first (flush final MP4 metadata), then OpenGL context."""
+        try:
+            if self._writer is not None:
+                self._writer.close()
+                self._writer = None
+        finally:
+            self._renderer.close()
+        if self.frames:
+            print(f"[VIDEO] Saved {self.frames} frames: {self.path}")
+        else:
+            print(f"[VIDEO] No frames captured: {self.path}")
