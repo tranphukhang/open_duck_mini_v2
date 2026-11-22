@@ -1,4 +1,4 @@
-"""Run the trained PPO policy and plot body-frame X/Y velocities.
+"""Run the trained PPO policy and plot X/Y velocities and base Roll/Pitch/Yaw.
 
 From the repository root:
     python -m rl.run --device cuda:0 --vx 0.08
@@ -27,6 +27,26 @@ from rl.env_cfg import POLICY_DT, EPISODE_LENGTH_S
 from rl.play import ContactViewer, find_checkpoint, prepare_evaluation_cfg
 from rl.plotter import Plotter
 from rl.ppo_cfg import get_ppo_cfg
+
+
+def quaternion_wxyz_to_rpy_deg(quat_wxyz: torch.Tensor) -> tuple[float, float, float]:
+    """Convert the root-link orientation in World to roll, pitch, yaw [deg].
+
+    MJLab/MuJoCo quaternions use [w, x, y, z].
+    Convention: roll about X, pitch about Y, yaw about Z (ZYX Euler).
+    """
+    w, x, y, z = quat_wxyz.detach().cpu().tolist()
+    norm = math.sqrt(w * w + x * x + y * y + z * z)
+    if norm < 1e-12:
+        raise ValueError("Invalid zero-norm base quaternion")
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
+
+    roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    sin_pitch = 2.0 * (w * y - z * x)
+    pitch = math.asin(max(-1.0, min(1.0, sin_pitch)))
+    yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+    return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
 
 class PlottingContactViewer(ContactViewer):
@@ -65,10 +85,15 @@ class PlottingContactViewer(ContactViewer):
         if auto_reset or self._break_after_manual_reset:
             vx_actual = math.nan
             vy_actual = math.nan
+            roll_deg = pitch_deg = yaw_deg = math.nan
             self._break_after_manual_reset = False
         else:
-            actual = base_env.scene["robot"].data.root_link_lin_vel_b
+            robot_data = base_env.scene["robot"].data
+            actual = robot_data.root_link_lin_vel_b
             vx_actual, vy_actual = actual[0, :2].detach().cpu().tolist()
+            roll_deg, pitch_deg, yaw_deg = quaternion_wxyz_to_rpy_deg(
+                robot_data.root_link_quat_w[0]
+            )
 
         # This call occurs once per policy step: dt = POLICY_DT.
         self.plotter.add_sample(
@@ -76,6 +101,9 @@ class PlottingContactViewer(ContactViewer):
             vx_actual=vx_actual,
             vy_desired=vy_desired,
             vy_actual=vy_actual,
+            roll_deg=roll_deg,
+            pitch_deg=pitch_deg,
+            yaw_deg=yaw_deg,
         )
         self.plotter.refresh()
         return True
@@ -171,14 +199,18 @@ def main() -> None:
             raise RuntimeError("Command 'twist' is missing after reset")
         desired_xy = command[0, :2].detach().cpu().tolist()
         actual_xy = actual[0, :2].detach().cpu().tolist()
+        roll_deg, pitch_deg, yaw_deg = quaternion_wxyz_to_rpy_deg(
+            env.scene["robot"].data.root_link_quat_w[0]
+        )
         plotter.add_sample(
             vx_desired=desired_xy[0], vx_actual=actual_xy[0],
             vy_desired=desired_xy[1], vy_actual=actual_xy[1],
+            roll_deg=roll_deg, pitch_deg=pitch_deg, yaw_deg=yaw_deg,
         )
         plotter.start()
         plotter.refresh(force=True)
 
-        print("[OK] Policy loaded. Native MuJoCo viewer and velocity plots started")
+        print("[OK] Policy loaded. Native MuJoCo viewer and velocity/RPY plots started")
         print("[INFO] MuJoCo: Space=pause; avoid Enter/reset during the 10s run")
         viewer = PlottingContactViewer(
             wrapped, policy, plotter, force_scale=args.force_scale
