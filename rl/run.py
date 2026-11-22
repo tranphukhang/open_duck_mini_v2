@@ -28,12 +28,6 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.utils.torch import configure_torch_backends
 
-from rl.cwc_reward import (
-    HALF_LENGTH_X,
-    HALF_WIDTH_Y,
-    OFFSET_X,
-    OFFSET_Y_LEFT_RIGHT,
-)
 from rl.env_cfg import EPISODE_LENGTH_S, POLICY_DT
 from rl.play import ContactViewer, find_checkpoint, prepare_evaluation_cfg
 from rl.plotter import Plotter
@@ -42,6 +36,21 @@ from rl.robot_cfg import FOOT_GEOM_NAMES, FOOT_SITE_NAMES, JOINT_NAMES
 
 
 NORMAL_FORCE_THRESHOLD_N = 5.0
+
+# Dimensions of the VISUALIZED support rectangles (meters).
+# These measurements are independent of the effective CWC support region
+# defined in rl/cwc_reward.py; changing them does not change the RL reward.
+# Site-local +X points towards the toe, +Y is left in the levelled foot frame.
+SUPPORT_TOE_X = 0.06433       # site -> toe: 64.33 mm
+SUPPORT_HEEL_X = -0.04000     # site -> heel: -40.00 mm
+SUPPORT_LATERAL_WIDTH = 0.01550   # total rectangle width: 11.62 mm
+SUPPORT_LATERAL_CENTER = (0.00774, -0.00774)  # left/right site offset
+
+# Derived rectangular support geometry for the existing centre-and-half-size
+# construction; this intentionally differs from CWC's assumed patch size.
+SUPPORT_HALF_LENGTH_X = (SUPPORT_TOE_X - SUPPORT_HEEL_X) / 2.0
+SUPPORT_CENTER_OFFSET_X = (SUPPORT_TOE_X + SUPPORT_HEEL_X) / 2.0
+SUPPORT_HALF_WIDTH_Y = SUPPORT_LATERAL_WIDTH / 2.0
 
 
 def quaternion_wxyz_to_rpy_deg(quat_wxyz: torch.Tensor) -> tuple[float, float, float]:
@@ -159,7 +168,8 @@ class EvaluationSampler:
         For horizontal z=0: x_ZMP = -M_O,y/f_z; y_ZMP = M_O,x/f_z.
 
         Only contacts with found=True and normal GRF > 5 N contribute.
-        Effective rectangles and offsets are imported from rl/cwc_reward.py.
+        The visual support rectangles use independently measured geometry;
+        CWC reward constants and ZMP calculations are unchanged.
         """
         wrench = self.env.scene["feet_wrench"].data
         if any(getattr(wrench, field) is None for field in (
@@ -185,8 +195,10 @@ class EvaluationSampler:
         active_list = active.detach().cpu().tolist()
         contact_pair = (int(active_list[0]), int(active_list[1]))
 
-        # Build current support polygon from the effective CWC rectangles.
-        # The IK site's +X (not the collision geom's +X) defines foot length.
+        # Build support polygon from the user-measured support rectangles.
+        # The IK site's +X (not collision geom +X) defines foot length.
+        # The signed lateral centre offset moves left/right footprints away
+        # from the sites; their full lateral width is 11.62 mm each.
         vertices: list[tuple[float, float]] = []
         if any(active_list):
             site_ids = list(self.foot_site_indices)
@@ -213,20 +225,20 @@ class EvaluationSampler:
 
                 center_x = (
                     site_pos_xy[foot_idx][0]
-                    + OFFSET_X * ex_x
-                    + OFFSET_Y_LEFT_RIGHT[foot_idx] * ey_x
+                    + SUPPORT_CENTER_OFFSET_X * ex_x
+                    + SUPPORT_LATERAL_CENTER[foot_idx] * ey_x
                 )
                 center_y = (
                     site_pos_xy[foot_idx][1]
-                    + OFFSET_X * ex_y
-                    + OFFSET_Y_LEFT_RIGHT[foot_idx] * ey_y
+                    + SUPPORT_CENTER_OFFSET_X * ex_y
+                    + SUPPORT_LATERAL_CENTER[foot_idx] * ey_y
                 )
                 for sx, sy in ((-1, -1), (-1, 1), (1, 1), (1, -1)):
                     vertices.append((
-                        center_x + sx * HALF_LENGTH_X * ex_x
-                                 + sy * HALF_WIDTH_Y * ey_x,
-                        center_y + sx * HALF_LENGTH_X * ex_y
-                                 + sy * HALF_WIDTH_Y * ey_y,
+                        center_x + sx * SUPPORT_HALF_LENGTH_X * ex_x
+                                 + sy * SUPPORT_HALF_WIDTH_Y * ey_x,
+                        center_y + sx * SUPPORT_HALF_LENGTH_X * ex_y
+                                 + sy * SUPPORT_HALF_WIDTH_Y * ey_y,
                     ))
 
         support_polygon = convex_hull_xy(vertices) if vertices else ()
@@ -426,7 +438,7 @@ class PlottingContactViewer(ContactViewer):
                 if k % stride and not mode_changed:
                     continue
                 self._add_polygon_outline(
-                    scene, polygon, z=0.006, width=0.0007,
+                    scene, polygon, z=0.006, width=0.0015,
                     color=(0.15, 0.60, 0.95, 0.28),
                 )
 
@@ -445,19 +457,19 @@ class PlottingContactViewer(ContactViewer):
                 if prev is not None:
                     self._add_segment(
                         scene, prev, curr,
-                        color=(0.90, 0.12, 0.18, 0.85), width=0.001,
+                        color=(0.90, 0.12, 0.18, 0.85), width=0.002,
                     )
                 prev = curr
 
             # CURRENT support hull is one bright, CLOSED outer boundary.
             # In DSP it is the convex hull of the 8 contact-patch vertices.
             self._add_polygon_outline(
-                scene, traces.support_polygon_xy[last], z=0.004,
+                scene, traces.support_polygon_xy[last], z=0.008,
                 color=(0.02, 0.85, 0.98, 1.0), width=0.004,
             )
             self._add_marker(
                 scene, (traces.zmp_x_w[last], traces.zmp_y_w[last]),
-                z=0.014, radius=0.004, color=(1.0, 0.05, 0.05, 1.0),
+                z=0.014, radius=0.009, color=(1.0, 0.05, 0.05, 1.0),
             )
 
     def reset_environment(self) -> None:
