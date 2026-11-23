@@ -274,6 +274,8 @@ class EvaluationSampler:
             wx_rad_s = wy_rad_s = wz_rad_s = math.nan
             left_joint_pos = [math.nan] * 5
             right_joint_pos = [math.nan] * 5
+            left_joint_vel = [math.nan] * 5
+            right_joint_vel = [math.nan] * 5
             contact_left = contact_right = math.nan
             polygon_xy: tuple[tuple[float, float], ...] = ()
             zmp_x = zmp_y = math.nan
@@ -293,6 +295,13 @@ class EvaluationSampler:
                 0, list(self.joint_indices)
             ].detach().cpu().tolist()
             left_joint_pos, right_joint_pos = joints[:5], joints[5:]
+            # Read MJLab's actual joint velocities (rad/s), not finite differences.
+            joint_velocities = data.joint_vel[
+                0, list(self.joint_indices)
+            ].detach().cpu().tolist()
+            left_joint_vel, right_joint_vel = (
+                joint_velocities[:5], joint_velocities[5:]
+            )
             (contact_left, contact_right), polygon_xy, (zmp_x, zmp_y) = (
                 self.read_contact_support_zmp()
             )
@@ -303,6 +312,7 @@ class EvaluationSampler:
             roll_deg=roll_deg, pitch_deg=pitch_deg, yaw_deg=yaw_deg,
             wx_rad_s=wx_rad_s, wy_rad_s=wy_rad_s, wz_rad_s=wz_rad_s,
             joint_pos_left=left_joint_pos, joint_pos_right=right_joint_pos,
+            joint_vel_left=left_joint_vel, joint_vel_right=right_joint_vel,
             contact_left=contact_left, contact_right=contact_right,
             support_polygon_xy=polygon_xy, zmp_x_w=zmp_x, zmp_y_w=zmp_y,
         )
@@ -526,7 +536,7 @@ def parse_args() -> argparse.Namespace:
     )
     gui_group.add_argument(
         "--no-gui", dest="gui", action="store_false",
-        help="Skip MuJoCo Viewer; show all four figures after simulation",
+        help="Skip MuJoCo Viewer; show all six figures after simulation",
     )
     parser.set_defaults(gui=True)
     parser.add_argument(
@@ -635,7 +645,7 @@ def main() -> None:
 
             if args.gui:
                 print("[INFO] GUI: transparent robot, live 3D support polygon and ZMP")
-                print("[INFO] Matplotlib: all 4 figures deferred until rollout ends")
+                print("[INFO] Matplotlib: all 6 figures deferred until rollout ends")
                 viewer = PlottingContactViewer(
                     wrapped, policy, sampler, force_scale=args.force_scale
                 )
@@ -649,7 +659,7 @@ def main() -> None:
         print(f"[INFO] Recorded {len(plotter.time_s)} samples in RAM")
         run_dir = plotter.save_csv(output_root=args.output_dir)
         print(f"[INFO] Evaluation results: {run_dir}")
-        print("[INFO] Plotting all four figures now")
+        print("[INFO] Plotting all six figures now")
         plotter.show()
     finally:
         if env is not None:

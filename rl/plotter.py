@@ -2,7 +2,8 @@
 
 Figure 1: base motion. Figure 2: joint positions (deferred).
 Figure 3: foot contacts. Figure 4: support-boundary history and ZMP
-trajectory in World XY. Each support boundary is a separate, closed
+trajectory in World XY. Figures 5 and 6: joint walking limit cycles
+for the left and right legs (q [rad] versus q_dot [rad/s]). Each support boundary is a separate, closed
 convex-hull outline (never joined to the next time step). ALL figures are
 created only after the rollout, regardless of MuJoCo GUI settings.
 After the rollout, data and a MuJoCo video can be saved under rl/log/.
@@ -33,7 +34,7 @@ RIGHT_JOINT_NAMES = (
 
 
 class Plotter:
-    """Record policy-rate data in RAM and display four Matplotlib figures."""
+    """Record policy-rate data and display six Matplotlib figures."""
 
     def __init__(
         self,
@@ -74,6 +75,15 @@ class Plotter:
             name: [] for name in RIGHT_JOINT_NAMES
         }
 
+        # Figures 5 and 6: measured joint velocities in radians/second.
+        # Use MJLab joint_vel directly, not a numerical derivative of q.
+        self.left_joint_vel: dict[str, list[float]] = {
+            name: [] for name in LEFT_JOINT_NAMES
+        }
+        self.right_joint_vel: dict[str, list[float]] = {
+            name: [] for name in RIGHT_JOINT_NAMES
+        }
+
         # Figure 3: foot contact thresholded at normal ground reaction > 5 N.
         self.contact_left: list[float] = []
         self.contact_right: list[float] = []
@@ -102,8 +112,10 @@ class Plotter:
         self._line_wy = None
         self._line_wz = None
 
-        # Figure 2 is created only in show().
+        # Figures 2, 5 and 6 are created only in show().
         self._fig_joints = None
+        self._fig_cycle_left = None
+        self._fig_cycle_right = None
 
         # Figure 3 handles.
         self._fig_contacts = None
@@ -141,6 +153,8 @@ class Plotter:
         wz_rad_s: float | None = None,
         joint_pos_left: Sequence[float] | None = None,
         joint_pos_right: Sequence[float] | None = None,
+        joint_vel_left: Sequence[float] | None = None,
+        joint_vel_right: Sequence[float] | None = None,
         contact_left: int | float | None = None,
         contact_right: int | float | None = None,
         support_polygon_xy: Sequence[Sequence[float]] | None = None,
@@ -156,6 +170,8 @@ class Plotter:
             raise ValueError("Provide wx_rad_s, wy_rad_s, wz_rad_s together")
         if (joint_pos_left is None) != (joint_pos_right is None):
             raise ValueError("Provide joint_pos_left and joint_pos_right together")
+        if (joint_vel_left is None) != (joint_vel_right is None):
+            raise ValueError("Provide joint_vel_left and joint_vel_right together")
         if (contact_left is None) != (contact_right is None):
             raise ValueError("Provide contact_left and contact_right together")
         if (zmp_x_w is None) != (zmp_y_w is None):
@@ -169,6 +185,15 @@ class Plotter:
                 raise ValueError("Each leg must provide exactly five joint positions")
             left = tuple(map(float, joint_pos_left))
             right = tuple(map(float, joint_pos_right))
+
+        if joint_vel_left is None:
+            left_vel = (math.nan,) * 5
+            right_vel = (math.nan,) * 5
+        else:
+            if len(joint_vel_left) != 5 or len(joint_vel_right) != 5:
+                raise ValueError("Each leg must provide exactly five joint velocities")
+            left_vel = tuple(map(float, joint_vel_left))
+            right_vel = tuple(map(float, joint_vel_right))
 
         if contact_left is None:
             contacts = (math.nan, math.nan)
@@ -200,6 +225,10 @@ class Plotter:
             self.left_joint_pos[name].append(angle)
         for name, angle in zip(RIGHT_JOINT_NAMES, right, strict=True):
             self.right_joint_pos[name].append(angle)
+        for name, rate in zip(LEFT_JOINT_NAMES, left_vel, strict=True):
+            self.left_joint_vel[name].append(rate)
+        for name, rate in zip(RIGHT_JOINT_NAMES, right_vel, strict=True):
+            self.right_joint_vel[name].append(rate)
         self.contact_left.append(contacts[0])
         self.contact_right.append(contacts[1])
         self.support_polygon_xy.append(polygon)
@@ -324,6 +353,44 @@ class Plotter:
 
         ax_right.set_xlabel("Simulation time (s)")
         self._fig_joints.tight_layout()
+
+    def _create_walking_limit_cycle_figures(self) -> None:
+        """Plot five joint phase portraits for each leg, preserving time order.
+
+        Each subplot contains one physical joint: x=q [rad], y=q_dot [rad/s].
+        NaNs from episode resets break the curves instead of joining cycles.
+        The curve is not forced closed; periodicity is an observed property.
+        """
+        for side, names, positions, velocities, attr in (
+            ("Left", LEFT_JOINT_NAMES, self.left_joint_pos,
+             self.left_joint_vel, "_fig_cycle_left"),
+            ("Right", RIGHT_JOINT_NAMES, self.right_joint_pos,
+             self.right_joint_vel, "_fig_cycle_right"),
+        ):
+            fig = getattr(self, attr)
+            if fig is not None and plt.fignum_exists(fig.number):
+                continue
+
+            fig, axes = plt.subplots(
+                nrows=2, ncols=3, figsize=(15, 8),
+                num=f"{side} leg walking limit cycles",
+            )
+            setattr(self, attr, fig)
+
+            for ax, joint in zip(axes.flat, names, strict=False):
+                ax.plot(
+                    positions[joint], velocities[joint],
+                    linewidth=1.2,
+                )
+                ax.set_title(joint)
+                ax.set_xlabel("Joint position (rad)")
+                ax.set_ylabel("Joint velocity (rad/s)")
+                ax.grid(True)
+
+            # Only five joints per leg: hide the spare sixth subplot.
+            axes.flat[-1].set_visible(False)
+            fig.suptitle(f"{side} leg - walking limit cycles", fontsize=14)
+            fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
 
     def _create_contact_figure(self) -> None:
         """Create Figure 3 for live binary foot contacts."""
@@ -530,7 +597,9 @@ class Plotter:
 
         states.csv: one row per policy sample, with raw joint rad and plot deg.
         support_polygon.csv: one row per hull vertex, no duplicated closing
-        vertex. A common sample_index (1-based) connects the two tables.
+        vertex. walking_limit_cycle.csv: synchronized joint positions (rad)
+        and joint velocities (rad/s) for MATLAB phase portraits.
+        A common sample_index (1-based) connects all three tables.
         """
         if not self.time_s:
             raise ValueError("Cannot export CSV: no samples were recorded")
@@ -555,6 +624,11 @@ class Plotter:
             **self.left_joint_pos,
             **self.right_joint_pos,
         }
+        # Validate the extra phase-portrait buffers independently.
+        for joint in LEFT_JOINT_NAMES:
+            series[f"{joint}_velocity"] = self.left_joint_vel[joint]
+        for joint in RIGHT_JOINT_NAMES:
+            series[f"{joint}_velocity"] = self.right_joint_vel[joint]
         for name, values in series.items():
             if len(values) != n:
                 raise ValueError(f"Buffer {name}: {len(values)} samples; expected {n}")
@@ -562,6 +636,7 @@ class Plotter:
         output_dir = self.get_output_dir(output_root)
         states_path = output_dir / "states.csv"
         polygon_path = output_dir / "support_polygon.csv"
+        cycle_path = output_dir / "walking_limit_cycle.csv"
         joints = (*LEFT_JOINT_NAMES, *RIGHT_JOINT_NAMES)
 
         header = [
@@ -581,20 +656,32 @@ class Plotter:
         with (
             states_path.open("w", newline="", encoding="utf-8") as fs,
             polygon_path.open("w", newline="", encoding="utf-8") as fp,
+            cycle_path.open("w", newline="", encoding="utf-8") as fc,
         ):
             writer = csv.writer(fs)
             vertices_writer = csv.writer(fp)
+            cycle_writer = csv.writer(fc)
             writer.writerow(header)
             vertices_writer.writerow([
                 "sample_index", "time_s", "vertex_index", "x_w_m", "y_w_m"
             ])
+            cycle_writer.writerow(
+                ["sample_index", "time_s"]
+                + [f"{name}_rad" for name in joints]
+                + [f"{name}_rad_s" for name in joints]
+            )
 
             for k, t in enumerate(self.time_s):
                 joint_rad = [
                     *[self.left_joint_pos[name][k] for name in LEFT_JOINT_NAMES],
                     *[self.right_joint_pos[name][k] for name in RIGHT_JOINT_NAMES],
                 ]
+                joint_vel = [
+                    *[self.left_joint_vel[name][k] for name in LEFT_JOINT_NAMES],
+                    *[self.right_joint_vel[name][k] for name in RIGHT_JOINT_NAMES],
+                ]
                 polygon = self.support_polygon_xy[k]
+                cycle_writer.writerow([k + 1, t, *joint_rad, *joint_vel])
                 writer.writerow([
                     k + 1, t,
                     self.vx_desired[k], self.vx_actual[k],
@@ -611,6 +698,7 @@ class Plotter:
 
         print(f"[CSV] Saved: {states_path}")
         print(f"[CSV] Saved: {polygon_path}")
+        print(f"[CSV] Saved: {cycle_path}")
         return output_dir
 
     def start_video(
@@ -666,7 +754,7 @@ class Plotter:
         video.close()
 
     def show(self) -> None:
-        """Create and render all four figures after the simulation finishes."""
+        """Create and render all six figures after the simulation finishes."""
         if not self.time_s:
             print("[Plotter] No policy samples to plot.")
             return
@@ -680,6 +768,7 @@ class Plotter:
         self._create_support_figure()
         self.refresh(force=True)
         self._create_joint_figure()
+        self._create_walking_limit_cycle_figures()
 
         plt.ioff()
         plt.show()
